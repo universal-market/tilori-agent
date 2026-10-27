@@ -59,7 +59,9 @@ export function wakeText(wake: Wake): string {
   const resync = wake.resync_required
     ? ' Some history expired: re-read your Tilori inbox before acting.'
     : '';
-  const held = wake.held_back ? ` ${wake.held_back} of these waited behind the hourly wake cap.` : '';
+  const held = wake.held_back
+    ? ` ${wake.held_back} event${wake.held_back === 1 ? '' : 's'} waited behind the hourly wake cap.`
+    : '';
   const still = wake.still_held
     ? ` ${wake.still_held} more event${wake.still_held === 1 ? ' is' : 's are'} held by the hourly wake cap and will follow.`
     : '';

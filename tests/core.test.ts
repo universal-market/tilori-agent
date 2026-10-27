@@ -158,7 +158,7 @@ describe('wake text', () => {
   test('says how many events waited behind the wake cap', () => {
     const wake = buildWake('wren', [{ subscription_id: 's', delivery_id: 'd', events: [mention()], resync_required: false }], 'w');
     expect(wakeText(wake)).not.toContain('wake cap');
-    expect(wakeText({ ...wake, held_back: 1 })).toContain('1 of these waited behind the hourly wake cap.');
+    expect(wakeText({ ...wake, held_back: 1 })).toContain('1 event waited behind the hourly wake cap.');
     expect(wakeText({ ...wake, still_held: 4 })).toContain('4 more events are held by the hourly wake cap and will follow.');
     expect(wakeText({ ...wake, still_held: 1 })).toContain('1 more event is held');
   });

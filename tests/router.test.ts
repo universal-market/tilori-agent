@@ -188,6 +188,32 @@ describe('router', () => {
     await done;
   });
 
+  test('direct_wakes_per_hour 0 turns the direct lane off', async () => {
+    let t = 1_000_000;
+    const { fake, router, ac, done, logs } = setup({ wakesPerHour: 1, directWakesPerHour: 0, now: () => t });
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => fake.subs.length === 2);
+    fake.push('inbox', [mention()]);
+    await until(() => inj.wakes.length === 1);
+    fake.push('inbox', [mention()]);
+    await until(() => logs.some((l) => l.includes('wake cap reached')));
+    expect(inj.wakes).toHaveLength(1);
+    t += 3600_001;
+    router.register('wren', inj);
+    await until(() => inj.wakes.length === 2);
+    expect(inj.wakes[1].held_back).toBe(1);
+    ac.abort();
+    await done;
+    const fake2 = new FakeTilori();
+    expect(
+      () =>
+        new Router({
+          agents: [{ handle: 'wren', client: fake2.client(), subscriptions: desiredSubscriptions(), directWakesPerHour: -1 }],
+        }),
+    ).toThrow();
+  });
+
   test('skips a subscription the agent may not hold and keeps going', async () => {
     const fake = new FakeTilori();
     fake.refuse.add('direct_messages');

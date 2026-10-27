@@ -54,8 +54,8 @@ interface AgentState {
   cfg: RouterAgentConfig;
   limiter: WakeLimiter;
   /** A separate allowance for direct signals, so broad traffic that used up
-   * `limiter` never starves a mention or direct message. */
-  directLimiter: WakeLimiter;
+   * `limiter` never starves a mention or direct message. Null when turned off. */
+  directLimiter: WakeLimiter | null;
   /** Subscriptions whose batches are direct signals (inbox, mentions, DMs). */
   directSubs: Set<string>;
   /** Batches (by delivery id) the wake cap has delayed, for the wake's count. */
@@ -94,6 +94,13 @@ interface AgentState {
 /** Scopes whose events are addressed to the agent itself. */
 const DIRECT_SCOPES = new Set(['inbox', 'mentions', 'direct_messages']);
 const isDirectKind = (kind: string) => kind === 'mention' || kind.startsWith('dm.');
+
+function directLimiter(perHour: number | undefined, now: () => number): WakeLimiter | null {
+  const n = perHour ?? DEFAULT_DIRECT_WAKES_PER_HOUR;
+  if (n === 0) return null;
+  if (!Number.isInteger(n) || n < 0) throw new Error('direct_wakes_per_hour must be a non-negative integer.');
+  return new WakeLimiter(n, now);
+}
 
 const errText = (cause: unknown) => (cause instanceof Error ? cause.message : String(cause));
 
@@ -135,7 +142,7 @@ export class Router {
       this.#agents.set(cfg.handle, {
         cfg,
         limiter: new WakeLimiter(cfg.wakesPerHour ?? DEFAULT_WAKES_PER_HOUR, this.#now),
-        directLimiter: new WakeLimiter(cfg.directWakesPerHour ?? DEFAULT_DIRECT_WAKES_PER_HOUR, this.#now),
+        directLimiter: directLimiter(cfg.directWakesPerHour, this.#now),
         directSubs: new Set(),
         capHeld: new Set(),
         injectors: [],
@@ -260,6 +267,7 @@ export class Router {
       }
       // Held batches stay unacknowledged on Tilori and are re-served next generation.
       pending.clear();
+      st.capHeld.clear();
       // A generation that ended at once (a subscription keeps vanishing) backs off.
       if (signal?.aborted) return;
       quickRestarts = Date.now() - started < 5_000 ? quickRestarts + 1 : 0;
@@ -496,7 +504,8 @@ export class Router {
         return this.#retryMs * 5;
       }
       // Over the cap, direct batches (inbox, mentions, DMs) still wake on
-      // their own allowance; broad traffic waits and coalesces.
+      // their own allowance; broad traffic waits and coalesces. A broad batch
+      // with any mention or dm.* event goes out whole (acks are per batch).
       let send = fresh;
       let limiter = st.limiter;
       const capWait = st.limiter.waitMs();
@@ -504,7 +513,7 @@ export class Router {
         const direct = fresh.filter(
           (d) => st.directSubs.has(d.subscription_id) || d.events.some((e) => isDirectKind(e.kind)),
         );
-        const directWait = direct.length ? st.directLimiter.waitMs() : Infinity;
+        const directWait = direct.length && st.directLimiter ? st.directLimiter.waitMs() : Infinity;
         for (const d of fresh) if (directWait > 0 || !direct.includes(d)) st.capHeld.add(d.delivery_id);
         if (directWait > 0) {
           st.stats.delayed = count;
@@ -514,11 +523,13 @@ export class Router {
           return Math.min(capWait, directWait, 60_000);
         }
         send = direct;
-        limiter = st.directLimiter;
+        limiter = st.directLimiter!;
       }
       const wake = buildWake(handle, send, randomUUID());
-      const heldBack = send.filter((d) => st.capHeld.has(d.delivery_id)).reduce((n, d) => n + d.events.length, 0);
-      const stillHeld = fresh.reduce((n, d) => n + d.events.length, 0) - wake.events.length;
+      // Counted from batches, not wake.events, which may be deduplicated.
+      const events = (ds: AgentDelivery[]) => ds.reduce((n, d) => n + d.events.length, 0);
+      const stillHeld = events(fresh) - events(send);
+      const heldBack = events(send.filter((d) => st.capHeld.has(d.delivery_id)));
       if (heldBack) wake.held_back = heldBack;
       if (stillHeld) wake.still_held = stillHeld;
       // Exactly one deliver is in flight per agent: this loop awaits it with

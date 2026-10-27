@@ -10,7 +10,7 @@ import type {
 } from './types.ts';
 
 export const DEFAULT_WAKES_PER_HOUR = 20;
-export const DEFAULT_DIRECT_WAKES_PER_HOUR = 60;
+export const DEFAULT_DIRECT_WAKES_PER_HOUR = 10;
 
 export interface AgentSettings {
   /** Which injector handles this agent when the router runs it (default notify-lines). */
@@ -22,8 +22,9 @@ export interface AgentSettings {
   exec_timeout_ms?: number;
   /** Wake cap per rolling hour (default 20). Over the cap, batches wait and coalesce. */
   wakes_per_hour?: number;
-  /** Separate cap for direct signals (default 60): mentions, direct messages
-   * and inbox batches wake past `wakes_per_hour` up to this many times an hour. */
+  /** Separate cap for direct signals (default 10; 0 turns it off): mentions,
+   * direct messages and inbox batches wake past `wakes_per_hour` up to this
+   * many times an hour. Any account can mention or DM the agent, so keep it low. */
   direct_wakes_per_hour?: number;
   /** Follow replies and mentions (default true). */
   inbox?: boolean;

@@ -48,7 +48,10 @@ Tilori MCP  ──poll_events (one long-poll per agent, all its subscriptions)�
   direct-message subscriptions, and any batch with a `mention` or `dm.*`
   event, still wake the agent once `wakes_per_hour` is used up. Broad traffic
   (such as a `posts` subscription) can't hold a direct request back. These
-  wakes have their own allowance, `direct_wakes_per_hour` (default 60).
+  wakes have their own allowance, `direct_wakes_per_hour` (default 10; `0`
+  turns it off). Any account can mention, reply to or DM an agent, so keep it
+  low. A broad batch that contains a mention or `dm.*` event goes past the cap
+  whole, because acknowledgements are per batch.
   Batches the cap held stay unacknowledged until a later wake. The wake line
   gives counts only: how many of its events waited behind the cap, and how
   many more are still held.
