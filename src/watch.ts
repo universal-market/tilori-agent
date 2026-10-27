@@ -1,5 +1,5 @@
 import { TiloriAgentClient } from './client.ts';
-import { desiredSubscriptions, resolveUrl, type TiloriConfig } from './config.ts';
+import { desiredSubscriptions, reminderSettings, resolveUrl, type TiloriConfig } from './config.ts';
 import { NotifyLinesInjector } from './injectors/notify-lines.ts';
 import { attachToRouter, probeRouter, socketIdentity, socketPath } from './ipc.ts';
 import { readKey } from './keys.ts';
@@ -34,6 +34,7 @@ export function directRouter(opts: NotifyLinesOptions): Router {
         subscriptions: desiredSubscriptions(settings),
         wakesPerHour: settings.wakes_per_hour,
         directWakesPerHour: settings.direct_wakes_per_hour,
+        reminder: reminderSettings(settings),
       },
     ],
     logger: opts.logger,

@@ -11,6 +11,17 @@ import type {
 
 export const DEFAULT_WAKES_PER_HOUR = 20;
 export const DEFAULT_DIRECT_WAKES_PER_HOUR = 10;
+export const MIN_REMINDER_MINUTES = 15;
+export const MAX_REMINDER_PROMPT = 1000;
+
+export interface ReminderSettings {
+  /** Minutes between reminders (at least 15). */
+  every_minutes: number;
+  /** The reminder's text: your own words, sent to the session as is. */
+  prompt: string;
+  /** Skip the reminder when the agent had any wake within the interval (default true). */
+  only_when_idle?: boolean;
+}
 
 export interface AgentSettings {
   /** Which injector handles this agent when the router runs it (default notify-lines). */
@@ -32,6 +43,48 @@ export interface AgentSettings {
   direct_messages?: boolean;
   /** Extra raw subscriptions. */
   subscriptions?: SubscriptionSpec[];
+  /** A periodic wake with your own text (off unless set). Counts against
+   * `wakes_per_hour`. */
+  reminder?: ReminderSettings;
+}
+
+/** A validated reminder, as the router uses it. */
+export interface Reminder {
+  everyMs: number;
+  prompt: string;
+  onlyWhenIdle: boolean;
+}
+
+/** Whether a reminder prompt may go into a wake: a nonblank string of at
+ * most MAX_REMINDER_PROMPT characters with no control characters other than
+ * newlines and tabs. Used for config and again for wakes received over IPC. */
+export function validReminderPrompt(prompt: unknown): prompt is string {
+  return (
+    typeof prompt === 'string' &&
+    prompt.trim().length > 0 &&
+    prompt.length <= MAX_REMINDER_PROMPT &&
+    !/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029]/.test(prompt)
+  );
+}
+
+/** Validates an agent's `reminder` setting. Undefined when unset; throws on
+ * a bad value, so a typo never silently turns reminders off or floods. */
+export function reminderSettings(settings: AgentSettings = {}): Reminder | undefined {
+  const r = settings.reminder;
+  if (r === undefined) return undefined;
+  if (!r || typeof r !== 'object' || Array.isArray(r)) throw new Error('reminder must be an object.');
+  if (!Number.isInteger(r.every_minutes) || r.every_minutes < MIN_REMINDER_MINUTES) {
+    throw new Error(`reminder.every_minutes must be an integer of at least ${MIN_REMINDER_MINUTES}.`);
+  }
+  if (!validReminderPrompt(r.prompt)) {
+    throw new Error(
+      `reminder.prompt must be nonblank text of at most ${MAX_REMINDER_PROMPT} characters, without control characters.`,
+    );
+  }
+  if (r.only_when_idle !== undefined && typeof r.only_when_idle !== 'boolean') {
+    throw new Error('reminder.only_when_idle must be true or false.');
+  }
+  return { everyMs: r.every_minutes * 60_000, prompt: r.prompt, onlyWhenIdle: r.only_when_idle ?? true };
 }
 
 export interface TiloriConfig {

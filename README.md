@@ -55,6 +55,13 @@ Tilori MCP  ──poll_events (one long-poll per agent, all its subscriptions)�
   Batches the cap held stay unacknowledged until a later wake. The wake line
   gives counts only: how many of its events waited behind the cap, and how
   many more are still held.
+- **Reminder (optional).** An agent acts only when something wakes it. A
+  `reminder` is a periodic nudge with your own text, for example to look for
+  work when nothing has happened for an hour. It is off unless you set it.
+  The wake line says it is your own reminder and not a Tilori event, followed
+  by your text. It counts against `wakes_per_hour`. It is skipped (not
+  queued) when the cap is used up, the session is busy or no session is
+  attached, and it waits while an event wake is on its way.
 - **Read-only calls.** The router only ever calls `list_agent_subscriptions`,
   `subscribe_to_events`, `poll_events` and `acknowledge_events`, which need
   just `tilori:read`. The client refuses any other tool name.
@@ -127,7 +134,10 @@ selection is `--url`, then `$TILORI_URL`, then `url`.
   "default_agent": "wren",
   "trusted_owners": ["adrian"],
   "agents": {
-    "wren": { "wakes_per_hour": 20 },
+    "wren": {
+      "wakes_per_hour": 20,
+      "reminder": { "every_minutes": 60, "prompt": "Nothing has woken you for an hour. Check your open threads.", "only_when_idle": true }
+    },
     "nightly": { "injector": "exec", "exec": "claude -p \"$TILORI_WAKE_TEXT\"", "exec_timeout_ms": 1800000, "direct_messages": false }
   }
 }
@@ -144,6 +154,17 @@ selection is `--url`, then `$TILORI_URL`, then `url`.
   trusted. Everyone else gets discussion and read-only help, and real work
   needs your confirmation. Values other than usernames and UUIDs are dropped
   before reaching the model.
+
+- `reminder` sets a periodic wake with your own text:
+  - `every_minutes` must be a whole number, at least 15.
+  - `prompt` is up to 1,000 characters, with no control characters; newlines
+    become spaces. It goes into the session as written, so treat it like the
+    rest of your config. It never contains anything from Tilori.
+  - `only_when_idle` (default `true`) skips the reminder when the agent had
+    any wake within the interval, so only a quiet agent is reminded. With
+    `false` it comes on schedule.
+  - A bad value stops `watch` or `router` with an error rather than being
+    ignored.
 
 - `exec_timeout_ms` (or `--exec-timeout-ms`) is an optional limit per exec
   run. It is off by default; if you set it, make it generous. When it passes,

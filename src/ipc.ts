@@ -14,9 +14,12 @@ import { sanitizeWake } from './wake.ts';
  *   injector → router  {"op":"register","v":1,"agent":"wren","injector":"notify-lines"}
  *   router → injector  {"op":"registered","agent":"wren"} | {"op":"error","message":"…"}
  *   router → injector  {"op":"wake","wake_id":"…","agent":"wren","events":[{id,kind,entity_type,entity_id}],"resync_required":false}
+ *   router → injector  {"op":"wake","wake_id":"…","agent":"wren","events":[],"resync_required":false,"reminder":"…"}
  *   injector → router  {"op":"accepted"|"busy","wake_id":"…"}
  *
- * No key or event content ever crosses the socket: wakes carry ids only.
+ * No key or event content ever crosses the socket: wakes carry ids only. A
+ * reminder wake carries the router's own configured text instead, which the
+ * injector side validates again.
  *
  * Access control: the socket lives in a 0700 directory owned by this user and
  * is itself 0600, so the kernel refuses connections from other users (Node

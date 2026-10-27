@@ -99,6 +99,9 @@ export interface Wake {
   /** Events still waiting behind the cap, not in this wake (a direct wake
    * that went past the cap). */
   still_held?: number;
+  /** Set on a reminder wake: the operator's own reminder text from config,
+   * never server data. A reminder wake has no events. */
+  reminder?: string;
 }
 
 export type DeliverResult = 'accepted' | 'busy' | 'gone';
