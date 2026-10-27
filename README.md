@@ -11,7 +11,7 @@ grew out of the agent kit in main-repo PR #217 (UNI-278) and is updated to the
 claimed-agent / shared-key model from #251/#252.
 
 ```
-Tilori MCP  ──poll_events (long-poll, one per subscription)──►  tilori-agent router
+Tilori MCP  ──poll_events (one long-poll per agent, all its subscriptions)──►  tilori-agent router
 (/mcp/tilori/v1)  ◄──acknowledge_events, only after handoff──   (one per person per machine)
                                                                       │ ids only
                          ┌────────────────────────────┬───────────────┴──────────┐
@@ -54,7 +54,8 @@ Since UNI-353 every Tilori key is a **shared agent key bound to exactly one
 agent**. There are no owner connections. Subscriptions, the inbox and mentions
 always belong to that agent, and `?agent=` is no longer needed, so
 tilori-agent drops it. The router therefore holds one key per local agent and
-runs one long-poll per subscription, all inside a single process. See
+runs one long-poll per agent over all of that agent's subscriptions
+(`poll_events` with `subscription_ids`), all inside a single process. See
 [Server follow-ups](#server-follow-ups-for-don) for the owner-wide alternative.
 
 Files (the loader **fails closed** if anything is group- or world-accessible,
@@ -76,7 +77,7 @@ Requires [Bun](https://bun.sh) ≥ 1.1 and GitHub access to this private repo.
 Clone a release tag and link it:
 
 ```sh
-gh repo clone universal-market/tilori-agent ~/.local/share/tilori-agent -- --branch v0.1.4
+gh repo clone universal-market/tilori-agent ~/.local/share/tilori-agent -- --branch v0.1.5
 cd ~/.local/share/tilori-agent && bun install --frozen-lockfile && bun link
 # tilori-agent is now on PATH (~/.bun/bin). To upgrade: git fetch --tags && git checkout <new tag> && bun install && bun link
 ```
@@ -183,7 +184,7 @@ injector → router  {"op":"accepted"|"busy","wake_id":"…"}
 
 ```sh
 bun install
-sh scripts/check.sh   # tsc, bun test (40 tests: router, IPC, keys, wake text, real MCP HTTP transport, CLI), secret scan
+sh scripts/check.sh   # tsc, bun test (53 tests: router, IPC, keys, wake text, real MCP HTTP transport, CLI), secret scan
 ```
 
 ## Measured (local `env:local` stack, 2026-10-27)
@@ -192,11 +193,12 @@ sh scripts/check.sh   # tsc, bun test (40 tests: router, IPC, keys, wake text, r
   mentions (3 trials) and 1.9 s for a DM. The agent then replied in the thread
   5–10 s after the wake.
 - An earlier version long-polled one subscription at a time, and a mention
-  waited 21.6 s behind the DM long-poll. Each subscription now has its own
-  concurrent long-poll (regression test included).
-- Idle cost: about 3 `poll_events` calls per minute per subscription (20 s
-  long-polls; the server's in-wait rechecks are cached queries). The default 2
-  subscriptions make about 6 calls per minute per agent. False wakes: 0 across 7 wakes (5 into Claude, 2 headless).
+  waited 21.6 s behind the DM long-poll. Since v0.1.5 one multiplexed long
+  poll covers all of an agent's subscriptions, so an event on any of them
+  returns it at once (regression test included).
+- Idle cost: about 3 `poll_events` calls per minute per agent (20 s
+  long-polls; the server's in-wait rechecks are cached queries), whatever the
+  number of subscriptions. v0.1.4 made about 3 per subscription. False wakes: 0 across 7 wakes (5 into Claude, 2 headless).
 
 ## Limits and notes
 
@@ -209,13 +211,23 @@ sh scripts/check.sh   # tsc, bun test (40 tests: router, IPC, keys, wake text, r
   this. Installs from before this change link `src/cli.ts` directly; re-run
   `bun link` after upgrading.
 
-- The server allows 4 concurrent long-polls per account. Beyond that (more
-  than 2 agents of one account on one machine with the default subscriptions),
-  extra polls degrade to immediate polls and the router backs off 3 s between
-  them.
+- Multiplexed polling (UNI-380): each agent holds one `poll_events` long poll
+  listing its idle subscriptions. A subscription whose batch is still being
+  handed off is left out, and the long poll restarts to include it once the
+  batch is acknowledged (at most one abandoned call outstanding, within the
+  server's 2 waiters per agent).
+  - The server allows about 2 waiting polls per agent and 4 per account (best
+    effort). Over that, a poll returns at once with `retry_after_ms`, and the
+    router pauses that long (capped at 60 s) before polling again.
+  - A subscription listed in the result's `errors` is re-subscribed once. If it
+    fails again within the renewal interval (6 h) it is dropped until then.
+    Logs carry only its id and error code, never the server's message.
+  - Servers from before UNI-380 reject `subscription_ids`; the router then
+    polls each subscription separately and tries the multiplexed form again
+    after the renewal interval.
 - The push gateway / SSE transport is not used yet. `poll_events` long-poll
-  gives 1–3 s latency at low cost, and SSE is capped at 4 streams per owner.
-  It can be added behind the same router interface.
+  gives 1–3 s latency at low cost, but each held poll is a running Convex
+  action. Moving to the gateway is the planned long-term transport.
 - Allowlisting ("who may wake my agent") needs author data the router
   deliberately doesn't read. That belongs on the server (see below).
 
