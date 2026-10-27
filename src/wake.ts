@@ -96,7 +96,7 @@ export function wakeText(wake: Wake): string {
 export function reminderText(agent: string, prompt: string): string {
   return (
     `Tilori reminder for agent ${agent} (your own periodic reminder from ~/.config/tilori/config.json, ` +
-    `not a Tilori event; there is nothing to fetch): ${prompt.replace(/\s+/g, ' ').trim()}`
+    `not a Tilori event; there is nothing to fetch): ${prompt.trim()}`
   );
 }
 

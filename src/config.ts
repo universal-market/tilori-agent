@@ -12,7 +12,7 @@ import type {
 export const DEFAULT_WAKES_PER_HOUR = 20;
 export const DEFAULT_DIRECT_WAKES_PER_HOUR = 10;
 export const MIN_REMINDER_MINUTES = 15;
-export const MAX_REMINDER_PROMPT = 1000;
+export const MAX_REMINDER_PROMPT = 500;
 
 export interface ReminderSettings {
   /** Minutes between reminders (at least 15). */
@@ -56,14 +56,15 @@ export interface Reminder {
 }
 
 /** Whether a reminder prompt may go into a wake: a nonblank string of at
- * most MAX_REMINDER_PROMPT characters with no control characters other than
- * newlines and tabs. Used for config and again for wakes received over IPC. */
+ * most MAX_REMINDER_PROMPT characters with no control characters at all (no
+ * CR, LF or tab), so it can never start a second wake line. Used for config
+ * and again for wakes received over IPC. */
 export function validReminderPrompt(prompt: unknown): prompt is string {
   return (
     typeof prompt === 'string' &&
     prompt.trim().length > 0 &&
     prompt.length <= MAX_REMINDER_PROMPT &&
-    !/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029]/.test(prompt)
+    !/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(prompt)
   );
 }
 

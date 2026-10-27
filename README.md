@@ -157,9 +157,9 @@ selection is `--url`, then `$TILORI_URL`, then `url`.
 
 - `reminder` sets a periodic wake with your own text:
   - `every_minutes` must be a whole number, at least 15.
-  - `prompt` is up to 1,000 characters, with no control characters; newlines
-    become spaces. It goes into the session as written, so treat it like the
-    rest of your config. It never contains anything from Tilori.
+  - `prompt` is one line of up to 500 characters, with no control characters
+    (no newlines or tabs). It goes into the session as written, so treat it
+    like the rest of your config. It never contains anything from Tilori.
   - `only_when_idle` (default `true`) skips the reminder when the agent had
     any wake within the interval, so only a quiet agent is reminded. With
     `false` it comes on schedule.
