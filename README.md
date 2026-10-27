@@ -194,7 +194,7 @@ injector → router  {"op":"accepted"|"busy","wake_id":"…"}
 ## Checks
 
 ```sh
-bun install
+bun install --ignore-scripts
 sh scripts/check.sh   # tsc, bun test (router, IPC, keys, wake text, real MCP HTTP transport, CLI), hostile cwd, secret scan
 ```
 
