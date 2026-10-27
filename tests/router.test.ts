@@ -47,23 +47,27 @@ describe('router', () => {
     );
   });
 
-  test('the same post from overlapping subscriptions makes one wake, as a mention', async () => {
-    const subscriptions = desiredSubscriptions({ direct_messages: false, subscriptions: [{ scope: { type: 'posts' } }] });
-    const { fake, router, ac, done } = setup({ coalesceMs: 200, subscriptions });
-    await until(() => fake.subs.length === 2);
-    const inj = new Recorder();
-    router.register('wren', inj);
-    const post = mention();
-    fake.push('posts', [{ ...post, id: crypto.randomUUID(), kind: 'post.created' }]);
-    await Bun.sleep(50);
-    fake.push('inbox', [post]);
-    await until(() => fake.acks.length === 2);
-    expect(inj.wakes).toHaveLength(1);
-    expect(inj.wakes[0].events).toHaveLength(1);
-    expect(inj.wakes[0].events[0]).toMatchObject({ kind: 'mention', entity_id: post.entity_id });
-    ac.abort();
-    await done;
-  });
+  for (const legacy of [false, true]) {
+    test(`the same post from overlapping subscriptions makes one wake, as a mention (${legacy ? 'per-subscription' : 'multiplexed'} poll)`, async () => {
+      const subscriptions = desiredSubscriptions({ direct_messages: false, subscriptions: [{ scope: { type: 'posts' } }] });
+      const { fake, router, ac, done } = setup({ coalesceMs: 500, subscriptions });
+      fake.legacy = legacy;
+      await until(() => fake.subs.length === 2);
+      const inj = new Recorder();
+      router.register('wren', inj);
+      const post = mention();
+      fake.push('posts', [{ ...post, id: crypto.randomUUID(), kind: 'post.created' }]);
+      await until(() => fake.polls.some((p) => p.ids.length === 1));
+      fake.push('inbox', [post]);
+      await until(() => fake.acks.length === 2);
+      expect(fake.polls.some((p) => p.multi)).toBe(!legacy);
+      expect(inj.wakes).toHaveLength(1);
+      expect(inj.wakes[0].events).toHaveLength(1);
+      expect(inj.wakes[0].events[0]).toMatchObject({ kind: 'mention', entity_id: post.entity_id });
+      ac.abort();
+      await done;
+    });
+  }
 
   test('acks only after the injector accepts; holds while none is registered', async () => {
     const { fake, router, ac, done, logs } = setup();
@@ -321,6 +325,165 @@ describe('router', () => {
     expect(calls).toBeGreaterThanOrEqual(3);
     expect(calls).toBeLessThanOrEqual(7);
     expect(fake.acks).toHaveLength(0);
+    ac.abort();
+    await done;
+  });
+
+  test('one multiplexed long poll per agent, listing every idle subscription', async () => {
+    const { fake, router, ac, done } = setup();
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => fake.subs.length === 2);
+    await until(() => fake.polls.length >= 3);
+    expect(fake.polls.every((p) => p.multi)).toBe(true);
+    expect(fake.polls[0].ids.sort()).toEqual(fake.subs.map((s) => s.id).sort());
+    expect(fake.maxWaiting).toBe(1);
+    fake.push('direct_messages', [dm()]);
+    fake.push('inbox', [mention()]);
+    await until(() => fake.acks.length === 2);
+    expect(inj.wakes.flatMap((w) => w.events)).toHaveLength(2);
+    ac.abort();
+    await done;
+  });
+
+  test('a held subscription is left out, and the long poll restarts to include it once acked', async () => {
+    const fake = new FakeTilori();
+    const router = new Router({
+      agents: [{ handle: 'wren', client: fake.client(), subscriptions: desiredSubscriptions() }],
+      waitMs: 20_000,
+      retryMs: 10,
+      coalesceMs: 0,
+    });
+    let calls = 0;
+    const slow: Injector = {
+      kind: 'test',
+      deliver: async () => {
+        calls++;
+        await new Promise((r) => setTimeout(r, 200));
+        return 'accepted';
+      },
+    };
+    router.register('wren', slow);
+    const ac = new AbortController();
+    const done = router.run(ac.signal);
+    await until(() => fake.subs.length === 2);
+    const inbox = fake.subs.find((s) => s.scope.type === 'inbox')!.id;
+    fake.push('inbox', [mention()]);
+    // While the inbox batch is held, the poll lists only direct_messages.
+    await until(() => fake.polls.some((p) => p.ids.length === 1 && !p.ids.includes(inbox)), 1000);
+    await until(() => fake.acks.length === 1, 1000);
+    const t0 = Date.now();
+    fake.push('inbox', [mention()]);
+    await until(() => fake.acks.length === 2, 1000);
+    expect(Date.now() - t0).toBeLessThan(800);
+    expect(calls).toBe(2);
+    // The abandoned call plus its replacement: within the server's 2 per agent.
+    expect(fake.maxWaiting).toBeLessThanOrEqual(2);
+    ac.abort();
+    await done;
+  });
+
+  test('falls back to one poll per subscription when the server rejects subscription_ids', async () => {
+    const { fake, router, ac, done, logs } = setup();
+    fake.legacy = true;
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => fake.subs.length === 2);
+    await until(() => logs.some((l) => l.includes('does not accept subscription_ids')));
+    fake.push('direct_messages', [dm()]);
+    await until(() => fake.acks.length === 1);
+    expect(inj.wakes).toHaveLength(1);
+    expect(fake.polls.length).toBeGreaterThan(0);
+    expect(fake.polls.every((p) => !p.multi)).toBe(true);
+    expect(logs.filter((l) => l.includes('does not accept'))).toHaveLength(1);
+    ac.abort();
+    await done;
+  });
+
+  test('a per-id poll error re-subscribes it once; the others keep being served', async () => {
+    const { fake, router, ac, done, logs } = setup();
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => fake.subs.length === 2);
+    const inbox = fake.subs.find((s) => s.scope.type === 'inbox')!.id;
+    fake.failOnce.set(inbox, 'SUBSCRIPTION_DISABLED');
+    await until(() => fake.renewals.includes(inbox));
+    fake.push('inbox', [mention()]);
+    await until(() => fake.acks.length === 1);
+    const line = logs.find((l) => l.includes('re-subscribing'))!;
+    expect(line).toContain(inbox);
+    expect(line).toContain('SUBSCRIPTION_DISABLED');
+    expect(logs.join('\n')).not.toContain('secret text');
+    expect(logs.some((l) => l.includes('dropping'))).toBe(false);
+    ac.abort();
+    await done;
+  });
+
+  test('a subscription that keeps failing is dropped (id logged only) and the rest still wake', async () => {
+    const { fake, router, ac, done, logs } = setup();
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => fake.subs.length === 2);
+    const inbox = fake.subs.find((s) => s.scope.type === 'inbox')!.id;
+    fake.failingSubs.set(inbox, 'POST_UNAVAILABLE');
+    await until(() => logs.some((l) => l.includes('dropping')));
+    const before = fake.polls.length;
+    fake.push('direct_messages', [dm()]);
+    await until(() => fake.acks.length === 1);
+    expect(fake.polls.slice(before).every((p) => !p.ids.includes(inbox))).toBe(true);
+    expect(fake.renewals.filter((id) => id === inbox)).toHaveLength(1);
+    expect(logs.find((l) => l.includes('dropping'))).toBe(
+      `[wren] dropping subscription ${inbox} (POST_UNAVAILABLE) until the next renewal`,
+    );
+    expect(logs.join('\n')).not.toContain('secret text');
+    ac.abort();
+    await done;
+  });
+
+  test('a vanished subscription refuses the whole call and is re-created', async () => {
+    const { fake, router, ac, done } = setup();
+    router.register('wren', new Recorder());
+    await until(() => fake.subs.length === 2);
+    const inbox = fake.subs.find((s) => s.scope.type === 'inbox')!.id;
+    fake.subs = fake.subs.filter((s) => s.id !== inbox);
+    await until(() => fake.subs.length === 2);
+    fake.push('inbox', [mention()]);
+    await until(() => fake.acks.length === 1);
+    ac.abort();
+    await done;
+  });
+
+  test('honours retry_after_ms when over the server waiter budget', async () => {
+    const { fake, router, ac, done } = setup();
+    router.register('wren', new Recorder());
+    await until(() => fake.subs.length === 2);
+    fake.retryAfterMs = 300;
+    fake.overBudget = 1;
+    await until(() => fake.overBudgetAt.length === 1);
+    const at = fake.overBudgetAt[0];
+    await until(() => fake.pollTimes.some((t) => t > at));
+    expect(fake.pollTimes.find((t) => t > at)! - at).toBeGreaterThanOrEqual(280);
+    ac.abort();
+    await done;
+  });
+
+  test('honours retry_after_ms in the single-id fallback too', async () => {
+    const { fake, router, ac, done, logs } = setup();
+    fake.legacy = true;
+    router.register('wren', new Recorder());
+    await until(() => logs.some((l) => l.includes('does not accept')));
+    fake.retryAfterMs = 300;
+    fake.overBudget = 1;
+    await until(() => fake.overBudgetAt.length === 1);
+    const [at, id] = [fake.overBudgetAt[0], fake.overBudgetIds[0]];
+    const n = fake.polls.length;
+    await new Promise((r) => setTimeout(r, 150));
+    // That subscription paused; the other kept polling every ~10 ms.
+    const later = fake.polls.slice(n);
+    expect(later.length).toBeGreaterThan(3);
+    expect(later.some((p) => p.ids[0] === id)).toBe(false);
+    await until(() => fake.polls.slice(n).some((p) => p.ids[0] === id));
+    expect(Date.now() - at).toBeGreaterThanOrEqual(280);
     ac.abort();
     await done;
   });

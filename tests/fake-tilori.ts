@@ -14,6 +14,27 @@ export class FakeTilori implements McpToolCaller {
   failNextPolls = 0;
   failAcks = 0;
   refuse = new Set<string>();
+  /** Behave like a server from before UNI-380: refuse subscription_ids. */
+  legacy = false;
+  /** poll_events argument shapes seen, for assertions. */
+  polls: Array<{ ids: string[]; multi: boolean }> = [];
+  /** Per-subscription refusals reported in a multiplexed poll's `errors`. */
+  failingSubs = new Map<string, string>();
+  /** Like failingSubs, but cleared when the subscription is renewed. */
+  failOnce = new Map<string, string>();
+  /** Ids of subscriptions renewed by subscribe_to_events. */
+  renewals: string[] = [];
+  /** Start times of multiplexed polls. */
+  pollTimes: number[] = [];
+  /** Next N waiting polls return at once with retry_after_ms. */
+  overBudget = 0;
+  retryAfterMs = 50;
+  /** When each over-budget answer was given. */
+  overBudgetAt: number[] = [];
+  overBudgetIds: string[] = [];
+  /** Polls currently waiting server-side, and the most seen at once. */
+  waiting = 0;
+  maxWaiting = 0;
 
   push(scopeType: string, events: DeliveredEvent[]) {
     const sub = this.subs.find((s) => s.scope.type === scopeType);
@@ -38,11 +59,22 @@ export class FakeTilori implements McpToolCaller {
       case 'subscribe_to_events': {
         const scope = normalizeScope(a.scope as any);
         if (this.refuse.has(scope.type)) return err(`Missing scope for ${scope.type}`);
+        const exclude_self = (a.exclude_self as boolean) ?? true;
+        const filter = normalizeFilter(a.filter as any);
+        // Like the server, the same scope, exclude_self and filter renew one subscription.
+        const same = this.subs.find(
+          (s) => JSON.stringify([s.scope, s.exclude_self, s.filter]) === JSON.stringify([scope, exclude_self, filter]),
+        );
+        if (same) {
+          this.renewals.push(same.id);
+          this.failOnce.delete(same.id);
+          return ok({ subscription: same });
+        }
         const sub: AgentSubscription = {
           id: randomUUID(),
           scope,
-          exclude_self: (a.exclude_self as boolean) ?? true,
-          filter: normalizeFilter(a.filter as any),
+          exclude_self,
+          filter,
           cursor: '1',
           expires_at: new Date(Date.now() + 30 * 86400_000).toISOString(),
         };
@@ -54,7 +86,52 @@ export class FakeTilori implements McpToolCaller {
           this.failNextPolls--;
           throw new Error('network down Bearer abcdefghijklmnop');
         }
+        if (a.subscription_ids !== undefined) {
+          if (this.legacy) {
+            return {
+              isError: true,
+              structuredContent: { error: { code: 'INVALID_ARGUMENT', message: "Unrecognized key: \"subscription_ids\"; subscription_id: Invalid input: expected string, received undefined" } },
+              content: [{ type: 'text', text: 'invalid' }],
+            };
+          }
+          const ids = (a.subscription_ids as string[]).map(String);
+          this.polls.push({ ids, multi: true });
+          const live = new Set(this.subs.map((s) => s.id));
+          if (!ids.every((id) => live.has(id))) return err('Subscription unavailable');
+          if (Number(a.wait_ms ?? 0) > 0 && this.overBudget > 0) {
+            this.overBudget--;
+            this.overBudgetAt.push(Date.now());
+            return ok({ deliveries: [], errors: [], retry_after_ms: this.retryAfterMs });
+          }
+          this.pollTimes.push(Date.now());
+          const failing = (id: string) => this.failingSubs.get(id) ?? this.failOnce.get(id);
+          const errors = ids
+            .filter((id) => failing(id))
+            .map((id) => ({ subscription_id: id, error_code: failing(id)!, message: 'Post unavailable: secret text' }));
+          const ok_ids = ids.filter((id) => !failing(id));
+          const ready = () => ok_ids.some((id) => this.outstanding.get(id) || this.queues.get(id)?.length);
+          const end = Date.now() + Number(a.wait_ms ?? 0);
+          const signal = options?.signal;
+          this.waiting++;
+          this.maxWaiting = Math.max(this.maxWaiting, this.waiting);
+          // Like the server, an abandoned call keeps its waiter until the
+          // deadline (or until something is ready), but the client stops at once.
+          const serverSide = (async () => {
+            while (!errors.length && !ready() && Date.now() < end) await new Promise((r) => setTimeout(r, 5));
+            this.waiting--;
+          })();
+          await Promise.race([
+            serverSide,
+            new Promise<void>((_, reject) => {
+              if (signal?.aborted) reject(new Error('aborted'));
+              signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+            }),
+          ]);
+          const deliveries = ok_ids.map((id) => this.take(id)).filter((d): d is AgentDelivery => d !== null);
+          return ok({ deliveries, errors });
+        }
         const id = String(a.subscription_id);
+        this.polls.push({ ids: [id], multi: false });
         // Long-poll like the server: wait for a batch or until wait_ms passes.
         const end = Date.now() + Number(a.wait_ms ?? 0);
         while (
@@ -65,15 +142,13 @@ export class FakeTilori implements McpToolCaller {
         ) {
           await new Promise((r) => setTimeout(r, 5));
         }
-        let d = this.outstanding.get(id) ?? null;
-        if (!d) {
-          const events = this.queues.get(id)?.shift();
-          if (events) {
-            d = { subscription_id: id, delivery_id: randomUUID(), events, resync_required: false };
-            this.outstanding.set(id, d);
-          }
+        if (Number(a.wait_ms ?? 0) > 0 && this.overBudget > 0 && !this.outstanding.get(id) && !this.queues.get(id)?.length) {
+          this.overBudget--;
+          this.overBudgetAt.push(Date.now());
+          this.overBudgetIds.push(id);
+          return ok({ delivery: null, retry_after_ms: this.retryAfterMs });
         }
-        return ok({ delivery: d });
+        return ok({ delivery: this.take(id) });
       }
       case 'acknowledge_events': {
         if (this.failAcks > 0) {
@@ -89,6 +164,19 @@ export class FakeTilori implements McpToolCaller {
       }
     }
     return err(`unexpected tool ${name}`);
+  }
+
+  /** The pending batch for a subscription, or the next queued one. */
+  take(id: string): AgentDelivery | null {
+    let d = this.outstanding.get(id) ?? null;
+    if (!d) {
+      const events = this.queues.get(id)?.shift();
+      if (events) {
+        d = { subscription_id: id, delivery_id: randomUUID(), events, resync_required: false };
+        this.outstanding.set(id, d);
+      }
+    }
+    return d;
   }
 
   client(): TiloriAgentClient {
