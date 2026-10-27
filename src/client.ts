@@ -2,10 +2,51 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { subscriptionMatches } from './config.ts';
 import { redact } from './keys.ts';
-import type { AgentDelivery, AgentSubscription, SubscriptionSpec } from './types.ts';
+import type { AgentDelivery, AgentSubscription, PollError, SubscriptionSpec } from './types.ts';
 
 export const MAX_POLL_WAIT_MS = 25_000;
-const VERSION = '0.1.4';
+/** Most subscriptions one multiplexed poll_events call may list. */
+export const MAX_POLL_SUBSCRIPTIONS = 8;
+/** Upper bound on a server-suggested pause, so a bad value cannot stall us. */
+export const MAX_RETRY_AFTER_MS = 60_000;
+const VERSION = '0.1.5';
+
+/** The server does not accept `subscription_ids` (a deployment from before
+ * UNI-380); poll each subscription separately instead. */
+export class MultiPollUnsupported extends Error {
+  constructor() {
+    super('poll_events does not accept subscription_ids on this server.');
+    this.name = 'MultiPollUnsupported';
+  }
+}
+
+export interface PollResult {
+  delivery: AgentDelivery | null;
+  /** Set when the server could not hold the long poll (over its waiter budget). */
+  retryAfterMs?: number;
+}
+
+export interface MultiPollResult {
+  deliveries: AgentDelivery[];
+  errors: PollError[];
+  retryAfterMs?: number;
+}
+
+function retryAfter(raw: unknown): number | undefined {
+  return typeof raw === 'number' && Number.isFinite(raw) && raw > 0
+    ? Math.min(Math.ceil(raw), MAX_RETRY_AFTER_MS)
+    : undefined;
+}
+
+/** An old server refusing the new argument names it in an input-validation
+ * message; a refusal about the subscription itself does not. */
+function rejectsMultiPoll(message: string): boolean {
+  return (
+    /subscription_ids?/i.test(message) &&
+    /invalid|unrecognized|unexpected|unknown key|required|expected/i.test(message) &&
+    !/unavailable|expired|disabled|not found/i.test(message)
+  );
+}
 
 /** The router only ever calls these tools; all need just tilori:read. */
 export const READ_TOOLS = [
@@ -98,7 +139,7 @@ export class TiloriAgentClient {
 
   #connecting: Promise<void> | null = null;
 
-  /** Connects once; concurrent callers (one long-poll per subscription) share
+  /** Connects once; concurrent callers (the long poll and acknowledgements) share
    * the same in-flight connection attempt. */
   connect(): Promise<void> {
     if (this.#mcp) return Promise.resolve();
@@ -124,6 +165,8 @@ export class TiloriAgentClient {
   }
 
   async close(): Promise<void> {
+    // An injected caller (tests) has no session of ours to end.
+    if (!this.#transport) return;
     try {
       await this.#transport?.terminateSession().catch(() => {});
       await this.#mcp?.close?.();
@@ -151,8 +194,9 @@ export class TiloriAgentClient {
         timeout: options?.timeout ?? 35_000,
       });
     } catch (cause) {
-      // Transport failure: drop the session so the next call reconnects.
-      if (this.#transport) await this.close();
+      // Transport failure: drop the session so the next call reconnects. A
+      // call the caller cancelled is not a failure; other calls keep the session.
+      if (this.#transport && !options?.signal?.aborted) await this.close();
       throw this.#clean(cause);
     }
     return unwrap(raw, this.#apiKey) as T;
@@ -176,13 +220,21 @@ export class TiloriAgentClient {
    * only the subscriptions matching `desired`. */
   async ensureSubscriptions(
     desired: SubscriptionSpec[],
-    options: { signal?: AbortSignal; renewWithinMs?: number; log?: (m: string) => void } = {},
+    options: {
+      signal?: AbortSignal;
+      renewWithinMs?: number;
+      /** Subscription ids to subscribe again even if they look live. */
+      renewIds?: ReadonlySet<string>;
+      log?: (m: string) => void;
+    } = {},
   ): Promise<AgentSubscription[]> {
     const existing = await this.listSubscriptions(options.signal);
     const renewBy = Date.now() + (options.renewWithinMs ?? 24 * 3600_000);
     const out: AgentSubscription[] = [];
     for (const spec of desired) {
-      const found = existing.find((s) => subscriptionMatches(s, spec) && Date.parse(s.expires_at) > renewBy);
+      const found = existing.find(
+        (s) => subscriptionMatches(s, spec) && Date.parse(s.expires_at) > renewBy && !options.renewIds?.has(s.id),
+      );
       if (found) {
         out.push(found);
         continue;
@@ -197,13 +249,51 @@ export class TiloriAgentClient {
   }
 
   async poll(subscriptionId: string, waitMs = 0, signal?: AbortSignal): Promise<AgentDelivery | null> {
+    return (await this.pollOne(subscriptionId, waitMs, signal)).delivery;
+  }
+
+  /** Single-id poll_events, with the server's `retry_after_ms`. */
+  async pollOne(subscriptionId: string, waitMs = 0, signal?: AbortSignal): Promise<PollResult> {
     const wait = Math.min(Math.max(0, Math.floor(waitMs)), MAX_POLL_WAIT_MS);
-    const res = await this.call<{ delivery: AgentDelivery | null }>(
+    const res = await this.call<{ delivery?: AgentDelivery | null; retry_after_ms?: unknown }>(
       'poll_events',
       { subscription_id: subscriptionId, wait_ms: wait },
       { signal, timeout: wait + 15_000 },
     );
-    return res?.delivery ?? null;
+    return { delivery: res?.delivery ?? null, retryAfterMs: retryAfter(res?.retry_after_ms) };
+  }
+
+  /** One poll_events call over several of the agent's subscriptions (UNI-380).
+   * Throws MultiPollUnsupported when the server predates `subscription_ids`. */
+  async pollMany(subscriptionIds: string[], waitMs = 0, signal?: AbortSignal): Promise<MultiPollResult> {
+    const ids = [...new Set(subscriptionIds)];
+    if (ids.length < 1 || ids.length > MAX_POLL_SUBSCRIPTIONS) {
+      throw new Error(`pollMany takes 1-${MAX_POLL_SUBSCRIPTIONS} subscription ids.`);
+    }
+    const wait = Math.min(Math.max(0, Math.floor(waitMs)), MAX_POLL_WAIT_MS);
+    let res: any;
+    try {
+      res = await this.call('poll_events', { subscription_ids: ids, wait_ms: wait }, { signal, timeout: wait + 15_000 });
+    } catch (cause) {
+      if (!signal?.aborted && rejectsMultiPoll(cause instanceof Error ? cause.message : String(cause))) {
+        throw new MultiPollUnsupported();
+      }
+      throw cause;
+    }
+    // A server that ignored the field answers in the single-id shape.
+    if (!res || typeof res !== 'object' || !Array.isArray(res.deliveries)) throw new MultiPollUnsupported();
+    const listed = new Set(ids);
+    const deliveries = (res.deliveries as AgentDelivery[]).filter((d) => listed.has(d?.subscription_id));
+    const errors: PollError[] = Array.isArray(res.errors)
+      ? res.errors
+          .filter((e: any) => typeof e?.subscription_id === 'string' && listed.has(e.subscription_id))
+          .map((e: any) => ({
+            subscription_id: e.subscription_id,
+            // Codes are server constants; anything else is collapsed so logs never carry free text.
+            error_code: typeof e.error_code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(e.error_code) ? e.error_code : 'ERROR',
+          }))
+      : [];
+    return { deliveries, errors, retryAfterMs: retryAfter(res.retry_after_ms) };
   }
 
   async acknowledge(subscriptionId: string, deliveryId: string, signal?: AbortSignal): Promise<void> {

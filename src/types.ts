@@ -72,6 +72,13 @@ export interface AgentDelivery {
   resync_required: boolean;
 }
 
+/** A listed subscription a multiplexed poll could not serve. The server's
+ * free-text message is deliberately not kept. */
+export interface PollError {
+  subscription_id: string;
+  error_code: string;
+}
+
 /** What an injector receives: references only, never content. */
 export interface EventRef {
   id: string;

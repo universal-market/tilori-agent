@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { TiloriAgentClient } from './client.ts';
+import { MAX_POLL_SUBSCRIPTIONS, MultiPollUnsupported, type TiloriAgentClient } from './client.ts';
 import { DEFAULT_WAKES_PER_HOUR } from './config.ts';
 import { WakeLimiter } from './ratelimit.ts';
 import type { AgentDelivery, AgentSubscription, DeliverResult, Injector, SubscriptionSpec } from './types.ts';
@@ -62,6 +62,20 @@ interface AgentState {
   kick: { promise: Promise<void>; fire: () => void };
   /** Fired after held batches were acknowledged, so pollers resume at once. */
   polled: { promise: Promise<void>; fire: () => void };
+  /** Set while a multiplexed long poll leaves out held subscriptions: called
+   * once they are acknowledged, so the poll restarts and includes them. */
+  onPolled: (() => void) | null;
+  /** Until this time, poll each subscription separately (the server rejected
+   * `subscription_ids`); retried after a renewal interval. */
+  singleUntil: number;
+  /** Until this time an abandoned long poll may still hold a server waiter;
+   * a restart waits for it, so the agent never holds more than two. */
+  abandonedUntil: number;
+  /** Subscriptions (by spec) re-subscribed after a per-id poll error, and
+   * when. A second error within a renewal interval drops it instead. */
+  resubscribed: Map<string, number>;
+  /** Subscription ids to subscribe again at the next setup. */
+  renewIds: Set<string>;
   /** Batches handed to an injector whose ack failed: ack again, never re-wake. */
   handedOff: Set<string>;
   heldNotice: string;
@@ -69,6 +83,12 @@ interface AgentState {
 }
 
 const errText = (cause: unknown) => (cause instanceof Error ? cause.message : String(cause));
+
+/** A subscription's identity (scope, exclude_self, filter), stable across renewals. */
+const specKey = (s: AgentSubscription) => JSON.stringify([s.scope, s.exclude_self, s.filter]);
+
+/** A refusal meaning a listed subscription no longer exists for this agent. */
+const gone = (msg: string) => /subscription/i.test(msg) && /not found|expired|unknown|unavailable|no longer/i.test(msg);
 
 function makeKick() {
   let fire = () => {};
@@ -107,6 +127,11 @@ export class Router {
         retryAt: 0,
         kick: makeKick(),
         polled: makeKick(),
+        onPolled: null,
+        singleUntil: 0,
+        abandonedUntil: 0,
+        resubscribed: new Map(),
+        renewIds: new Set(),
         handedOff: new Set(),
         heldNotice: '',
         stats: { wakes: 0, events: 0, delayed: 0 },
@@ -158,21 +183,36 @@ export class Router {
   }
 
   async run(signal?: AbortSignal): Promise<void> {
-    await Promise.all([...this.#agents.values()].map((st) => this.#runAgent(st, signal)));
+    await Promise.all(
+      [...this.#agents.values()].map(async (st) => {
+        try {
+          await this.#runAgent(st, signal);
+        } finally {
+          // End the MCP session; a cancelled long poll leaves it open.
+          await st.cfg.client.close();
+        }
+      }),
+    );
   }
 
   async #runAgent(st: AgentState, signal?: AbortSignal): Promise<void> {
     const { client, handle } = st.cfg;
     const pending = new Map<string, AgentDelivery>();
     let failures = 0;
+    let quickRestarts = 0;
 
     while (!signal?.aborted) {
       let subs: AgentSubscription[];
+      const now = Date.now();
+      for (const [key, at] of st.resubscribed) if (now - at > this.#renewEveryMs) st.resubscribed.delete(key);
       try {
         subs = await client.ensureSubscriptions(st.cfg.subscriptions, {
           signal,
+          // Subscriptions that just failed a poll are subscribed again.
+          renewIds: st.renewIds,
           log: (m) => this.#log(`[${handle}] ${m}`),
         });
+        st.renewIds.clear();
         failures = 0;
       } catch (cause) {
         if (signal?.aborted) return;
@@ -194,23 +234,154 @@ export class Router {
       const stopGen = () => gen.abort();
       signal?.addEventListener('abort', stopGen, { once: true });
       const renewal = setTimeout(stopGen, this.#renewEveryMs);
+      const started = Date.now();
       try {
-        await Promise.all([
-          ...subs.map((sub) => this.#pollSubscription(st, sub, pending, gen)),
-          this.#flushLoop(st, pending, gen.signal),
-        ]);
+        await Promise.all([this.#pollAgent(st, subs, pending, gen), this.#flushLoop(st, pending, gen.signal)]);
       } finally {
         clearTimeout(renewal);
         signal?.removeEventListener('abort', stopGen);
       }
       // Held batches stay unacknowledged on Tilori and are re-served next generation.
       pending.clear();
+      // A generation that ended at once (a subscription keeps vanishing) backs off.
+      if (signal?.aborted) return;
+      quickRestarts = Date.now() - started < 5_000 ? quickRestarts + 1 : 0;
+      if (quickRestarts > 1) await sleep(Math.min(60_000, 1000 * 2 ** (quickRestarts - 2)), signal);
     }
   }
 
-  /** Long-polls one subscription. Each subscription has its own concurrent
-   * long-poll, so an event on any of them is seen within the server's
-   * recheck interval (1-3 s). While its batch is held, it waits. */
+  /** Polls all of an agent's subscriptions with one long poll at a time
+   * (`subscription_ids`, UNI-380), so an agent holds one server waiter
+   * instead of one per subscription. Held subscriptions are left out until
+   * acknowledged. Falls back to one long poll per subscription when the
+   * server predates `subscription_ids`. */
+  async #pollAgent(
+    st: AgentState,
+    subs: AgentSubscription[],
+    pending: Map<string, AgentDelivery>,
+    gen: AbortController,
+  ): Promise<void> {
+    const { client, handle } = st.cfg;
+    const signal = gen.signal;
+    const dropped = new Set<string>();
+    let failures = 0;
+    while (!signal.aborted) {
+      const usable = subs.filter((s) => !dropped.has(s.id));
+      if (st.singleUntil > Date.now() || usable.length > MAX_POLL_SUBSCRIPTIONS) {
+        await Promise.all(usable.map((sub) => this.#pollSubscription(st, sub, pending, gen)));
+        return;
+      }
+      if (!usable.length) {
+        // Every subscription was dropped; wait for the next renewal.
+        await sleep(this.#renewEveryMs, signal);
+        return;
+      }
+      const idle = usable.filter((s) => !pending.has(s.id));
+      if (!idle.length) {
+        await sleep(this.#retryMs, signal, st.polled.promise);
+        continue;
+      }
+
+      // While some subscriptions are held, restart the long poll once they
+      // are acknowledged, so their next events are not delayed. The abandoned
+      // call keeps its server waiter until its deadline; at most one is
+      // outstanding (a restart waits for an earlier one to expire), so the
+      // agent stays within the server's two waiters per agent.
+      const call = new AbortController();
+      const stopCall = () => call.abort();
+      signal.addEventListener('abort', stopCall, { once: true });
+      const startedAt = Date.now();
+      let restarted = false;
+      let restartTimer: ReturnType<typeof setTimeout> | undefined;
+      if (idle.length < usable.length) {
+        const restart = () => {
+          if (call.signal.aborted) return;
+          restarted = true;
+          st.abandonedUntil = startedAt + this.#waitMs + 1_000;
+          call.abort();
+        };
+        st.onPolled = () => {
+          const wait = st.abandonedUntil - Date.now();
+          if (wait <= 0) restart();
+          else restartTimer = setTimeout(restart, wait);
+        };
+      }
+      try {
+        const res = await client.pollMany(
+          idle.map((s) => s.id),
+          this.#waitMs,
+          call.signal,
+        );
+        failures = 0;
+        let got = false;
+        for (const d of res.deliveries) {
+          if (d.events.length > 0 || d.resync_required) {
+            pending.set(d.subscription_id, d);
+            got = true;
+          }
+        }
+        if (got) this.#wake(st);
+        let resubscribe = false;
+        for (const e of res.errors) {
+          const sub = idle.find((s) => s.id === e.subscription_id)!;
+          const key = specKey(sub);
+          const at = st.resubscribed.get(key);
+          if (at === undefined || Date.now() - at > this.#renewEveryMs) {
+            st.resubscribed.set(key, Date.now());
+            st.renewIds.add(sub.id);
+            this.#log(`[${handle}] subscription ${e.subscription_id} could not be polled (${e.error_code}); re-subscribing`);
+            resubscribe = true;
+          } else {
+            dropped.add(e.subscription_id);
+            this.#log(`[${handle}] dropping subscription ${e.subscription_id} (${e.error_code}) until the next renewal`);
+          }
+        }
+        if (resubscribe) {
+          gen.abort();
+          return;
+        }
+        if (res.retryAfterMs) {
+          // Over the server's waiter budget: pause as asked.
+          await sleep(res.retryAfterMs, signal);
+        } else if (got) {
+          // Give the handoff a moment to acknowledge, so the next long poll
+          // can include these subscriptions again.
+          await sleep(this.#retryMs, signal, st.polled.promise);
+        } else if (!res.errors.length && this.#waitMs >= 5_000 && Date.now() - startedAt < 1_000) {
+          // An older server degraded the long poll to an immediate one without
+          // saying how long to wait; don't spin.
+          await sleep(3_000, signal);
+        }
+      } catch (cause) {
+        if (signal.aborted) return;
+        if (restarted) continue;
+        if (cause instanceof MultiPollUnsupported) {
+          st.singleUntil = Date.now() + this.#renewEveryMs;
+          this.#log(`[${handle}] server does not accept subscription_ids; polling each subscription separately`);
+          continue;
+        }
+        const msg = errText(cause);
+        if (gone(msg)) {
+          this.#log(`[${handle}] a subscription is gone; re-subscribing`);
+          gen.abort();
+          return;
+        }
+        failures++;
+        const backoff = Math.min(30_000, 500 * 2 ** (failures - 1));
+        this.#log(`[${handle}] Tilori error (attempt ${failures}, retry in ${backoff} ms): ${msg}`);
+        await sleep(backoff, signal);
+      } finally {
+        st.onPolled = null;
+        clearTimeout(restartTimer);
+        signal.removeEventListener('abort', stopCall);
+      }
+    }
+  }
+
+  /** Long-polls one subscription: the fallback for servers without
+   * `subscription_ids`. Each subscription has its own concurrent long poll,
+   * so an event on any of them is seen within the server's recheck interval
+   * (1-3 s). While its batch is held, it waits. */
   async #pollSubscription(
     st: AgentState,
     sub: AgentSubscription,
@@ -227,11 +398,13 @@ export class Router {
       }
       try {
         const started = Date.now();
-        const d = await client.poll(sub.id, this.#waitMs, signal);
+        const { delivery: d, retryAfterMs } = await client.pollOne(sub.id, this.#waitMs, signal);
         failures = 0;
         if (d && (d.events.length > 0 || d.resync_required)) {
           pending.set(sub.id, d);
           this.#wake(st);
+        } else if (retryAfterMs) {
+          await sleep(retryAfterMs, signal);
         } else if (this.#waitMs >= 5_000 && Date.now() - started < 1_000) {
           // The server degraded this long-poll to an immediate poll (too many
           // waiters on the account); don't spin.
@@ -240,7 +413,7 @@ export class Router {
       } catch (cause) {
         if (signal.aborted) return;
         const msg = errText(cause);
-        if (/subscription/i.test(msg) && /not found|expired|unknown|unavailable|no longer/i.test(msg)) {
+        if (gone(msg)) {
           this.#log(`[${handle}] ${sub.scope.type} subscription is gone; re-subscribing`);
           gen.abort();
           return;
@@ -279,6 +452,9 @@ export class Router {
     const k = st.polled;
     st.polled = makeKick();
     k.fire();
+    const restart = st.onPolled;
+    st.onPolled = null;
+    restart?.();
   }
 
   /** Tries to hand held batches to the agent's injector. Returns 0 when done,
