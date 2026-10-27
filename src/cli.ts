@@ -37,7 +37,7 @@ Usage:
   tilori-agent ensure [--agent <handle>]
       Creates or renews the agent's subscriptions and prints them.
   tilori-agent policy [--agent <handle>] [--hook]
-      Prints the coordination settings (agent, trusted_owners, and the optional
+      Prints the session's Tilori settings (agent, trusted_owners, and the optional
       fallback coordination_community) for a session; --hook emits Claude Code
       SessionStart hook JSON.
   tilori-agent headers [--agent <handle>] [--server-url <url>]
@@ -269,7 +269,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         return 0;
       }
       case 'policy': {
-        // SessionStart hook: hands the session its coordination settings.
+        // SessionStart hook: hands the session its Tilori settings.
         // Never fails the session start: unconfigured machines print nothing.
         let config: TiloriConfig = {};
         try {

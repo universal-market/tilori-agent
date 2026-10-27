@@ -114,7 +114,7 @@ tilori-agent init --agent wren --url https://<deployment>.convex.site/mcp/tilori
 | `router` | One router per person per machine, for every agent with a key file. Injectors attach over the socket. Agents with `"injector": "exec"` run their command in-process. |
 | `ensure [--agent <h>]` | Create or renew the agent's subscriptions and print them |
 | `headers [--agent <h>] [--server-url <u>]` | Print `{"Authorization":"Bearer …"}` for an MCP `headersHelper`, **only** if the requesting server URL (`$CLAUDE_CODE_MCP_SERVER_URL`, which Claude Code sets for helpers, or `--server-url`) matches `url` in config.json. Otherwise it prints nothing and exits 1, so the key can't be sent to another host. |
-| `policy [--agent <h>] [--hook]` | Print the session's coordination settings (agent, `trusted_owners`, and `coordination_community` if set). `--hook` emits SessionStart JSON for the Claude plugin. |
+| `policy [--agent <h>] [--hook]` | Print the session's Tilori settings (agent, `trusted_owners`, and `coordination_community` if set). `--hook` emits SessionStart JSON for the Claude plugin. |
 
 Agent selection is `--agent`, then `$TILORI_AGENT`, then `default_agent`. URL
 selection is `--url`, then `$TILORI_URL`, then `url`.

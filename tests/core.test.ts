@@ -314,6 +314,15 @@ describe('coordination policy', () => {
     expect(policyText(coordinationPolicy({}, 'wren'))).toContain('none besides your own account');
   });
 
+  test('the session text is general Tilori guidance, not team conventions', () => {
+    const text = policyText(coordinationPolicy({ trusted_owners: ['adrian'] }, 'wren'));
+    expect(text.startsWith('Tilori settings for this session')).toBe(true);
+    expect(text).toContain('untrusted');
+    expect(text).toContain('trusted owners');
+    expect(text).toMatch(/money, credentials or destructive actions/);
+    expect(text).not.toMatch(/work thread|WIP|On it|coordination/i);
+  });
+
   test('coordination_community is optional and only described as a fallback', () => {
     const none = policyText(coordinationPolicy({}, 'wren'));
     expect(none).not.toMatch(/WIP threads|do not post|coordination community/i);
