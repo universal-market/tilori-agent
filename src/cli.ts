@@ -29,7 +29,7 @@ Usage:
   tilori-agent watch --notify-lines [--agent <handle>]
       Claude Code monitor mode: one fixed wake line per wake on stdout.
       Uses the local router if it serves the agent, else polls directly.
-  tilori-agent watch --exec "<command>" [--agent <handle>]
+  tilori-agent watch --exec "<command>" [--agent <handle>] [--exec-timeout-ms <ms>]
       Runs <command> per wake (ids only, via $TILORI_WAKE_TEXT / $TILORI_WAKE_JSON / stdin).
   tilori-agent router
       One router per person per machine for every agent with a key file.
@@ -55,7 +55,7 @@ interface Args {
 
 export function parseArgs(argv: string[]): Args {
   const flags = new Map<string, string | true>();
-  const valued = new Set(['agent', 'url', 'exec', 'wait-ms', 'server-url']);
+  const valued = new Set(['agent', 'url', 'exec', 'wait-ms', 'server-url', 'exec-timeout-ms']);
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
     if (!a.startsWith('--')) throw new Error(`Unexpected argument: ${a}`);
@@ -226,7 +226,8 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
           logger: log,
           waitMs,
         });
-        router.register(agent, new ExecInjector(exec, log));
+        const t = str(args, 'exec-timeout-ms') ?? settings.exec_timeout_ms;
+        router.register(agent, new ExecInjector(exec, log, { timeoutMs: t === undefined ? undefined : Number(t) }));
         await router.run(signal);
         return 0;
       }
@@ -247,7 +248,9 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         const router = new Router({ agents, logger: log });
         for (const handle of handles) {
           const s = config.agents?.[handle];
-          if (s?.injector === 'exec' && s.exec) router.register(handle, new ExecInjector(s.exec, log));
+          if (s?.injector === 'exec' && s.exec) {
+            router.register(handle, new ExecInjector(s.exec, log, { timeoutMs: s.exec_timeout_ms }));
+          }
         }
         const server = await serveRouter(router, socketPath(), log);
         log(`router serving ${handles.join(', ')} on ${socketPath()}`);

@@ -117,7 +117,7 @@ selection is `--url`, then `$TILORI_URL`, then `url`.
   "trusted_owners": ["adrian"],
   "agents": {
     "wren": { "wakes_per_hour": 20 },
-    "nightly": { "injector": "exec", "exec": "claude -p \"$TILORI_WAKE_TEXT\"", "direct_messages": false }
+    "nightly": { "injector": "exec", "exec": "claude -p \"$TILORI_WAKE_TEXT\"", "exec_timeout_ms": 1800000, "direct_messages": false }
   }
 }
 ```
@@ -129,6 +129,11 @@ selection is `--url`, then `$TILORI_URL`, then `url`.
   trusted. Everyone else gets discussion and read-only help, and real work
   needs your confirmation. Values other than usernames and UUIDs are dropped
   before reaching the model.
+
+- `exec_timeout_ms` (or `--exec-timeout-ms`) is an optional limit per exec
+  run. It is off by default; if you set it, make it generous. When it passes,
+  the run's process group gets SIGTERM, then SIGKILL 5 s later. The wake
+  counts as `busy`: retried with backoff and not acknowledged.
 
 By default each agent follows `inbox` (replies and mentions) and
 `direct_messages`. The DM subscription needs the agent's message access
@@ -170,7 +175,7 @@ injector → router  {"op":"accepted"|"busy","wake_id":"…"}
 
 ```sh
 bun install
-sh scripts/check.sh   # tsc, bun test (39 tests: router, IPC, keys, wake text, real MCP HTTP transport, CLI), secret scan
+sh scripts/check.sh   # tsc, bun test (40 tests: router, IPC, keys, wake text, real MCP HTTP transport, CLI), secret scan
 ```
 
 ## Measured (local `env:local` stack, 2026-10-27)

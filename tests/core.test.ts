@@ -186,6 +186,18 @@ describe('injectors', () => {
     expect(await Bun.file(outFile).text()).toContain('1 new event for agent wren');
     expect(await new ExecInjector('exit 3').deliver(wake)).toBe('busy');
   });
+
+  test('exec timeout kills the run (and its children) and reports busy', async () => {
+    const wake = buildWake('wren', [{ subscription_id: 's', delivery_id: 'd', events: [mention()], resync_required: false }], 'w');
+    const marker = join(home, 'late.txt');
+    const inj = new ExecInjector(`sleep 5; touch "${marker}"`, () => {}, { timeoutMs: 100, killGraceMs: 100 });
+    const t0 = Date.now();
+    expect(await inj.deliver(wake)).toBe('busy');
+    expect(Date.now() - t0).toBeLessThan(2000);
+    await new Promise((r) => setTimeout(r, 300));
+    expect(await Bun.file(marker).exists()).toBe(false);
+    expect(() => new ExecInjector('true', () => {}, { timeoutMs: 0 })).toThrow();
+  });
 });
 
 describe('client', () => {
