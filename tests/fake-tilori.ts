@@ -198,6 +198,11 @@ export function mention(postId: string = randomUUID(), extra: Partial<DeliveredE
   };
 }
 
+/** A broad `posts` event (someone posted somewhere). */
+export function post(postId: string = randomUUID()): DeliveredEvent {
+  return mention(postId, { kind: 'post.created' });
+}
+
 export function dm(conversationId: string = randomUUID()): DeliveredEvent {
   return {
     id: randomUUID(),

@@ -33,6 +33,7 @@ export function directRouter(opts: NotifyLinesOptions): Router {
         client,
         subscriptions: desiredSubscriptions(settings),
         wakesPerHour: settings.wakes_per_hour,
+        directWakesPerHour: settings.direct_wakes_per_hour,
       },
     ],
     logger: opts.logger,

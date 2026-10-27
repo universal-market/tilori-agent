@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { MAX_POLL_SUBSCRIPTIONS, MultiPollUnsupported, type TiloriAgentClient } from './client.ts';
-import { DEFAULT_WAKES_PER_HOUR } from './config.ts';
+import { DEFAULT_DIRECT_WAKES_PER_HOUR, DEFAULT_WAKES_PER_HOUR } from './config.ts';
 import { WakeLimiter } from './ratelimit.ts';
 import type { AgentDelivery, AgentSubscription, DeliverResult, Injector, SubscriptionSpec } from './types.ts';
 import { buildWake } from './wake.ts';
@@ -10,6 +10,8 @@ export interface RouterAgentConfig {
   client: TiloriAgentClient;
   subscriptions: SubscriptionSpec[];
   wakesPerHour?: number;
+  /** Cap for direct wakes (mentions, DMs, inbox), separate from wakesPerHour. */
+  directWakesPerHour?: number;
 }
 
 export interface RouterOptions {
@@ -55,6 +57,13 @@ async function settle(p: Promise<DeliverResult>): Promise<DeliverResult> {
 interface AgentState {
   cfg: RouterAgentConfig;
   limiter: WakeLimiter;
+  /** A separate allowance for direct signals, so broad traffic that used up
+   * `limiter` never starves a mention or direct message. Null when turned off. */
+  directLimiter: WakeLimiter | null;
+  /** Subscriptions whose batches are direct signals (inbox, mentions, DMs). */
+  directSubs: Set<string>;
+  /** Batches (by delivery id) the wake cap has delayed, for the wake's count. */
+  capHeld: Set<string>;
   /** Live injectors, oldest first. The newest one receives wakes; when it
    * leaves, the previous one takes over. */
   injectors: Injector[];
@@ -72,12 +81,17 @@ interface AgentState {
   /** Until this time, poll each subscription separately (the server rejected
    * `subscription_ids`); retried after a renewal interval. */
   singleUntil: number;
-  /** Until this time an abandoned long poll may still hold a server waiter;
-   * a restart waits for it, so the agent never holds more than two. */
-  abandonedUntil: number;
+  /** Deadlines of abandoned long polls that may still hold a server waiter
+   * (a restart, or a generation that ended mid-call). A restart waits until
+   * none is left and a new call until at most one is, so the agent never
+   * holds more than two. */
+  abandoned: number[];
   /** Subscriptions (by spec) re-subscribed after a per-id poll error, and
    * when. A second error within a renewal interval drops it instead. */
   resubscribed: Map<string, number>;
+  /** Subscriptions (by spec) dropped after repeated poll errors, and when.
+   * Kept across generations, so they stay dropped for a renewal interval. */
+  dropped: Map<string, number>;
   /** Subscription ids to subscribe again at the next setup. */
   renewIds: Set<string>;
   /** Batches handed to an injector whose ack failed: ack again, never re-wake. */
@@ -86,6 +100,17 @@ interface AgentState {
   heldSince: number;
   heldNotice: string;
   stats: { wakes: number; events: number; delayed: number };
+}
+
+/** Scopes whose events are addressed to the agent itself. */
+const DIRECT_SCOPES = new Set(['inbox', 'mentions', 'direct_messages']);
+const isDirectKind = (kind: string) => kind === 'mention' || kind.startsWith('dm.');
+
+function directLimiter(perHour: number | undefined, now: () => number): WakeLimiter | null {
+  const n = perHour ?? DEFAULT_DIRECT_WAKES_PER_HOUR;
+  if (n === 0) return null;
+  if (!Number.isInteger(n) || n < 0) throw new Error('direct_wakes_per_hour must be a non-negative integer.');
+  return new WakeLimiter(n, now);
 }
 
 const errText = (cause: unknown) => (cause instanceof Error ? cause.message : String(cause));
@@ -130,6 +155,9 @@ export class Router {
       this.#agents.set(cfg.handle, {
         cfg,
         limiter: new WakeLimiter(cfg.wakesPerHour ?? DEFAULT_WAKES_PER_HOUR, this.#now),
+        directLimiter: directLimiter(cfg.directWakesPerHour, this.#now),
+        directSubs: new Set(),
+        capHeld: new Set(),
         injectors: [],
         busy: 0,
         retryAt: 0,
@@ -137,8 +165,9 @@ export class Router {
         polled: makeKick(),
         onPolled: null,
         singleUntil: 0,
-        abandonedUntil: 0,
+        abandoned: [],
         resubscribed: new Map(),
+        dropped: new Map(),
         renewIds: new Set(),
         handedOff: new Set(),
         heldSince: 0,
@@ -214,6 +243,7 @@ export class Router {
       let subs: AgentSubscription[];
       const now = Date.now();
       for (const [key, at] of st.resubscribed) if (now - at > this.#renewEveryMs) st.resubscribed.delete(key);
+      for (const [key, at] of st.dropped) if (now - at > this.#renewEveryMs) st.dropped.delete(key);
       try {
         subs = await client.ensureSubscriptions(st.cfg.subscriptions, {
           signal,
@@ -237,6 +267,7 @@ export class Router {
         continue;
       }
       this.#log(`[${handle}] following ${subs.map((s) => s.scope.type).join(', ')}`);
+      st.directSubs = new Set(subs.filter((s) => DIRECT_SCOPES.has(s.scope.type)).map((s) => s.id));
 
       // One generation runs until renewal is due or a subscription vanishes.
       const gen = new AbortController();
@@ -253,6 +284,7 @@ export class Router {
       // Held batches stay unacknowledged on Tilori and are re-served next generation.
       pending.clear();
       st.heldSince = 0;
+      st.capHeld.clear();
       // A generation that ended at once (a subscription keeps vanishing) backs off.
       if (signal?.aborted) return;
       quickRestarts = Date.now() - started < 5_000 ? quickRestarts + 1 : 0;
@@ -273,10 +305,9 @@ export class Router {
   ): Promise<void> {
     const { client, handle } = st.cfg;
     const signal = gen.signal;
-    const dropped = new Set<string>();
     let failures = 0;
     while (!signal.aborted) {
-      const usable = subs.filter((s) => !dropped.has(s.id));
+      const usable = subs.filter((s) => !st.dropped.has(specKey(s)));
       if (st.singleUntil > Date.now() || usable.length > MAX_POLL_SUBSCRIPTIONS) {
         await Promise.all(usable.map((sub) => this.#pollSubscription(st, sub, pending, gen)));
         return;
@@ -289,6 +320,13 @@ export class Router {
       const idle = usable.filter((s) => !pending.has(s.id));
       if (!idle.length) {
         await sleep(this.#retryMs, signal, st.polled.promise);
+        continue;
+      }
+      // Two abandoned calls (a restart, then a generation that ended
+      // mid-call) may still hold waiters; a new call now would be a third.
+      const open = this.#openAbandoned(st);
+      if (open.length > 1) {
+        await sleep(Math.min(...open) - Date.now(), signal);
         continue;
       }
 
@@ -307,11 +345,11 @@ export class Router {
         const restart = () => {
           if (call.signal.aborted) return;
           restarted = true;
-          st.abandonedUntil = startedAt + this.#waitMs + 1_000;
+          st.abandoned.push(startedAt + this.#waitMs + 1_000);
           call.abort();
         };
         st.onPolled = () => {
-          const wait = st.abandonedUntil - Date.now();
+          const wait = Math.max(0, ...this.#openAbandoned(st)) - Date.now();
           if (wait <= 0) restart();
           else restartTimer = setTimeout(restart, wait);
         };
@@ -346,11 +384,17 @@ export class Router {
             this.#log(`[${handle}] subscription ${e.subscription_id} could not be polled (${e.error_code}); re-subscribing`);
             resubscribe = true;
           } else {
-            dropped.add(e.subscription_id);
+            st.dropped.set(key, Date.now());
             this.#log(`[${handle}] dropping subscription ${e.subscription_id} (${e.error_code}) until the next renewal`);
           }
         }
         if (resubscribe) {
+          // This call's deliveries for other subscriptions are in `pending`
+          // but never handed off: the flush loop ends with the generation
+          // before it can take them, and #runAgent then clears `pending`.
+          // They stay unacknowledged, so the server re-serves them next
+          // generation; the cost is one extra round trip, not a lost or
+          // repeated wake.
           gen.abort();
           return;
         }
@@ -367,7 +411,12 @@ export class Router {
           await sleep(3_000, signal);
         }
       } catch (cause) {
-        if (signal.aborted) return;
+        if (signal.aborted) {
+          // The generation ended mid-call (renewal or stop): the call keeps
+          // its server waiter until its deadline.
+          if (!restarted) st.abandoned.push(startedAt + this.#waitMs + 1_000);
+          return;
+        }
         if (restarted) continue;
         if (cause instanceof MultiPollUnsupported) {
           st.singleUntil = Date.now() + this.#renewEveryMs;
@@ -390,6 +439,13 @@ export class Router {
         signal.removeEventListener('abort', stopCall);
       }
     }
+  }
+
+  /** Deadlines of abandoned calls that may still hold a server waiter. */
+  #openAbandoned(st: AgentState): number[] {
+    const now = Date.now();
+    st.abandoned = st.abandoned.filter((t) => t > now);
+    return st.abandoned;
   }
 
   /** Long-polls one subscription: the fallback for servers without
@@ -496,15 +552,35 @@ export class Router {
         notice(`holding ${count} event(s): no injector registered for this agent yet`);
         return this.#retryMs * 5;
       }
+      // Over the cap, direct batches (inbox, mentions, DMs) still wake on
+      // their own allowance; broad traffic waits and coalesces. A broad batch
+      // with any mention or dm.* event goes out whole (acks are per batch).
+      let send = fresh;
+      let limiter = st.limiter;
       const capWait = st.limiter.waitMs();
       if (capWait > 0) {
-        st.stats.delayed = count;
-        notice(
-          `wake cap reached (${st.limiter.perHour}/hour); delaying ${count} event(s) for ${Math.ceil(capWait / 1000)} s`,
+        const direct = fresh.filter(
+          (d) => st.directSubs.has(d.subscription_id) || d.events.some((e) => isDirectKind(e.kind)),
         );
-        return Math.min(capWait, 60_000);
+        const directWait = direct.length && st.directLimiter ? st.directLimiter.waitMs() : Infinity;
+        for (const d of fresh) if (directWait > 0 || !direct.includes(d)) st.capHeld.add(d.delivery_id);
+        if (directWait > 0) {
+          st.stats.delayed = count;
+          notice(
+            `wake cap reached (${st.limiter.perHour}/hour); delaying ${count} event(s) for ${Math.ceil(Math.min(capWait, directWait) / 1000)} s`,
+          );
+          return Math.min(capWait, directWait, 60_000);
+        }
+        send = direct;
+        limiter = st.directLimiter!;
       }
-      const wake = buildWake(handle, fresh, randomUUID());
+      const wake = buildWake(handle, send, randomUUID());
+      // Counted from batches, not wake.events, which may be deduplicated.
+      const events = (ds: AgentDelivery[]) => ds.reduce((n, d) => n + d.events.length, 0);
+      const stillHeld = events(fresh) - events(send);
+      const heldBack = events(send.filter((d) => st.capHeld.has(d.delivery_id)));
+      if (heldBack) wake.held_back = heldBack;
+      if (stillHeld) wake.still_held = stillHeld;
       // Exactly one deliver is in flight per agent: this loop awaits it with
       // no timeout, so a slow injector (an exec run, a busy session) is never
       // invoked again for the same batch, and a late `accepted` still counts.
@@ -524,16 +600,23 @@ export class Router {
       }
       st.busy = 0;
       st.retryAt = 0;
-      st.limiter.record();
+      limiter.record();
       st.stats.wakes++;
       st.stats.events += wake.events.length;
-      st.stats.delayed = 0;
+      st.stats.delayed = stillHeld;
       st.heldNotice = '';
-      for (const d of fresh) st.handedOff.add(d.delivery_id);
-      this.#log(`[${handle}] woke ${injector.kind} with ${wake.events.length} event(s)`);
+      for (const d of send) {
+        st.handedOff.add(d.delivery_id);
+        st.capHeld.delete(d.delivery_id);
+      }
+      this.#log(
+        `[${handle}] woke ${injector.kind} with ${wake.events.length} event(s)` +
+          (limiter === st.directLimiter ? ` past the wake cap; ${stillHeld} still held` : ''),
+      );
     }
 
-    for (const d of batches) {
+    // Acknowledge what was handed off; batches the cap still holds wait.
+    for (const d of batches.filter((b) => st.handedOff.has(b.delivery_id))) {
       // Not tied to the stop signal: a batch already handed off is always
       // acknowledged, even while the router is stopping.
       await client.acknowledge(d.subscription_id, d.delivery_id);
