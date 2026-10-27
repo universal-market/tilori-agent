@@ -8,9 +8,21 @@
 #     relative entry, are skipped; then $BUN_INSTALL/bin, ~/.bun/bin).
 # The CLI takes no file-path arguments, so changing directory is safe.
 set -u
-self=$(readlink -f "$0" 2>/dev/null || echo "$0")
-case "$self" in /*) ;; *) self="$(pwd -P)/$self" ;; esac
-cli="$(dirname "$(dirname "$self")")/src/cli.ts"
+# Follow symlinks one hop at a time (bun link installs ~/.bun/bin/tilori-agent
+# as a relative symlink). Plain `readlink` only: older macOS has no -f.
+self=$0
+n=0
+while [ -L "$self" ]; do
+  n=$((n + 1)); [ "$n" -le 40 ] || { echo "tilori-agent: symlink loop at $0" >&2; exit 127; }
+  link=$(readlink "$self") || break
+  case "$link" in
+    /*) self=$link ;;
+    *) self="$(dirname "$self")/$link" ;;
+  esac
+done
+root=$(cd "$(dirname "$self")/.." && pwd -P) || exit 127
+cli="$root/src/cli.ts"
+[ -f "$cli" ] || { echo "tilori-agent: cannot find src/cli.ts next to $self" >&2; exit 127; }
 
 bun=
 old_ifs=$IFS; IFS=:

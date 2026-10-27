@@ -73,9 +73,20 @@ export class ExecInjector implements Injector {
           : undefined;
       const onStop = () => stop('interrupted by stop signal');
       stopSignal?.addEventListener('abort', onStop, { once: true });
+      const groupAlive = () => {
+        try {
+          if (child.pid) process.kill(-child.pid, 0);
+          return Boolean(child.pid);
+        } catch {
+          return false;
+        }
+      };
       const finish = (r: DeliverResult) => {
         clearTimeout(timer);
-        clearTimeout(killTimer);
+        // After a stop or timeout, the shell can exit on SIGTERM while
+        // something it started ignores SIGTERM. Keep the group SIGKILL armed
+        // until the grace period ends unless the whole group is already gone.
+        if (!stopped || !groupAlive()) clearTimeout(killTimer);
         stopSignal?.removeEventListener('abort', onStop);
         resolve(r);
       };
