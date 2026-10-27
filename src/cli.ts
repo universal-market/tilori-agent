@@ -37,8 +37,9 @@ Usage:
   tilori-agent ensure [--agent <handle>]
       Creates or renews the agent's subscriptions and prints them.
   tilori-agent policy [--agent <handle>] [--hook]
-      Prints the coordination settings (trusted_owners, coordination_community)
-      for a session; --hook emits Claude Code SessionStart hook JSON.
+      Prints the coordination settings (agent, trusted_owners, and the optional
+      fallback coordination_community) for a session; --hook emits Claude Code
+      SessionStart hook JSON.
   tilori-agent headers [--agent <handle>] [--server-url <url>]
       Prints {"Authorization": "Bearer …"} for an MCP headersHelper, only if the
       requesting server URL ($CLAUDE_CODE_MCP_SERVER_URL or --server-url)

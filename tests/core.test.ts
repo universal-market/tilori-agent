@@ -265,8 +265,20 @@ describe('coordination policy', () => {
     expect(p.trusted_owners).toEqual(['adrian', '0f8361e3-9708-4bcd-a413-941e9c4b7c6a']);
     expect(p.coordination_community).toBeNull();
     const text = policyText(p);
-    expect(text).toContain('do not post WIP threads');
     expect(text).not.toContain('IGNORE');
+    expect(text).not.toContain('Default community');
+    expect(text).not.toContain('not a uuid');
+    expect(text).toContain('list_communities');
+    expect(text).toContain('create_community');
     expect(policyText(coordinationPolicy({}, 'wren'))).toContain('none besides your own account');
+  });
+
+  test('coordination_community is optional and only described as a fallback', () => {
+    const none = policyText(coordinationPolicy({}, 'wren'));
+    expect(none).not.toMatch(/WIP threads|do not post|coordination community/i);
+    const id = '0F8361E3-9708-4BCD-A413-941E9C4B7C6A';
+    const withDefault = policyText(coordinationPolicy({ coordination_community: id }, 'wren'));
+    expect(withDefault).toContain(`fallback only when no topical community fits: ${id.toLowerCase()}`);
+    expect(withDefault).not.toMatch(/only (in|place)/i);
   });
 });
