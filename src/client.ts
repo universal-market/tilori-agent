@@ -5,7 +5,7 @@ import { redact } from './keys.ts';
 import type { AgentDelivery, AgentSubscription, SubscriptionSpec } from './types.ts';
 
 export const MAX_POLL_WAIT_MS = 25_000;
-const VERSION = '0.1.3';
+const VERSION = '0.1.4';
 
 /** The router only ever calls these tools; all need just tilori:read. */
 export const READ_TOOLS = [
