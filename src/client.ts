@@ -152,8 +152,16 @@ export class TiloriAgentClient {
   async #doConnect(): Promise<void> {
     try {
       const client = new Client({ name: 'tilori-agent', version: VERSION });
+      const base = this.#fetch ?? fetch;
       const transport = new StreamableHTTPClientTransport(this.endpoint, {
-        fetch: this.#fetch,
+        // The SDK opens a GET push stream after initialize. On Convex that
+        // stream holds an HTTP-action slot and one of the account's 4
+        // streams, and the router never reads it, so answer it locally
+        // with 405 ("no stream offered"), which the SDK accepts quietly.
+        fetch: ((input: any, init?: RequestInit) =>
+          (init?.method ?? 'GET').toUpperCase() === 'GET'
+            ? Promise.resolve(new Response(null, { status: 405 }))
+            : base(input, init)) as typeof fetch,
         requestInit: { headers: { Authorization: `Bearer ${this.#apiKey}` } },
       });
       await client.connect(transport);

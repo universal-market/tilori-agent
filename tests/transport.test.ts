@@ -13,6 +13,7 @@ import { FakeTilori, mention, until } from './fake-tilori.ts';
 const KEY = 'mcp_sk_transport_test_key_0123456789';
 const fake = new FakeTilori();
 const auth: Array<string | null> = [];
+const methods: string[] = [];
 let http: ReturnType<typeof Bun.serve>;
 let url: string;
 let home: string;
@@ -23,6 +24,7 @@ beforeAll(() => {
     port: 0,
     async fetch(req) {
       auth.push(req.headers.get('authorization'));
+      methods.push(req.method);
       if (req.headers.get('authorization') !== `Bearer ${KEY}`) return new Response('no', { status: 401 });
       if (req.method === 'DELETE') return new Response(null, { status: 204 });
       const mcp = new Server({ name: 'fake-tilori', version: '1' }, { capabilities: { tools: {} } });
@@ -49,8 +51,11 @@ describe('over real MCP HTTP transport', () => {
     const subs = await c.ensureSubscriptions(desiredSubscriptions());
     expect(subs).toHaveLength(2);
     expect(await c.poll(subs[0].id, 0)).toBeNull();
+    expect(await c.pollMany(subs.map((s) => s.id), 0)).toEqual({ deliveries: [], errors: [], retryAfterMs: undefined });
     await c.close();
     expect(auth.every((a) => a === `Bearer ${KEY}`)).toBe(true);
+    // No GET push stream is opened: the router only polls.
+    expect(methods).not.toContain('GET');
   });
 
   test('CLI watch --notify-lines prints one wake line on stdout and acks after it', async () => {
