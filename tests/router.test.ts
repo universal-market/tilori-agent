@@ -56,8 +56,10 @@ describe('router', () => {
       const inj = new Recorder();
       router.register('wren', inj);
       const post = mention();
+      const polled = fake.polls.length;
       fake.push('posts', [{ ...post, id: crypto.randomUUID(), kind: 'post.created' }]);
-      await until(() => fake.polls.some((p) => p.ids.length === 1));
+      // Arrives in a later poll than the first batch, well inside the 500 ms hold.
+      await until(() => fake.polls.length > polled);
       fake.push('inbox', [post]);
       await until(() => fake.acks.length === 2);
       expect(fake.polls.some((p) => p.multi)).toBe(!legacy);
