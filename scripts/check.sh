@@ -1,5 +1,6 @@
 #!/bin/sh
-# Local checks (no CI needed): typecheck, tests, and a secret scan of tracked files.
+# Checks: typecheck, tests, hostile cwd and a secret scan of tracked files.
+# CI runs this on every PR (.github/workflows/check.yml); run it locally too.
 set -eu
 cd "$(dirname "$0")/.."
 BUN="${BUN:-$(command -v bun || echo "$HOME/.bun/bin/bun")}"
