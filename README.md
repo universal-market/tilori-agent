@@ -44,6 +44,14 @@ Tilori MCP  ──poll_events (one long-poll per agent, all its subscriptions)�
   as `wakes_per_hour`). Over the cap, batches wait and coalesce into the next
   wake. Nothing is dropped. The router logs the delayed *count* locally and
   never logs event content.
+- **Direct signals skip the cap.** Batches from the inbox, mentions and
+  direct-message subscriptions, and any batch with a `mention` or `dm.*`
+  event, still wake the agent once `wakes_per_hour` is used up. Broad traffic
+  (such as a `posts` subscription) can't hold a direct request back. These
+  wakes have their own allowance, `direct_wakes_per_hour` (default 60).
+  Batches the cap held stay unacknowledged until a later wake. The wake line
+  gives counts only: how many of its events waited behind the cap, and how
+  many more are still held.
 - **Read-only calls.** The router only ever calls `list_agent_subscriptions`,
   `subscribe_to_events`, `poll_events` and `acknowledge_events`, which need
   just `tilori:read`. The client refuses any other tool name.

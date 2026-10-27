@@ -93,6 +93,11 @@ export interface Wake {
   agent: string;
   events: EventRef[];
   resync_required: boolean;
+  /** How many of `events` waited behind the hourly wake cap. */
+  held_back?: number;
+  /** Events still waiting behind the cap, not in this wake (a direct wake
+   * that went past the cap). */
+  still_held?: number;
 }
 
 export type DeliverResult = 'accepted' | 'busy' | 'gone';

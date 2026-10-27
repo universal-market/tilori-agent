@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { MAX_POLL_SUBSCRIPTIONS, MultiPollUnsupported, type TiloriAgentClient } from './client.ts';
-import { DEFAULT_WAKES_PER_HOUR } from './config.ts';
+import { DEFAULT_DIRECT_WAKES_PER_HOUR, DEFAULT_WAKES_PER_HOUR } from './config.ts';
 import { WakeLimiter } from './ratelimit.ts';
 import type { AgentDelivery, AgentSubscription, DeliverResult, Injector, SubscriptionSpec } from './types.ts';
 import { buildWake } from './wake.ts';
@@ -10,6 +10,8 @@ export interface RouterAgentConfig {
   client: TiloriAgentClient;
   subscriptions: SubscriptionSpec[];
   wakesPerHour?: number;
+  /** Cap for direct wakes (mentions, DMs, inbox), separate from wakesPerHour. */
+  directWakesPerHour?: number;
 }
 
 export interface RouterOptions {
@@ -51,6 +53,13 @@ async function settle(p: Promise<DeliverResult>): Promise<DeliverResult> {
 interface AgentState {
   cfg: RouterAgentConfig;
   limiter: WakeLimiter;
+  /** A separate allowance for direct signals, so broad traffic that used up
+   * `limiter` never starves a mention or direct message. */
+  directLimiter: WakeLimiter;
+  /** Subscriptions whose batches are direct signals (inbox, mentions, DMs). */
+  directSubs: Set<string>;
+  /** Batches (by delivery id) the wake cap has delayed, for the wake's count. */
+  capHeld: Set<string>;
   /** Live injectors, oldest first. The newest one receives wakes; when it
    * leaves, the previous one takes over. */
   injectors: Injector[];
@@ -81,6 +90,10 @@ interface AgentState {
   heldNotice: string;
   stats: { wakes: number; events: number; delayed: number };
 }
+
+/** Scopes whose events are addressed to the agent itself. */
+const DIRECT_SCOPES = new Set(['inbox', 'mentions', 'direct_messages']);
+const isDirectKind = (kind: string) => kind === 'mention' || kind.startsWith('dm.');
 
 const errText = (cause: unknown) => (cause instanceof Error ? cause.message : String(cause));
 
@@ -122,6 +135,9 @@ export class Router {
       this.#agents.set(cfg.handle, {
         cfg,
         limiter: new WakeLimiter(cfg.wakesPerHour ?? DEFAULT_WAKES_PER_HOUR, this.#now),
+        directLimiter: new WakeLimiter(cfg.directWakesPerHour ?? DEFAULT_DIRECT_WAKES_PER_HOUR, this.#now),
+        directSubs: new Set(),
+        capHeld: new Set(),
         injectors: [],
         busy: 0,
         retryAt: 0,
@@ -228,6 +244,7 @@ export class Router {
         continue;
       }
       this.#log(`[${handle}] following ${subs.map((s) => s.scope.type).join(', ')}`);
+      st.directSubs = new Set(subs.filter((s) => DIRECT_SCOPES.has(s.scope.type)).map((s) => s.id));
 
       // One generation runs until renewal is due or a subscription vanishes.
       const gen = new AbortController();
@@ -478,15 +495,32 @@ export class Router {
         notice(`holding ${count} event(s): no injector registered for this agent yet`);
         return this.#retryMs * 5;
       }
+      // Over the cap, direct batches (inbox, mentions, DMs) still wake on
+      // their own allowance; broad traffic waits and coalesces.
+      let send = fresh;
+      let limiter = st.limiter;
       const capWait = st.limiter.waitMs();
       if (capWait > 0) {
-        st.stats.delayed = count;
-        notice(
-          `wake cap reached (${st.limiter.perHour}/hour); delaying ${count} event(s) for ${Math.ceil(capWait / 1000)} s`,
+        const direct = fresh.filter(
+          (d) => st.directSubs.has(d.subscription_id) || d.events.some((e) => isDirectKind(e.kind)),
         );
-        return Math.min(capWait, 60_000);
+        const directWait = direct.length ? st.directLimiter.waitMs() : Infinity;
+        for (const d of fresh) if (directWait > 0 || !direct.includes(d)) st.capHeld.add(d.delivery_id);
+        if (directWait > 0) {
+          st.stats.delayed = count;
+          notice(
+            `wake cap reached (${st.limiter.perHour}/hour); delaying ${count} event(s) for ${Math.ceil(Math.min(capWait, directWait) / 1000)} s`,
+          );
+          return Math.min(capWait, directWait, 60_000);
+        }
+        send = direct;
+        limiter = st.directLimiter;
       }
-      const wake = buildWake(handle, fresh, randomUUID());
+      const wake = buildWake(handle, send, randomUUID());
+      const heldBack = send.filter((d) => st.capHeld.has(d.delivery_id)).reduce((n, d) => n + d.events.length, 0);
+      const stillHeld = fresh.reduce((n, d) => n + d.events.length, 0) - wake.events.length;
+      if (heldBack) wake.held_back = heldBack;
+      if (stillHeld) wake.still_held = stillHeld;
       // Exactly one deliver is in flight per agent: this loop awaits it with
       // no timeout, so a slow injector (an exec run, a busy session) is never
       // invoked again for the same batch, and a late `accepted` still counts.
@@ -506,16 +540,23 @@ export class Router {
       }
       st.busy = 0;
       st.retryAt = 0;
-      st.limiter.record();
+      limiter.record();
       st.stats.wakes++;
       st.stats.events += wake.events.length;
-      st.stats.delayed = 0;
+      st.stats.delayed = stillHeld;
       st.heldNotice = '';
-      for (const d of fresh) st.handedOff.add(d.delivery_id);
-      this.#log(`[${handle}] woke ${injector.kind} with ${wake.events.length} event(s)`);
+      for (const d of send) {
+        st.handedOff.add(d.delivery_id);
+        st.capHeld.delete(d.delivery_id);
+      }
+      this.#log(
+        `[${handle}] woke ${injector.kind} with ${wake.events.length} event(s)` +
+          (limiter === st.directLimiter ? ` past the wake cap; ${stillHeld} still held` : ''),
+      );
     }
 
-    for (const d of batches) {
+    // Acknowledge what was handed off; batches the cap still holds wait.
+    for (const d of batches.filter((b) => st.handedOff.has(b.delivery_id))) {
       // Not tied to the stop signal: a batch already handed off is always
       // acknowledged, even while the router is stopping.
       await client.acknowledge(d.subscription_id, d.delivery_id);
