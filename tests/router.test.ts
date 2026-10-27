@@ -3,7 +3,7 @@ import { desiredSubscriptions } from '../src/config.ts';
 import { ExecInjector } from '../src/injectors/exec.ts';
 import { Router } from '../src/router.ts';
 import type { DeliverResult, Injector, Wake } from '../src/types.ts';
-import { FakeTilori, dm, mention, until } from './fake-tilori.ts';
+import { FakeTilori, dm, mention, post, until } from './fake-tilori.ts';
 
 class Recorder implements Injector {
   readonly kind = 'test';
@@ -16,11 +16,20 @@ class Recorder implements Injector {
   }
 }
 
-function setup(opts: { wakesPerHour?: number; now?: () => number } = {}) {
+function setup(opts: { wakesPerHour?: number; directWakesPerHour?: number; posts?: boolean; now?: () => number } = {}) {
   const fake = new FakeTilori();
   const logs: string[] = [];
+  const subscriptions = desiredSubscriptions(opts.posts ? { subscriptions: [{ scope: { type: 'posts' } }] } : {});
   const router = new Router({
-    agents: [{ handle: 'wren', client: fake.client(), subscriptions: desiredSubscriptions(), wakesPerHour: opts.wakesPerHour }],
+    agents: [
+      {
+        handle: 'wren',
+        client: fake.client(),
+        subscriptions,
+        wakesPerHour: opts.wakesPerHour,
+        directWakesPerHour: opts.directWakesPerHour,
+      },
+    ],
     logger: (m) => logs.push(m),
     waitMs: 10,
     retryMs: 10,
@@ -101,16 +110,16 @@ describe('router', () => {
     await done;
   });
 
-  test('rate cap delays and coalesces instead of dropping', async () => {
+  test('rate cap delays and coalesces broad traffic instead of dropping', async () => {
     let t = 1_000_000;
-    const { fake, router, ac, done, logs } = setup({ wakesPerHour: 1, now: () => t });
+    const { fake, router, ac, done, logs } = setup({ wakesPerHour: 1, posts: true, now: () => t });
     const inj = new Recorder();
     router.register('wren', inj);
-    await until(() => fake.subs.length === 2);
-    fake.push('inbox', [mention()]);
+    await until(() => fake.subs.length === 3);
+    fake.push('posts', [post()]);
     await until(() => inj.wakes.length === 1);
-    fake.push('inbox', [mention(), mention()]);
-    fake.push('direct_messages', [dm()]);
+    expect(inj.wakes[0].held_back).toBeUndefined();
+    fake.push('posts', [post(), post()]);
     await until(() => logs.some((l) => l.includes('wake cap reached')));
     expect(inj.wakes).toHaveLength(1);
     expect(fake.acks).toHaveLength(1);
@@ -119,10 +128,90 @@ describe('router', () => {
     t += 3600_001;
     router.register('wren', inj); // kicks the sleeping loop
     await until(() => inj.wakes.length === 2);
-    expect(inj.wakes[1].events).toHaveLength(3);
-    await until(() => fake.acks.length === 3);
+    expect(inj.wakes[1].events).toHaveLength(2);
+    expect(inj.wakes[1].held_back).toBe(2);
+    await until(() => fake.acks.length === 2);
     ac.abort();
     await done;
+  });
+
+  test('mentions and DMs wake past the cap on their own allowance; broad traffic stays held', async () => {
+    let t = 1_000_000;
+    const { fake, router, ac, done } = setup({ wakesPerHour: 1, posts: true, now: () => t });
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => fake.subs.length === 3);
+    fake.push('posts', [post()]);
+    await until(() => inj.wakes.length === 1);
+    // The cap is used up: broad traffic is held, a mention still wakes.
+    fake.push('posts', [post(), post()]);
+    await until(() => router.stats('wren')!.delayed === 2);
+    fake.push('inbox', [mention()]);
+    await until(() => inj.wakes.length === 2);
+    expect(inj.wakes[1].events.map((e) => e.kind)).toEqual(['mention']);
+    expect(inj.wakes[1].still_held).toBe(2);
+    fake.push('direct_messages', [dm()]);
+    await until(() => inj.wakes.length === 3);
+    expect(inj.wakes[2].events.map((e) => e.kind)).toEqual(['dm.message']);
+    // Only the direct batches were acknowledged; the posts batch waits.
+    await until(() => fake.acks.length === 3);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(fake.acks).toHaveLength(3);
+    t += 3600_001;
+    router.register('wren', inj);
+    await until(() => inj.wakes.length === 4);
+    expect(inj.wakes[3].events.map((e) => e.kind)).toEqual(['post.created', 'post.created']);
+    expect(inj.wakes[3].held_back).toBe(2);
+    await until(() => fake.acks.length === 4);
+    ac.abort();
+    await done;
+  });
+
+  test('direct wakes have their own cap too', async () => {
+    let t = 1_000_000;
+    const { fake, router, ac, done, logs } = setup({ wakesPerHour: 1, directWakesPerHour: 1, now: () => t });
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => fake.subs.length === 2);
+    fake.push('inbox', [mention()]);
+    await until(() => inj.wakes.length === 1);
+    fake.push('inbox', [mention()]);
+    await until(() => inj.wakes.length === 2);
+    fake.push('direct_messages', [dm()]);
+    await until(() => logs.some((l) => l.includes('wake cap reached')));
+    expect(inj.wakes).toHaveLength(2);
+    t += 3600_001;
+    router.register('wren', inj);
+    await until(() => inj.wakes.length === 3);
+    expect(inj.wakes[2].held_back).toBe(1);
+    ac.abort();
+    await done;
+  });
+
+  test('direct_wakes_per_hour 0 turns the direct lane off', async () => {
+    let t = 1_000_000;
+    const { fake, router, ac, done, logs } = setup({ wakesPerHour: 1, directWakesPerHour: 0, now: () => t });
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => fake.subs.length === 2);
+    fake.push('inbox', [mention()]);
+    await until(() => inj.wakes.length === 1);
+    fake.push('inbox', [mention()]);
+    await until(() => logs.some((l) => l.includes('wake cap reached')));
+    expect(inj.wakes).toHaveLength(1);
+    t += 3600_001;
+    router.register('wren', inj);
+    await until(() => inj.wakes.length === 2);
+    expect(inj.wakes[1].held_back).toBe(1);
+    ac.abort();
+    await done;
+    const fake2 = new FakeTilori();
+    expect(
+      () =>
+        new Router({
+          agents: [{ handle: 'wren', client: fake2.client(), subscriptions: desiredSubscriptions(), directWakesPerHour: -1 }],
+        }),
+    ).toThrow();
   });
 
   test('skips a subscription the agent may not hold and keeps going', async () => {
