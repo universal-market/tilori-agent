@@ -6,7 +6,7 @@
   "license": "UNLICENSED",
   "private": true,
   "bin": {
-    "tilori-agent": "./src/cli.ts"
+    "tilori-agent": "./bin/tilori-agent"
   },
   "exports": {
     ".": "./src/index.ts"
