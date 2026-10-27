@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { desiredSubscriptions } from '../src/config.ts';
 import { ExecInjector } from '../src/injectors/exec.ts';
 import { Router } from '../src/router.ts';
-import type { DeliverResult, Injector, Wake } from '../src/types.ts';
+import type { DeliverResult, Injector, SubscriptionSpec, Wake } from '../src/types.ts';
 import { FakeTilori, dm, mention, post, until } from './fake-tilori.ts';
 
 class Recorder implements Injector {
@@ -16,10 +16,20 @@ class Recorder implements Injector {
   }
 }
 
-function setup(opts: { wakesPerHour?: number; directWakesPerHour?: number; posts?: boolean; now?: () => number } = {}) {
+function setup(
+  opts: {
+    wakesPerHour?: number;
+    directWakesPerHour?: number;
+    posts?: boolean;
+    now?: () => number;
+    coalesceMs?: number;
+    subscriptions?: SubscriptionSpec[];
+  } = {},
+) {
   const fake = new FakeTilori();
   const logs: string[] = [];
-  const subscriptions = desiredSubscriptions(opts.posts ? { subscriptions: [{ scope: { type: 'posts' } }] } : {});
+  const subscriptions =
+    opts.subscriptions ?? desiredSubscriptions(opts.posts ? { subscriptions: [{ scope: { type: 'posts' } }] } : {});
   const router = new Router({
     agents: [
       {
@@ -33,6 +43,7 @@ function setup(opts: { wakesPerHour?: number; directWakesPerHour?: number; posts
     logger: (m) => logs.push(m),
     waitMs: 10,
     retryMs: 10,
+    coalesceMs: opts.coalesceMs ?? 0,
     now: opts.now,
   });
   const ac = new AbortController();
@@ -51,6 +62,30 @@ describe('router', () => {
       new Set(['list_agent_subscriptions', 'subscribe_to_events', 'poll_events']),
     );
   });
+
+  for (const legacy of [false, true]) {
+    test(`the same post from overlapping subscriptions makes one wake, as a mention (${legacy ? 'per-subscription' : 'multiplexed'} poll)`, async () => {
+      const subscriptions = desiredSubscriptions({ direct_messages: false, subscriptions: [{ scope: { type: 'posts' } }] });
+      const { fake, router, ac, done } = setup({ coalesceMs: 500, subscriptions });
+      fake.legacy = legacy;
+      await until(() => fake.subs.length === 2);
+      const inj = new Recorder();
+      router.register('wren', inj);
+      const post = mention();
+      const polled = fake.polls.length;
+      fake.push('posts', [{ ...post, id: crypto.randomUUID(), kind: 'post.created' }]);
+      // Arrives in a later poll than the first batch, well inside the 500 ms hold.
+      await until(() => fake.polls.length > polled);
+      fake.push('inbox', [post]);
+      await until(() => fake.acks.length === 2);
+      expect(fake.polls.some((p) => p.multi)).toBe(!legacy);
+      expect(inj.wakes).toHaveLength(1);
+      expect(inj.wakes[0].events).toHaveLength(1);
+      expect(inj.wakes[0].events[0]).toMatchObject({ kind: 'mention', entity_id: post.entity_id });
+      ac.abort();
+      await done;
+    });
+  }
 
   test('acks only after the injector accepts; holds while none is registered', async () => {
     const { fake, router, ac, done, logs } = setup();
@@ -223,6 +258,7 @@ describe('router', () => {
       logger: (m) => logs.push(m),
       waitMs: 10,
       retryMs: 10,
+      coalesceMs: 0,
     });
     const inj = new Recorder();
     router.register('wren', inj);
@@ -253,6 +289,7 @@ describe('router', () => {
       agents: [{ handle: 'wren', client: fake.client(), subscriptions: desiredSubscriptions() }],
       waitMs: 20_000,
       retryMs: 10,
+      coalesceMs: 0,
     });
     const inj = new Recorder();
     router.register('wren', inj);
@@ -278,6 +315,7 @@ describe('router', () => {
       agents: [{ handle: 'wren', client: fake.client(), subscriptions: desiredSubscriptions() }],
       waitMs: 10,
       retryMs: 10,
+      coalesceMs: 0,
       deliverTimeoutMs: 20,
     } as any);
     const ac = new AbortController();
@@ -304,7 +342,7 @@ describe('router', () => {
   test('stopping during an exec run kills it, does not ack, and redelivers on restart', async () => {
     const fake = new FakeTilori();
     const mk = () =>
-      new Router({ agents: [{ handle: 'wren', client: fake.client(), subscriptions: desiredSubscriptions() }], waitMs: 10, retryMs: 10 });
+      new Router({ agents: [{ handle: 'wren', client: fake.client(), subscriptions: desiredSubscriptions() }], waitMs: 10, retryMs: 10, coalesceMs: 0 });
     const ac = new AbortController();
     const router = mk();
     const done = router.run(ac.signal);
@@ -412,6 +450,7 @@ describe('router', () => {
       agents: [{ handle: 'wren', client: fake.client(), subscriptions: desiredSubscriptions() }],
       waitMs: 20_000,
       retryMs: 10,
+      coalesceMs: 0,
     });
     let calls = 0;
     const slow: Injector = {
@@ -524,6 +563,7 @@ describe('router', () => {
       agents: [{ handle: 'wren', client: fake.client(), subscriptions: desiredSubscriptions() }],
       waitMs: 600,
       retryMs: 10,
+      coalesceMs: 0,
       renewEveryMs: 250,
     });
     const slow: Injector = {

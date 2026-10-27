@@ -23,6 +23,7 @@ function routerWith(fake: FakeTilori) {
     agents: [{ handle: 'wren', client: fake.client(), subscriptions: desiredSubscriptions() }],
     waitMs: 10,
     retryMs: 10,
+    coalesceMs: 0,
   });
 }
 

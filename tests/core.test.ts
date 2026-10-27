@@ -9,7 +9,7 @@ import { ExecInjector } from '../src/injectors/exec.ts';
 import { NotifyLinesInjector } from '../src/injectors/notify-lines.ts';
 import { readKey, redact, writeKey } from '../src/keys.ts';
 import { WakeLimiter } from '../src/ratelimit.ts';
-import { buildWake, sanitizeWake, wakeText } from '../src/wake.ts';
+import { buildWake, dedupeRefs, sanitizeWake, wakeText } from '../src/wake.ts';
 import { dm, FakeTilori, mention } from './fake-tilori.ts';
 
 let home: string;
@@ -123,6 +123,30 @@ describe('wake text', () => {
     expect(text).not.toContain('IGNORE');
     expect(text).not.toContain('rm -rf');
     expect(text).not.toContain('\n');
+  });
+
+  test('dedupeRefs keeps one ref per post or conversation, under its most specific kind', () => {
+    const post = '11111111-1111-4111-8111-111111111111';
+    const conv = '22222222-2222-4222-8222-222222222222';
+    const ref = (kind: string, entity_type: string, entity_id: string, conversation_id?: string) => ({
+      id: crypto.randomUUID(),
+      kind,
+      entity_type,
+      entity_id,
+      ...(conversation_id ? { conversation_id } : {}),
+    });
+    const out = dedupeRefs([
+      ref('post.created', 'post', post),
+      ref('dm.message', 'conversation', crypto.randomUUID(), conv),
+      ref('mention', 'post', post),
+      ref('dm.request', 'conversation', crypto.randomUUID(), conv),
+      ref('dm.message', 'conversation', crypto.randomUUID(), conv),
+    ]);
+    expect(out.map((r) => r.kind)).toEqual(['mention', 'dm.request']);
+    expect(out[1].conversation_id).toBe(conv);
+    // The first of equal rank stays, in arrival order.
+    const a = ref('post.created', 'post', post);
+    expect(dedupeRefs([a, ref('post.created', 'post', post)])).toEqual([a]);
   });
 
   test('non-uuid ids and unknown kinds are replaced', () => {

@@ -24,6 +24,10 @@ export interface RouterOptions {
   retryMs?: number;
   /** Re-check subscriptions this often (default 6 h); they expire after 30 days. */
   renewEveryMs?: number;
+  /** Hold a new batch this long before waking, so the same post delivered
+   * by overlapping subscriptions (all posts plus the inbox) makes one wake,
+   * not one per subscription. Default 3 s, about one server recheck. */
+  coalesceMs?: number;
   now?: () => number;
 }
 
@@ -92,6 +96,8 @@ interface AgentState {
   renewIds: Set<string>;
   /** Batches handed to an injector whose ack failed: ack again, never re-wake. */
   handedOff: Set<string>;
+  /** When the oldest batch now held arrived (0 when none is held). */
+  heldSince: number;
   heldNotice: string;
   stats: { wakes: number; events: number; delayed: number };
 }
@@ -134,6 +140,7 @@ export class Router {
   readonly #waitMs: number;
   readonly #retryMs: number;
   readonly #renewEveryMs: number;
+  readonly #coalesceMs: number;
   readonly #now: () => number;
 
   constructor(options: RouterOptions) {
@@ -141,6 +148,7 @@ export class Router {
     this.#waitMs = options.waitMs ?? 20_000;
     this.#retryMs = options.retryMs ?? 2_000;
     this.#renewEveryMs = options.renewEveryMs ?? 6 * 3600_000;
+    this.#coalesceMs = options.coalesceMs ?? 3_000;
     this.#now = options.now ?? Date.now;
     for (const cfg of options.agents) {
       if (this.#agents.has(cfg.handle)) throw new Error(`Agent ${cfg.handle} listed twice.`);
@@ -162,6 +170,7 @@ export class Router {
         dropped: new Map(),
         renewIds: new Set(),
         handedOff: new Set(),
+        heldSince: 0,
         heldNotice: '',
         stats: { wakes: 0, events: 0, delayed: 0 },
       });
@@ -274,6 +283,7 @@ export class Router {
       }
       // Held batches stay unacknowledged on Tilori and are re-served next generation.
       pending.clear();
+      st.heldSince = 0;
       st.capHeld.clear();
       // A generation that ended at once (a subscription keeps vanishing) backs off.
       if (signal?.aborted) return;
@@ -354,6 +364,10 @@ export class Router {
         let got = false;
         for (const d of res.deliveries) {
           if (d.events.length > 0 || d.resync_required) {
+            // Only the first held batch starts the hold, so it has a fixed end.
+            // A batch arriving while others are still held (ack retry, deliver
+            // in flight) joins their wake without a hold of its own.
+            if (!pending.size) st.heldSince = Date.now();
             pending.set(d.subscription_id, d);
             got = true;
           }
@@ -457,6 +471,8 @@ export class Router {
         const { delivery: d, retryAfterMs } = await client.pollOne(sub.id, this.#waitMs, signal);
         failures = 0;
         if (d && (d.events.length > 0 || d.resync_required)) {
+          // Only the first held batch starts the hold (see #pollAgent).
+          if (!pending.size) st.heldSince = Date.now();
           pending.set(sub.id, d);
           this.#wake(st);
         } else if (retryAfterMs) {
@@ -529,6 +545,8 @@ export class Router {
       };
       const backingOff = st.retryAt - Date.now();
       if (backingOff > 0) return backingOff;
+      const gathering = st.heldSince + this.#coalesceMs - Date.now();
+      if (gathering > 0) return gathering;
       const injector = st.injectors.at(-1);
       if (!injector) {
         notice(`holding ${count} event(s): no injector registered for this agent yet`);
@@ -605,6 +623,7 @@ export class Router {
       st.handedOff.delete(d.delivery_id);
       pending.delete(d.subscription_id);
     }
+    if (!pending.size) st.heldSince = 0;
     return 0;
   }
 }
