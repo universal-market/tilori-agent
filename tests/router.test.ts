@@ -410,6 +410,56 @@ describe('router', () => {
     await done;
   });
 
+  test('a dropped subscription stays dropped when another one starts a new generation', async () => {
+    const { fake, router, ac, done, logs } = setup();
+    router.register('wren', new Recorder());
+    await until(() => fake.subs.length === 2);
+    const inbox = fake.subs.find((s) => s.scope.type === 'inbox')!.id;
+    const dms = fake.subs.find((s) => s.scope.type === 'direct_messages')!.id;
+    fake.failingSubs.set(inbox, 'POST_UNAVAILABLE');
+    await until(() => logs.some((l) => l.includes('dropping')));
+    // A per-id error on the other subscription re-subscribes it: a new generation.
+    fake.failOnce.set(dms, 'SUBSCRIPTION_DISABLED');
+    await until(() => fake.renewals.includes(dms));
+    const before = fake.polls.length;
+    await until(() => fake.polls.length >= before + 5);
+    expect(fake.polls.slice(before).every((p) => !p.ids.includes(inbox))).toBe(true);
+    expect(logs.filter((l) => l.includes('dropping'))).toHaveLength(1);
+    ac.abort();
+    await done;
+  });
+
+  test('a renewal that ends a generation mid-call never makes a third waiter', async () => {
+    const fake = new FakeTilori();
+    const router = new Router({
+      agents: [{ handle: 'wren', client: fake.client(), subscriptions: desiredSubscriptions() }],
+      waitMs: 600,
+      retryMs: 10,
+      renewEveryMs: 250,
+    });
+    const slow: Injector = {
+      kind: 'test',
+      deliver: async () => {
+        await new Promise((r) => setTimeout(r, 50));
+        return 'accepted';
+      },
+    };
+    router.register('wren', slow);
+    const ac = new AbortController();
+    const done = router.run(ac.signal);
+    await until(() => fake.subs.length === 2);
+    // The held inbox batch makes the next poll restart (one abandoned call);
+    // the renewal then abandons its replacement mid-call.
+    fake.push('inbox', [mention()]);
+    await until(() => fake.acks.length === 1, 1000);
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(fake.maxWaiting).toBeLessThanOrEqual(2);
+    fake.push('direct_messages', [dm()]);
+    await until(() => fake.acks.length === 2, 3000);
+    ac.abort();
+    await done;
+  });
+
   test('a vanished subscription refuses the whole call and is re-created', async () => {
     const { fake, router, ac, done } = setup();
     router.register('wren', new Recorder());
