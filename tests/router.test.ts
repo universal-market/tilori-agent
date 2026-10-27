@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { desiredSubscriptions } from '../src/config.ts';
+import { ExecInjector } from '../src/injectors/exec.ts';
 import { Router } from '../src/router.ts';
 import type { DeliverResult, Injector, Wake } from '../src/types.ts';
 import { FakeTilori, dm, mention, until } from './fake-tilori.ts';
@@ -209,6 +210,42 @@ describe('router', () => {
     expect(router.stats('wren')?.wakes).toBe(1);
     ac.abort();
     await done;
+  });
+
+  test('stopping during an exec run kills it, does not ack, and redelivers on restart', async () => {
+    const fake = new FakeTilori();
+    const mk = () =>
+      new Router({ agents: [{ handle: 'wren', client: fake.client(), subscriptions: desiredSubscriptions() }], waitMs: 10, retryMs: 10 });
+    const ac = new AbortController();
+    const router = mk();
+    const done = router.run(ac.signal);
+    let started = false;
+    const slow = new ExecInjector('sleep 10', () => {}, { signal: ac.signal, killGraceMs: 100 });
+    router.register('wren', {
+      kind: 'exec',
+      deliver: (w) => {
+        started = true;
+        return slow.deliver(w);
+      },
+    });
+    await until(() => fake.subs.length === 2);
+    fake.push('inbox', [mention()]);
+    await until(() => started, 2000);
+    const t0 = Date.now();
+    ac.abort();
+    await done;
+    expect(Date.now() - t0).toBeLessThan(2000);
+    expect(fake.acks).toEqual([]);
+    expect(router.stats('wren')?.wakes).toBe(0);
+
+    // Next start: the same batch is served again and acked once handed off.
+    const ac2 = new AbortController();
+    const router2 = mk();
+    const done2 = router2.run(ac2.signal);
+    router2.register('wren', new ExecInjector('true', () => {}, { signal: ac2.signal }));
+    await until(() => fake.acks.length === 1, 2000);
+    ac2.abort();
+    await done2;
   });
 
   test('when the newest injector leaves, the previous live one takes over', async () => {
