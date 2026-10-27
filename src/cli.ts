@@ -18,6 +18,7 @@ import { ExecInjector } from './injectors/exec.ts';
 import { serveRouter, socketPath } from './ipc.ts';
 import { keyPath, readKey, redact, tiloriHome, validateHandle, writeKey } from './keys.ts';
 import { Router, type RouterAgentConfig } from './router.ts';
+import type { AgentSubscription } from './types.ts';
 import { runNotifyLines } from './watch.ts';
 
 const USAGE = `tilori-agent: wake local coding agents on Tilori events
@@ -34,8 +35,11 @@ Usage:
   tilori-agent router
       One router per person per machine for every agent with a key file.
       Injectors attach over ${'$'}XDG_RUNTIME_DIR/tilori/router.sock.
-  tilori-agent ensure [--agent <handle>]
-      Creates or renews the agent's subscriptions and prints them.
+  tilori-agent ensure [--agent <handle>] [--prune]
+      Creates or renews the agent's subscriptions and prints them, plus any
+      "unmanaged" ones config does not ask for (nothing polls those). --prune
+      then unsubscribes the listed unmanaged ones, including ones a session
+      made with subscribe_to_events. Only this agent's own are touched.
   tilori-agent policy [--agent <handle>] [--hook]
       Prints the coordination settings (agent, trusted_owners, and the optional
       fallback coordination_community) for a session; --hook emits Claude Code
@@ -197,14 +201,28 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         const agent = requireAgent(config, args);
         const client = new TiloriAgentClient({ url: resolveUrl(config, str(args, 'url')), apiKey: readKey(agent), logger: log });
         try {
-          const subs = await client.ensureSubscriptions(desiredSubscriptions(config.agents?.[agent]), { signal });
-          console.log(
-            JSON.stringify(
-              { agent, endpoint: client.endpoint.href, subscriptions: subs.map((s) => ({ id: s.id, scope: s.scope, expires_at: s.expires_at })) },
-              null,
-              2,
-            ),
-          );
+          const desired = desiredSubscriptions(config.agents?.[agent]);
+          const subs = await client.ensureSubscriptions(desired, { signal });
+          const unmanaged = await client.unmanagedSubscriptions(desired, signal);
+          const brief = (s: AgentSubscription) => ({ id: s.id, scope: s.scope, expires_at: s.expires_at });
+          const out: Record<string, unknown> = {
+            agent,
+            endpoint: client.endpoint.href,
+            subscriptions: subs.map(brief),
+            unmanaged: unmanaged.map(brief),
+          };
+          if (args.flags.has('prune')) {
+            const pruned: string[] = [];
+            for (const s of unmanaged) {
+              log(`unsubscribing unmanaged ${s.scope.type} subscription ${s.id}`);
+              await client.unsubscribe(s.id, signal);
+              pruned.push(s.id);
+            }
+            out.pruned = pruned;
+          } else if (unmanaged.length) {
+            log(`${unmanaged.length} unmanaged subscription(s) listed; run with --prune to remove them`);
+          }
+          console.log(JSON.stringify(out, null, 2));
         } finally {
           await client.close();
         }

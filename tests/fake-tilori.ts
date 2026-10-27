@@ -10,6 +10,7 @@ export class FakeTilori implements McpToolCaller {
   queues = new Map<string, DeliveredEvent[][]>();
   outstanding = new Map<string, AgentDelivery>();
   calls: string[] = [];
+  unsubscribed: string[] = [];
   acks: string[] = [];
   failNextPolls = 0;
   failAcks = 0;
@@ -149,6 +150,13 @@ export class FakeTilori implements McpToolCaller {
           return ok({ delivery: null, retry_after_ms: this.retryAfterMs });
         }
         return ok({ delivery: this.take(id) });
+      }
+      case 'unsubscribe_from_events': {
+        const id = String(a.subscription_id);
+        if (!this.subs.some((s) => s.id === id)) return err('Subscription not found');
+        this.subs = this.subs.filter((s) => s.id !== id);
+        this.unsubscribed.push(id);
+        return ok({});
       }
       case 'acknowledge_events': {
         if (this.failAcks > 0) {

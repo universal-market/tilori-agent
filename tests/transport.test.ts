@@ -154,6 +154,54 @@ describe('over real MCP HTTP transport', () => {
     rmSync(runDir, { recursive: true, force: true });
   }, 20000);
 
+  test('CLI ensure lists unmanaged subscriptions, and removes them only with --prune', async () => {
+    const env = { ...process.env, TILORI_HOME: join(home, 'tilori'), TILORI_AGENT: 'wren' };
+    process.env.TILORI_HOME = env.TILORI_HOME;
+    writeKey('wren', KEY);
+    saveConfig({ url, default_agent: 'wren' });
+    delete process.env.TILORI_HOME;
+    const cli = join(import.meta.dir, '../src/cli.ts');
+    // Async: the CLI talks to this process's server, which spawnSync would block.
+    const run = async (...args: string[]) => {
+      const p = Bun.spawn(['bun', cli, ...args], { env, stdout: 'pipe', stderr: 'pipe' });
+      const [stdout, stderr, exitCode] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+      return { stdout, stderr, exitCode };
+    };
+    // Left over from an older config, or made by a session: not in config.
+    const extra = [
+      { scope: { type: 'posts' as const }, exclude_self: true },
+      { scope: { type: 'mentions' as const }, exclude_self: true },
+    ];
+    const c = new TiloriAgentClient({ url: new URL(url), apiKey: KEY });
+    const made = await Promise.all(extra.map((spec) => c.subscribe(spec)));
+    await c.close();
+    const ids = made.map((s) => s.id).sort();
+
+    const list = await run('ensure');
+    expect(list.exitCode).toBe(0);
+    const listed = JSON.parse(list.stdout);
+    expect(listed.unmanaged.map((s: any) => s.id).sort()).toEqual(ids);
+    expect(listed.pruned).toBeUndefined();
+    expect(list.stderr).toContain('2 unmanaged subscription(s) listed; run with --prune');
+    expect(fake.unsubscribed).toHaveLength(0);
+    const managed = listed.subscriptions.map((s: any) => s.id);
+
+    const prune = await run('ensure', '--prune');
+    expect(prune.exitCode).toBe(0);
+    const pruned = JSON.parse(prune.stdout);
+    // Listed first, then removed: exactly the listed ones, never a managed one.
+    expect(pruned.unmanaged.map((s: any) => s.id).sort()).toEqual(ids);
+    expect([...pruned.pruned].sort()).toEqual(ids);
+    expect([...fake.unsubscribed].sort()).toEqual(ids);
+    expect(fake.subs.map((s) => s.id).sort()).toEqual([...managed].sort());
+    expect(prune.stderr).not.toContain(KEY);
+
+    // Nothing left to prune.
+    const again = JSON.parse((await run('ensure', '--prune')).stdout);
+    expect(again.unmanaged).toEqual([]);
+    expect(again.pruned).toEqual([]);
+  }, 20000);
+
   test('CLI headers prints the bearer header, and fails closed on a wide key file', async () => {
     const env = { ...process.env, TILORI_HOME: join(home, 'tilori'), TILORI_AGENT: 'wren', CLAUDE_CODE_MCP_SERVER_URL: url };
     const cli = join(import.meta.dir, '../src/cli.ts');
