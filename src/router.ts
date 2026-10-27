@@ -68,12 +68,17 @@ interface AgentState {
   /** Until this time, poll each subscription separately (the server rejected
    * `subscription_ids`); retried after a renewal interval. */
   singleUntil: number;
-  /** Until this time an abandoned long poll may still hold a server waiter;
-   * a restart waits for it, so the agent never holds more than two. */
-  abandonedUntil: number;
+  /** Deadlines of abandoned long polls that may still hold a server waiter
+   * (a restart, or a generation that ended mid-call). A restart waits until
+   * none is left and a new call until at most one is, so the agent never
+   * holds more than two. */
+  abandoned: number[];
   /** Subscriptions (by spec) re-subscribed after a per-id poll error, and
    * when. A second error within a renewal interval drops it instead. */
   resubscribed: Map<string, number>;
+  /** Subscriptions (by spec) dropped after repeated poll errors, and when.
+   * Kept across generations, so they stay dropped for a renewal interval. */
+  dropped: Map<string, number>;
   /** Subscription ids to subscribe again at the next setup. */
   renewIds: Set<string>;
   /** Batches handed to an injector whose ack failed: ack again, never re-wake. */
@@ -129,8 +134,9 @@ export class Router {
         polled: makeKick(),
         onPolled: null,
         singleUntil: 0,
-        abandonedUntil: 0,
+        abandoned: [],
         resubscribed: new Map(),
+        dropped: new Map(),
         renewIds: new Set(),
         handedOff: new Set(),
         heldNotice: '',
@@ -205,6 +211,7 @@ export class Router {
       let subs: AgentSubscription[];
       const now = Date.now();
       for (const [key, at] of st.resubscribed) if (now - at > this.#renewEveryMs) st.resubscribed.delete(key);
+      for (const [key, at] of st.dropped) if (now - at > this.#renewEveryMs) st.dropped.delete(key);
       try {
         subs = await client.ensureSubscriptions(st.cfg.subscriptions, {
           signal,
@@ -263,10 +270,9 @@ export class Router {
   ): Promise<void> {
     const { client, handle } = st.cfg;
     const signal = gen.signal;
-    const dropped = new Set<string>();
     let failures = 0;
     while (!signal.aborted) {
-      const usable = subs.filter((s) => !dropped.has(s.id));
+      const usable = subs.filter((s) => !st.dropped.has(specKey(s)));
       if (st.singleUntil > Date.now() || usable.length > MAX_POLL_SUBSCRIPTIONS) {
         await Promise.all(usable.map((sub) => this.#pollSubscription(st, sub, pending, gen)));
         return;
@@ -279,6 +285,13 @@ export class Router {
       const idle = usable.filter((s) => !pending.has(s.id));
       if (!idle.length) {
         await sleep(this.#retryMs, signal, st.polled.promise);
+        continue;
+      }
+      // Two abandoned calls (a restart, then a generation that ended
+      // mid-call) may still hold waiters; a new call now would be a third.
+      const open = this.#openAbandoned(st);
+      if (open.length > 1) {
+        await sleep(Math.min(...open) - Date.now(), signal);
         continue;
       }
 
@@ -297,11 +310,11 @@ export class Router {
         const restart = () => {
           if (call.signal.aborted) return;
           restarted = true;
-          st.abandonedUntil = startedAt + this.#waitMs + 1_000;
+          st.abandoned.push(startedAt + this.#waitMs + 1_000);
           call.abort();
         };
         st.onPolled = () => {
-          const wait = st.abandonedUntil - Date.now();
+          const wait = Math.max(0, ...this.#openAbandoned(st)) - Date.now();
           if (wait <= 0) restart();
           else restartTimer = setTimeout(restart, wait);
         };
@@ -332,11 +345,17 @@ export class Router {
             this.#log(`[${handle}] subscription ${e.subscription_id} could not be polled (${e.error_code}); re-subscribing`);
             resubscribe = true;
           } else {
-            dropped.add(e.subscription_id);
+            st.dropped.set(key, Date.now());
             this.#log(`[${handle}] dropping subscription ${e.subscription_id} (${e.error_code}) until the next renewal`);
           }
         }
         if (resubscribe) {
+          // This call's deliveries for other subscriptions are in `pending`
+          // but never handed off: the flush loop ends with the generation
+          // before it can take them, and #runAgent then clears `pending`.
+          // They stay unacknowledged, so the server re-serves them next
+          // generation; the cost is one extra round trip, not a lost or
+          // repeated wake.
           gen.abort();
           return;
         }
@@ -353,7 +372,12 @@ export class Router {
           await sleep(3_000, signal);
         }
       } catch (cause) {
-        if (signal.aborted) return;
+        if (signal.aborted) {
+          // The generation ended mid-call (renewal or stop): the call keeps
+          // its server waiter until its deadline.
+          if (!restarted) st.abandoned.push(startedAt + this.#waitMs + 1_000);
+          return;
+        }
         if (restarted) continue;
         if (cause instanceof MultiPollUnsupported) {
           st.singleUntil = Date.now() + this.#renewEveryMs;
@@ -376,6 +400,13 @@ export class Router {
         signal.removeEventListener('abort', stopCall);
       }
     }
+  }
+
+  /** Deadlines of abandoned calls that may still hold a server waiter. */
+  #openAbandoned(st: AgentState): number[] {
+    const now = Date.now();
+    st.abandoned = st.abandoned.filter((t) => t > now);
+    return st.abandoned;
   }
 
   /** Long-polls one subscription: the fallback for servers without
