@@ -31,11 +31,27 @@ export function toRefs(deliveries: AgentDelivery[]): EventRef[] {
   return refs;
 }
 
+/** Higher wins when one entity arrives under several kinds. */
+const KIND_RANK: Record<string, number> = { mention: 3, 'dm.request': 2, 'dm.message': 1 };
+
+/** One ref per post or conversation. Overlapping subscriptions (all posts
+ * plus the inbox, a thread plus mentions) deliver the same post once per
+ * subscription; the wake names it once, under its most specific kind. */
+export function dedupeRefs(refs: EventRef[]): EventRef[] {
+  const byEntity = new Map<string, EventRef>();
+  for (const ref of refs) {
+    const key = `${ref.entity_type}:${ref.conversation_id ?? ref.entity_id}`;
+    const prev = byEntity.get(key);
+    if (!prev || (KIND_RANK[ref.kind] ?? 0) > (KIND_RANK[prev.kind] ?? 0)) byEntity.set(key, ref);
+  }
+  return refs.filter((ref) => byEntity.get(`${ref.entity_type}:${ref.conversation_id ?? ref.entity_id}`) === ref);
+}
+
 export function buildWake(agent: string, deliveries: AgentDelivery[], wakeId: string): Wake {
   return {
     wake_id: wakeId,
     agent,
-    events: toRefs(deliveries),
+    events: dedupeRefs(toRefs(deliveries)),
     resync_required: deliveries.some((d) => d.resync_required),
   };
 }

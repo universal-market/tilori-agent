@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { desiredSubscriptions } from '../src/config.ts';
 import { ExecInjector } from '../src/injectors/exec.ts';
 import { Router } from '../src/router.ts';
-import type { DeliverResult, Injector, Wake } from '../src/types.ts';
+import type { DeliverResult, Injector, SubscriptionSpec, Wake } from '../src/types.ts';
 import { FakeTilori, dm, mention, until } from './fake-tilori.ts';
 
 class Recorder implements Injector {
@@ -16,14 +16,18 @@ class Recorder implements Injector {
   }
 }
 
-function setup(opts: { wakesPerHour?: number; now?: () => number } = {}) {
+function setup(
+  opts: { wakesPerHour?: number; now?: () => number; coalesceMs?: number; subscriptions?: SubscriptionSpec[] } = {},
+) {
   const fake = new FakeTilori();
   const logs: string[] = [];
+  const subscriptions = opts.subscriptions ?? desiredSubscriptions();
   const router = new Router({
-    agents: [{ handle: 'wren', client: fake.client(), subscriptions: desiredSubscriptions(), wakesPerHour: opts.wakesPerHour }],
+    agents: [{ handle: 'wren', client: fake.client(), subscriptions, wakesPerHour: opts.wakesPerHour }],
     logger: (m) => logs.push(m),
     waitMs: 10,
     retryMs: 10,
+    coalesceMs: opts.coalesceMs ?? 0,
     now: opts.now,
   });
   const ac = new AbortController();
@@ -41,6 +45,24 @@ describe('router', () => {
     expect(new Set(fake.calls)).toEqual(
       new Set(['list_agent_subscriptions', 'subscribe_to_events', 'poll_events']),
     );
+  });
+
+  test('the same post from overlapping subscriptions makes one wake, as a mention', async () => {
+    const subscriptions = desiredSubscriptions({ direct_messages: false, subscriptions: [{ scope: { type: 'posts' } }] });
+    const { fake, router, ac, done } = setup({ coalesceMs: 200, subscriptions });
+    await until(() => fake.subs.length === 2);
+    const inj = new Recorder();
+    router.register('wren', inj);
+    const post = mention();
+    fake.push('posts', [{ ...post, id: crypto.randomUUID(), kind: 'post.created' }]);
+    await Bun.sleep(50);
+    fake.push('inbox', [post]);
+    await until(() => fake.acks.length === 2);
+    expect(inj.wakes).toHaveLength(1);
+    expect(inj.wakes[0].events).toHaveLength(1);
+    expect(inj.wakes[0].events[0]).toMatchObject({ kind: 'mention', entity_id: post.entity_id });
+    ac.abort();
+    await done;
   });
 
   test('acks only after the injector accepts; holds while none is registered', async () => {
@@ -134,6 +156,7 @@ describe('router', () => {
       logger: (m) => logs.push(m),
       waitMs: 10,
       retryMs: 10,
+      coalesceMs: 0,
     });
     const inj = new Recorder();
     router.register('wren', inj);
@@ -164,6 +187,7 @@ describe('router', () => {
       agents: [{ handle: 'wren', client: fake.client(), subscriptions: desiredSubscriptions() }],
       waitMs: 20_000,
       retryMs: 10,
+      coalesceMs: 0,
     });
     const inj = new Recorder();
     router.register('wren', inj);
@@ -189,6 +213,7 @@ describe('router', () => {
       agents: [{ handle: 'wren', client: fake.client(), subscriptions: desiredSubscriptions() }],
       waitMs: 10,
       retryMs: 10,
+      coalesceMs: 0,
       deliverTimeoutMs: 20,
     } as any);
     const ac = new AbortController();
@@ -215,7 +240,7 @@ describe('router', () => {
   test('stopping during an exec run kills it, does not ack, and redelivers on restart', async () => {
     const fake = new FakeTilori();
     const mk = () =>
-      new Router({ agents: [{ handle: 'wren', client: fake.client(), subscriptions: desiredSubscriptions() }], waitMs: 10, retryMs: 10 });
+      new Router({ agents: [{ handle: 'wren', client: fake.client(), subscriptions: desiredSubscriptions() }], waitMs: 10, retryMs: 10, coalesceMs: 0 });
     const ac = new AbortController();
     const router = mk();
     const done = router.run(ac.signal);
