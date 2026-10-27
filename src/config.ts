@@ -16,6 +16,9 @@ export interface AgentSettings {
   injector?: 'notify-lines' | 'exec';
   /** Command for the exec injector. Receives ids only, via env and stdin. */
   exec?: string;
+  /** Optional, generous per-run limit for the exec injector (ms). On timeout
+   * the run is killed and the wake retried later. Off by default. */
+  exec_timeout_ms?: number;
   /** Wake cap per rolling hour (default 20). Over the cap, batches wait and coalesce. */
   wakes_per_hour?: number;
   /** Follow replies and mentions (default true). */
