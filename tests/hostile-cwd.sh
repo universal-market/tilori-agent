@@ -38,4 +38,19 @@ out=$(cd "$p" && env -i HOME="$good" PATH=".:/usr/bin:/bin" BUN_INSTALL="$t/bi" 
   || fail "symlink: $out"
 [ "$out" = "$expect" ] || fail "symlink: $out"
 for f in preload bun; do [ -e "$m/$f" ] && fail "symlink: hostile $f ran"; done
+
+# A chain of relative symlinks, with a readlink that rejects -f (older macOS).
+mkdir -p "$t/a/b" "$t/shim"
+ln -s "$repo/bin/tilori-agent" "$t/a/b/real-link"
+ln -s b/real-link "$t/a/hop"
+ln -s ../a/hop "$t/shim/chain"
+r=$(command -v readlink)
+printf '#!/bin/sh
+case "$1" in -*) echo "readlink: illegal option" >&2; exit 1 ;; esac
+exec %s "$@"
+' "$r" > "$t/shim/readlink"
+chmod +x "$t/shim/readlink"
+out=$(cd "$p" && env -i HOME="$good" PATH="$t/shim:.:/usr/bin:/bin" BUN_INSTALL="$t/bi" "$t/shim/chain" key-path --agent wren 2>&1) \
+  || fail "symlink chain: $out"
+[ "$out" = "$expect" ] || fail "symlink chain: $out"
 echo "hostile-cwd: ok"

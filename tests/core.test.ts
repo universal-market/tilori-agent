@@ -217,6 +217,33 @@ describe('injectors', () => {
   });
 });
 
+describe('exec kill after close', () => {
+  // The shell dies on SIGTERM but its child ignores it; the group SIGKILL
+  // must still fire after the grace period.
+  const stubborn = (marker: string) => `(trap "" TERM; sleep 1; touch "${marker}") & wait`;
+  const wake = () =>
+    buildWake('wren', [{ subscription_id: 's', delivery_id: 'd', events: [mention()], resync_required: false }], 'w');
+
+  test('timeout path', async () => {
+    const marker = join(home, 'stubborn-timeout.txt');
+    const inj = new ExecInjector(stubborn(marker), () => {}, { timeoutMs: 100, killGraceMs: 150 });
+    expect(await inj.deliver(wake())).toBe('busy');
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(await Bun.file(marker).exists()).toBe(false);
+  });
+
+  test('stop path', async () => {
+    const marker = join(home, 'stubborn-stop.txt');
+    const ac = new AbortController();
+    const inj = new ExecInjector(stubborn(marker), () => {}, { signal: ac.signal, killGraceMs: 150 });
+    const p = inj.deliver(wake());
+    setTimeout(() => ac.abort(), 100);
+    expect(await p).toBe('busy');
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(await Bun.file(marker).exists()).toBe(false);
+  });
+});
+
 describe('client', () => {
   test('never exposes the key via JSON or inspect, and refuses non-read tools', async () => {
     const c = new FakeTilori().client();
