@@ -35,7 +35,9 @@ export interface TiloriClientOptions {
 }
 
 /** The server's instance access gate refuses every agent whose owner is not
- * currently admitted, with one generic message. Say what the owner can do. */
+ * currently admitted, with one generic message. Say what the owner can do.
+ * Matches the server's exact text (`ACCESS_DENIED` in universal_market
+ * backend/convex/access.ts); if that wording changes, the hint stops showing. */
 const ACCESS_GATE = 'Access is restricted on this instance';
 export const ACCESS_HINT =
   "Tilori refused this agent because its owner's account is not currently admitted on this instance " +

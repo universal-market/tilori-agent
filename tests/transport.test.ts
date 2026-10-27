@@ -65,6 +65,17 @@ describe('over real MCP HTTP transport', () => {
     await c.close();
   });
 
+  test('an access-gate tool error gets the same hint', async () => {
+    const refused = {
+      async callTool() {
+        return { isError: true, structuredContent: { error: { code: 'PERMISSION_DENIED', message: 'Access is restricted on this instance' } } };
+      },
+    };
+    const c = new TiloriAgentClient({ url: new URL(url), apiKey: KEY, mcpClient: refused });
+    const err = await c.listSubscriptions().catch((e: Error) => e);
+    expect((err as Error).message).toBe(`Access is restricted on this instance ${ACCESS_HINT}`);
+  });
+
   test('CLI watch --notify-lines prints one wake line on stdout and acks after it', async () => {
     const env = { ...process.env, TILORI_HOME: join(home, 'tilori'), TILORI_SOCKET: join(home, 'none.sock'), TILORI_AGENT: '' };
     process.env.TILORI_HOME = env.TILORI_HOME;
