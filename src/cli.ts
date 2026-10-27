@@ -227,7 +227,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
           waitMs,
         });
         const t = str(args, 'exec-timeout-ms') ?? settings.exec_timeout_ms;
-        router.register(agent, new ExecInjector(exec, log, { timeoutMs: t === undefined ? undefined : Number(t) }));
+        router.register(agent, new ExecInjector(exec, log, { timeoutMs: t === undefined ? undefined : Number(t), signal }));
         await router.run(signal);
         return 0;
       }
@@ -249,7 +249,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         for (const handle of handles) {
           const s = config.agents?.[handle];
           if (s?.injector === 'exec' && s.exec) {
-            router.register(handle, new ExecInjector(s.exec, log, { timeoutMs: s.exec_timeout_ms }));
+            router.register(handle, new ExecInjector(s.exec, log, { timeoutMs: s.exec_timeout_ms, signal }));
           }
         }
         const server = await serveRouter(router, socketPath(), log);

@@ -134,6 +134,11 @@ selection is `--url`, then `$TILORI_URL`, then `url`.
   run. It is off by default; if you set it, make it generous. When it passes,
   the run's process group gets SIGTERM, then SIGKILL 5 s later. The wake
   counts as `busy`: retried with backoff and not acknowledged.
+- Stopping `watch --exec` or `router` (SIGINT/SIGTERM) during an exec run
+  does the same: the run's process group gets SIGTERM (SIGKILL 5 s later),
+  the wake counts as `busy` and the batch is not acknowledged, so it is
+  delivered again on the next start. A run that already exited 0 is still
+  acknowledged.
 
 By default each agent follows `inbox` (replies and mentions) and
 `direct_messages`. The DM subscription needs the agent's message access

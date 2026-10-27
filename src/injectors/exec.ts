@@ -9,6 +9,11 @@ export interface ExecOptions {
    * set it, make it generous (e.g. 30 minutes for an agent run). */
   timeoutMs?: number;
   killGraceMs?: number;
+  /** The watcher's stop signal. When it fires during a run, the command's
+   * process group gets SIGTERM (SIGKILL after `killGraceMs`) and the wake
+   * reports `busy`, so the batch is not acknowledged and is redelivered on
+   * the next start. A run that already exited 0 still counts. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -35,15 +40,18 @@ export class ExecInjector implements Injector {
 
   deliver(wake: Wake): Promise<DeliverResult> {
     const text = wakeText(wake);
+    const stopSignal = this.options.signal;
+    if (stopSignal?.aborted) return Promise.resolve('busy');
     return new Promise((resolve) => {
       const env = { ...process.env, TILORI_WAKE_TEXT: text, TILORI_WAKE_JSON: JSON.stringify(wake), TILORI_AGENT: wake.agent };
-      // Own process group, so a timeout also stops whatever the command spawned.
+      // Own process group, so a timeout or stop also ends whatever the command
+      // spawned (and a terminal Ctrl-C doesn't reach it behind our back).
       const child = spawn('/bin/sh', ['-c', this.command], {
         stdio: ['pipe', 'inherit', 'inherit'],
         env,
         detached: true,
       });
-      let timedOut = false;
+      let stopped = false;
       const killGroup = (sig: NodeJS.Signals) => {
         try {
           if (child.pid) process.kill(-child.pid, sig);
@@ -52,23 +60,28 @@ export class ExecInjector implements Injector {
         }
       };
       let killTimer: ReturnType<typeof setTimeout> | undefined;
+      const stop = (why: string) => {
+        if (stopped) return;
+        stopped = true;
+        this.logger(`exec injector ${why}; stopping it`);
+        killGroup('SIGTERM');
+        killTimer = setTimeout(() => killGroup('SIGKILL'), this.options.killGraceMs ?? 5_000);
+      };
       const timer =
         this.options.timeoutMs !== undefined
-          ? setTimeout(() => {
-              timedOut = true;
-              this.logger(`exec injector timed out after ${this.options.timeoutMs} ms; stopping it`);
-              killGroup('SIGTERM');
-              killTimer = setTimeout(() => killGroup('SIGKILL'), this.options.killGraceMs ?? 5_000);
-            }, this.options.timeoutMs)
+          ? setTimeout(() => stop(`timed out after ${this.options.timeoutMs} ms`), this.options.timeoutMs)
           : undefined;
+      const onStop = () => stop('interrupted by stop signal');
+      stopSignal?.addEventListener('abort', onStop, { once: true });
       const finish = (r: DeliverResult) => {
         clearTimeout(timer);
         clearTimeout(killTimer);
+        stopSignal?.removeEventListener('abort', onStop);
         resolve(r);
       };
       child.on('error', () => finish('busy'));
       child.on('close', (code) => {
-        if (timedOut) return finish('busy');
+        if (stopped) return finish('busy');
         if (code !== 0) this.logger(`exec injector exited ${code}; will retry`);
         finish(code === 0 ? 'accepted' : 'busy');
       });

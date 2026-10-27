@@ -198,6 +198,23 @@ describe('injectors', () => {
     expect(await Bun.file(marker).exists()).toBe(false);
     expect(() => new ExecInjector('true', () => {}, { timeoutMs: 0 })).toThrow();
   });
+
+  test('exec stop signal kills the run (and its children) and reports busy', async () => {
+    const wake = buildWake('wren', [{ subscription_id: 's', delivery_id: 'd', events: [mention()], resync_required: false }], 'w');
+    const marker = join(home, 'stopped.txt');
+    const ac = new AbortController();
+    const inj = new ExecInjector(`(sleep 5; touch "${marker}") & wait`, () => {}, { signal: ac.signal, killGraceMs: 100 });
+    const t0 = Date.now();
+    const p = inj.deliver(wake);
+    setTimeout(() => ac.abort(), 100);
+    expect(await p).toBe('busy');
+    expect(Date.now() - t0).toBeLessThan(2000);
+    await new Promise((r) => setTimeout(r, 300));
+    expect(await Bun.file(marker).exists()).toBe(false);
+    // Already stopped: nothing is spawned.
+    expect(await new ExecInjector(`touch "${marker}"`, () => {}, { signal: ac.signal }).deliver(wake)).toBe('busy');
+    expect(await Bun.file(marker).exists()).toBe(false);
+  });
 });
 
 describe('client', () => {
