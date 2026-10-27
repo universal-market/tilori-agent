@@ -1,0 +1,33 @@
+#!/bin/sh
+# tilori-agent launcher. Bun reads bunfig.toml (including `preload` scripts)
+# and .env from the *current directory*, so running src/cli.ts straight from
+# an untrusted repository could run that repository's code or redirect
+# TILORI_HOME / TILORI_AGENT / TILORI_URL / TILORI_SOCKET. This launcher:
+#   - starts Bun from / and passes --no-env-file;
+#   - uses only an absolute bun (PATH entries that are "." or empty, or any
+#     relative entry, are skipped; then $BUN_INSTALL/bin, ~/.bun/bin).
+# The CLI takes no file-path arguments, so changing directory is safe.
+set -u
+self=$(readlink -f "$0" 2>/dev/null || echo "$0")
+case "$self" in /*) ;; *) self="$(pwd -P)/$self" ;; esac
+cli="$(dirname "$(dirname "$self")")/src/cli.ts"
+
+bun=
+old_ifs=$IFS; IFS=:
+for d in $PATH; do
+  case "$d" in
+    /*) if [ -x "$d/bun" ] && [ ! -d "$d/bun" ]; then bun="$d/bun"; break; fi ;;
+  esac
+done
+IFS=$old_ifs
+if [ -z "$bun" ]; then
+  for d in "${BUN_INSTALL:-}" "${HOME:-}/.bun"; do
+    case "$d" in
+      /*) if [ -x "$d/bin/bun" ]; then bun="$d/bin/bun"; break; fi ;;
+    esac
+  done
+fi
+[ -n "$bun" ] || { echo "tilori-agent: bun not found (install Bun or put it on PATH)" >&2; exit 127; }
+
+cd / || exit 127
+exec "$bun" --no-env-file "$cli" "$@"

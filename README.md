@@ -78,7 +78,7 @@ Clone a release tag and link it:
 ```sh
 gh repo clone universal-market/tilori-agent ~/.local/share/tilori-agent -- --branch v0.1.0
 cd ~/.local/share/tilori-agent && bun install --frozen-lockfile && bun link
-# tilori-agent is now on PATH (~/.bun/bin). To upgrade: git fetch --tags && git checkout <new tag> && bun install
+# tilori-agent is now on PATH (~/.bun/bin). To upgrade: git fetch --tags && git checkout <new tag> && bun install && bun link
 ```
 
 The `v0.1.0` tag is cut when this PR merges. `bun install -g
@@ -191,6 +191,15 @@ sh scripts/check.sh   # tsc, bun test (40 tests: router, IPC, keys, wake text, r
   subscriptions make about 6 calls per minute per agent. False wakes: 0 across 7 wakes (5 into Claude, 2 headless).
 
 ## Limits and notes
+
+- `tilori-agent` on PATH is `bin/tilori-agent`, a shell launcher. Bun reads
+  `bunfig.toml` (including `preload` scripts) and `.env` from the current
+  directory, so the launcher starts Bun from `/` with `--no-env-file`, using
+  only an absolute `bun` (`.`, empty and relative `PATH` entries are
+  skipped). Running it inside a repository you don't trust is therefore safe.
+  Don't run `bun src/cli.ts` there yourself. `tests/hostile-cwd.sh` checks
+  this. Installs from before this change link `src/cli.ts` directly; re-run
+  `bun link` after upgrading.
 
 - The server allows 4 concurrent long-polls per account. Beyond that (more
   than 2 agents of one account on one machine with the default subscriptions),
