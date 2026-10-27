@@ -1,9 +1,11 @@
 #!/bin/sh
 # Runs bin/tilori-agent from a hostile directory: a bunfig.toml preload, a
-# .env redirecting TILORI_HOME, and ./bun on a "." or empty PATH entry must
-# have no effect. Includes a negative control on plain Bun.
+# .env redirecting TILORI_HOME, and ./bun, ./tilori-agent, ./dirname and
+# ./readlink on a "." or empty PATH entry must have no effect. Includes a
+# negative control on plain Bun.
 set -eu
-repo=$(cd "$(dirname "$0")/.." && pwd -P)
+case "$0" in */*) here=${0%/*} ;; *) here=. ;; esac
+repo=$(cd "$here/.." && pwd -P)
 realbun=$(command -v bun 2>/dev/null || echo "$HOME/.bun/bin/bun")
 [ -x "$realbun" ] || { echo "skip: bun not installed"; exit 0; }
 t=$(mktemp -d); trap 'rm -rf "$t"' EXIT
@@ -13,7 +15,10 @@ ln -s "$realbun" "$t/bunbin/bun"
 printf 'preload = ["./evil.ts"]\n' > "$p/bunfig.toml"
 printf 'require("fs").writeFileSync(%s, "x");\n' "\"$m/preload\"" > "$p/evil.ts"
 printf 'TILORI_HOME=%s/evil\n' "$p" > "$p/.env"
-printf '#!/bin/sh\ntouch "%s/bun"\necho hijacked\n' "$m" > "$p/bun"; chmod +x "$p/bun"
+hostile="bun tilori-agent dirname readlink"
+for n in $hostile; do
+  printf '#!/bin/sh\ntouch "%s/%s"\necho hijacked\n' "$m" "$n" > "$p/$n"; chmod +x "$p/$n"
+done
 fail() { echo "FAIL: $*" >&2; exit 1; }
 expect="$good/.config/tilori/agents/wren.key"
 
@@ -23,21 +28,37 @@ out=$(cd "$p" && env -i HOME="$good" "$realbun" "$repo/src/cli.ts" key-path --ag
 [ "$out" = "$p/evil/agents/wren.key" ] || fail "control: .env not applied (test not meaningful): $out"
 rm -f "$m/preload"
 
+no_markers() { for f in preload $hostile; do [ -e "$m/$f" ] && fail "$1: hostile $f ran"; done; :; }
+
 sys="$t/bunbin:/usr/bin:/bin"
 for path in ".:$sys" ":$sys" "$sys:" "$sys::x"; do
   out=$(cd "$p" && env -i HOME="$good" PATH="$path" "$repo/bin/tilori-agent" key-path --agent wren 2>&1) \
     || fail "PATH=$path: exit $? ($out)"
   [ "$out" = "$expect" ] || fail "PATH=$path: $out"
-  for f in preload bun; do [ -e "$m/$f" ] && fail "PATH=$path: hostile $f ran"; done
-  :
+  no_markers "PATH=$path"
+done
+# PATH starting with "." or an empty entry and bun found only via BUN_INSTALL.
+mkdir -p "$t/bi/bin" && ln -s "$realbun" "$t/bi/bin/bun"
+for path in ".:/usr/bin:/bin" ":/usr/bin:/bin"; do
+  out=$(cd "$p" && env -i HOME="$good" PATH="$path" BUN_INSTALL="$t/bi" "$repo/bin/tilori-agent" key-path --agent wren 2>&1) \
+    || fail "PATH=$path (bun via BUN_INSTALL): exit $? ($out)"
+  [ "$out" = "$expect" ] || fail "PATH=$path (bun via BUN_INSTALL): $out"
+  no_markers "PATH=$path (bun via BUN_INSTALL)"
 done
 # Through a symlink (as bun link installs it), with bun found via BUN_INSTALL.
 ln -s "$repo/bin/tilori-agent" "$t/link"
-mkdir -p "$t/bi/bin" && ln -s "$realbun" "$t/bi/bin/bun"
 out=$(cd "$p" && env -i HOME="$good" PATH=".:/usr/bin:/bin" BUN_INSTALL="$t/bi" "$t/link" key-path --agent wren 2>&1) \
   || fail "symlink: $out"
 [ "$out" = "$expect" ] || fail "symlink: $out"
-for f in preload bun; do [ -e "$m/$f" ] && fail "symlink: hostile $f ran"; done
+no_markers symlink
+# Run by a relative path from the project directory, so $0 must be made
+# absolute (via $PWD) before cd /, and then followed through the symlink.
+for path in ".:/usr/bin:/bin" ":/usr/bin:/bin"; do
+  out=$(cd "$p" && env -i HOME="$good" PATH="$path" BUN_INSTALL="$t/bi" ../link key-path --agent wren 2>&1) \
+    || fail "relative \$0, PATH=$path: $out"
+  [ "$out" = "$expect" ] || fail "relative \$0, PATH=$path: $out"
+  no_markers "relative \$0, PATH=$path"
+done
 
 # A chain of relative symlinks, with a readlink that rejects -f (older macOS).
 mkdir -p "$t/a/b" "$t/shim"
@@ -53,4 +74,5 @@ chmod +x "$t/shim/readlink"
 out=$(cd "$p" && env -i HOME="$good" PATH="$t/shim:.:/usr/bin:/bin" BUN_INSTALL="$t/bi" "$t/shim/chain" key-path --agent wren 2>&1) \
   || fail "symlink chain: $out"
 [ "$out" = "$expect" ] || fail "symlink chain: $out"
+no_markers "symlink chain"
 echo "hostile-cwd: ok"
