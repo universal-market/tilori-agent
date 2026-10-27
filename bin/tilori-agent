@@ -8,19 +8,31 @@
 #     relative entry, are skipped; then $BUN_INSTALL/bin, ~/.bun/bin).
 # The CLI takes no file-path arguments, so changing directory is safe.
 set -u
-# Follow symlinks one hop at a time (bun link installs ~/.bun/bin/tilori-agent
-# as a relative symlink). Plain `readlink` only: older macOS has no -f.
-self=$0
+# No external command may run before `cd /`: with a "." or empty PATH entry a
+# project-local ./dirname or ./readlink would run first. So make $0 absolute
+# with shell-only expansions ($PWD, ${0%/*}), cd /, and only then follow
+# symlinks (bun link installs ~/.bun/bin/tilori-agent as a relative symlink),
+# one hop at a time with plain `readlink` (older macOS has no -f). From /, a
+# "." or empty PATH entry can only reach files under /.
+case "$0" in
+  /*) self=$0 ;;
+  *) self="${PWD:-}/$0" ;;
+esac
+case "$self" in
+  /*) ;;
+  *) echo "tilori-agent: cannot resolve the launcher path ($0)" >&2; exit 127 ;;
+esac
+cd / || exit 127
 n=0
 while [ -L "$self" ]; do
   n=$((n + 1)); [ "$n" -le 40 ] || { echo "tilori-agent: symlink loop at $0" >&2; exit 127; }
   link=$(readlink "$self") || break
   case "$link" in
     /*) self=$link ;;
-    *) self="$(dirname "$self")/$link" ;;
+    *) self="${self%/*}/$link" ;;
   esac
 done
-root=$(cd "$(dirname "$self")/.." && pwd -P) || exit 127
+root=$(cd "${self%/*}/.." && pwd -P) || exit 127
 cli="$root/src/cli.ts"
 [ -f "$cli" ] || { echo "tilori-agent: cannot find src/cli.ts next to $self" >&2; exit 127; }
 
@@ -41,5 +53,4 @@ if [ -z "$bun" ]; then
 fi
 [ -n "$bun" ] || { echo "tilori-agent: bun not found (install Bun or put it on PATH)" >&2; exit 127; }
 
-cd / || exit 127
 exec "$bun" --no-env-file "$cli" "$@"
