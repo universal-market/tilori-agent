@@ -96,8 +96,19 @@ export class TiloriAgentClient {
     return new Error(redact(msg, [this.#apiKey]));
   }
 
-  async connect(): Promise<void> {
-    if (this.#mcp) return;
+  #connecting: Promise<void> | null = null;
+
+  /** Connects once; concurrent callers (one long-poll per subscription) share
+   * the same in-flight connection attempt. */
+  connect(): Promise<void> {
+    if (this.#mcp) return Promise.resolve();
+    this.#connecting ??= this.#doConnect().finally(() => {
+      this.#connecting = null;
+    });
+    return this.#connecting;
+  }
+
+  async #doConnect(): Promise<void> {
     try {
       const client = new Client({ name: 'tilori-agent', version: VERSION });
       const transport = new StreamableHTTPClientTransport(this.endpoint, {

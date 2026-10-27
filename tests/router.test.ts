@@ -180,6 +180,89 @@ describe('router', () => {
     await done;
   });
 
+  test('slow deliver: invoked once, late accepted is acked and counted (no timeout re-invokes)', async () => {
+    const fake = new FakeTilori();
+    // deliverTimeoutMs was the old option that turned slow delivers into busy
+    // and re-invoked them; it must have no effect now.
+    const router = new Router({
+      agents: [{ handle: 'wren', client: fake.client(), subscriptions: desiredSubscriptions() }],
+      waitMs: 10,
+      retryMs: 10,
+      deliverTimeoutMs: 20,
+    } as any);
+    const ac = new AbortController();
+    const done = router.run(ac.signal);
+    let calls = 0;
+    const slow: Injector = {
+      kind: 'exec',
+      deliver: async () => {
+        calls++;
+        await new Promise((r) => setTimeout(r, 300));
+        return 'accepted';
+      },
+    };
+    router.register('wren', slow);
+    await until(() => fake.subs.length === 2);
+    fake.push('inbox', [mention()]);
+    await until(() => fake.acks.length === 1, 2000);
+    expect(calls).toBe(1);
+    expect(router.stats('wren')?.wakes).toBe(1);
+    ac.abort();
+    await done;
+  });
+
+  test('when the newest injector leaves, the previous live one takes over', async () => {
+    const { fake, router, ac, done } = setup();
+    const older = new Recorder();
+    const newer = new Recorder();
+    router.register('wren', older);
+    const dropNewer = router.register('wren', newer);
+    await until(() => fake.subs.length === 2);
+    fake.push('inbox', [mention()]);
+    await until(() => newer.wakes.length === 1);
+    dropNewer();
+    expect(router.injectorCount('wren')).toBe(1);
+    fake.push('inbox', [mention()]);
+    await until(() => older.wakes.length === 1);
+    expect(fake.acks).toHaveLength(2);
+    ac.abort();
+    await done;
+  });
+
+  test('a gone injector falls back to the previous one at once', async () => {
+    const { fake, router, ac, done } = setup();
+    const older = new Recorder();
+    const newer = new Recorder();
+    newer.next = ['gone'];
+    router.register('wren', older);
+    router.register('wren', newer);
+    await until(() => fake.subs.length === 2);
+    fake.push('inbox', [mention()]);
+    await until(() => older.wakes.length === 1);
+    expect(router.injectorCount('wren')).toBe(1);
+    ac.abort();
+    await done;
+  });
+
+  test('busy retries back off exponentially and new batches do not shorten the backoff', async () => {
+    const { fake, router, ac, done } = setup();
+    let calls = 0;
+    const busy: Injector = { kind: 'test', deliver: async () => (calls++, 'busy') };
+    router.register('wren', busy);
+    await until(() => fake.subs.length === 2);
+    fake.push('inbox', [mention()]);
+    await new Promise((r) => setTimeout(r, 100));
+    fake.push('direct_messages', [dm()]);
+    await new Promise((r) => setTimeout(r, 250));
+    // retryMs 10 → waits of 10, 20, 40, 80, 160 ms: at most ~6 attempts in 350 ms
+    // (a fixed 10 ms retry would be ~35).
+    expect(calls).toBeGreaterThanOrEqual(3);
+    expect(calls).toBeLessThanOrEqual(7);
+    expect(fake.acks).toHaveLength(0);
+    ac.abort();
+    await done;
+  });
+
   test('refuses registration for an agent it does not serve', () => {
     const { router, ac } = setup();
     expect(() => router.register('other', new Recorder())).toThrow();

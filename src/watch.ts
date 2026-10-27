@@ -1,7 +1,7 @@
 import { TiloriAgentClient } from './client.ts';
 import { desiredSubscriptions, resolveUrl, type TiloriConfig } from './config.ts';
 import { NotifyLinesInjector } from './injectors/notify-lines.ts';
-import { attachToRouter, routerAvailable, socketPath } from './ipc.ts';
+import { attachToRouter, probeRouter, socketIdentity, socketPath } from './ipc.ts';
 import { readKey } from './keys.ts';
 import { Router } from './router.ts';
 import type { Injector } from './types.ts';
@@ -14,6 +14,8 @@ export interface NotifyLinesOptions {
   logger?: (m: string) => void;
   injector?: Injector;
   waitMs?: number;
+  /** How often direct mode checks for a router to attach to (default 15 s). */
+  routerCheckMs?: number;
 }
 
 /** Builds a one-agent router that talks to Tilori directly with the agent's key. */
@@ -65,21 +67,49 @@ export async function runNotifyLines(opts: NotifyLinesOptions): Promise<void> {
       process.exit(0);
     });
   const path = socketPath();
+  // A router that refused this agent (it doesn't serve it) is not retried
+  // until the socket is replaced.
+  let refused: string | null = null;
+  const usable = async () => {
+    const id = socketIdentity(path);
+    return id !== null && id !== refused && (await probeRouter(path));
+  };
 
-  while (!opts.signal?.aborted && routerAvailable(path)) {
+  while (!opts.signal?.aborted) {
+    if (await usable()) {
+      try {
+        await attachToRouter(opts.agent, injector, path, () => log(`attached to router for ${opts.agent}`));
+        log('router connection closed; reconnecting');
+        await new Promise((r) => setTimeout(r, 2000));
+        continue;
+      } catch (cause) {
+        const msg = cause instanceof Error ? cause.message : String(cause);
+        if (/refused/i.test(msg)) refused = socketIdentity(path);
+        log(`router unavailable (${msg}); running directly`);
+      }
+    }
+    if (opts.signal?.aborted) return;
+
+    // Direct mode, until a router that serves this agent appears. Stopping
+    // lets an in-flight handoff finish and acknowledge first, so the switch
+    // does not wake the session twice for one batch.
+    const stop = new AbortController();
+    const onAbort = () => stop.abort();
+    opts.signal?.addEventListener('abort', onAbort, { once: true });
+    const router = directRouter(opts);
+    router.register(opts.agent, injector);
+    log(`watching Tilori directly for ${opts.agent}`);
+    const check = setInterval(async () => {
+      if (!stop.signal.aborted && (await usable())) {
+        log('a router appeared; switching to it');
+        stop.abort();
+      }
+    }, opts.routerCheckMs ?? (Number(process.env.TILORI_ROUTER_CHECK_MS) || 15_000));
     try {
-      await attachToRouter(opts.agent, injector, path, () => log(`attached to router for ${opts.agent}`));
-      log('router connection closed; reconnecting');
-      await new Promise((r) => setTimeout(r, 2000));
-    } catch (cause) {
-      log(`router unavailable (${cause instanceof Error ? cause.message : cause}); running directly`);
-      break;
+      await router.run(stop.signal);
+    } finally {
+      clearInterval(check);
+      opts.signal?.removeEventListener('abort', onAbort);
     }
   }
-  if (opts.signal?.aborted) return;
-
-  const router = directRouter(opts);
-  router.register(opts.agent, injector);
-  log(`watching Tilori directly for ${opts.agent}`);
-  await router.run(opts.signal);
 }

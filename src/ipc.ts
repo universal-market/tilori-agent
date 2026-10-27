@@ -159,6 +159,38 @@ export async function serveRouter(router: Router, path = socketPath(), log: (m: 
   return server;
 }
 
+/** Identity of the socket file (inode + mtime), or null if absent or not ours. */
+export function socketIdentity(path = socketPath()): string | null {
+  try {
+    assertOwnedSocket(path);
+    const st = lstatSync(path);
+    return `${st.ino}:${st.mtimeMs}`;
+  } catch {
+    return null;
+  }
+}
+
+/** Whether a live router owned by this user is listening (connect test). */
+export async function probeRouter(path = socketPath()): Promise<boolean> {
+  if (!routerAvailable(path)) return false;
+  return new Promise<boolean>((resolve) => {
+    const c = createConnection(path);
+    const t = setTimeout(() => {
+      c.destroy();
+      resolve(false);
+    }, 2_000);
+    c.once('connect', () => {
+      clearTimeout(t);
+      c.destroy();
+      resolve(true);
+    });
+    c.once('error', () => {
+      clearTimeout(t);
+      resolve(false);
+    });
+  });
+}
+
 /** Whether a router socket owned by this user exists (it may still be stale). */
 export function routerAvailable(path = socketPath()): boolean {
   try {

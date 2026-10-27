@@ -3,7 +3,10 @@ import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { TiloriAgentClient } from './client.ts';
 import {
+  buildMcpUrl,
   configPath,
+  coordinationPolicy,
+  policyText,
   desiredSubscriptions,
   loadConfig,
   resolveAgent,
@@ -33,8 +36,13 @@ Usage:
       Injectors attach over ${'$'}XDG_RUNTIME_DIR/tilori/router.sock.
   tilori-agent ensure [--agent <handle>]
       Creates or renews the agent's subscriptions and prints them.
-  tilori-agent headers [--agent <handle>]
-      Prints {"Authorization": "Bearer …"} for an MCP headersHelper.
+  tilori-agent policy [--agent <handle>] [--hook]
+      Prints the coordination settings (trusted_owners, coordination_community)
+      for a session; --hook emits Claude Code SessionStart hook JSON.
+  tilori-agent headers [--agent <handle>] [--server-url <url>]
+      Prints {"Authorization": "Bearer …"} for an MCP headersHelper, only if the
+      requesting server URL ($CLAUDE_CODE_MCP_SERVER_URL or --server-url)
+      matches "url" in config.json.
 
 Agent selection: --agent, then $TILORI_AGENT, then "default_agent" in config.json.
 URL selection:   --url, then $TILORI_URL, then "url" in config.json.
@@ -47,7 +55,7 @@ interface Args {
 
 export function parseArgs(argv: string[]): Args {
   const flags = new Map<string, string | true>();
-  const valued = new Set(['agent', 'url', 'exec', 'wait-ms']);
+  const valued = new Set(['agent', 'url', 'exec', 'wait-ms', 'server-url']);
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
     if (!a.startsWith('--')) throw new Error(`Unexpected argument: ${a}`);
@@ -168,8 +176,18 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       case 'headers': {
         // Output is consumed by Claude Code's headersHelper. Never print the
         // key anywhere else; fail closed on any problem.
+        // The key is only released for the configured Tilori server: Claude
+        // Code passes the server's URL to its headersHelper as
+        // CLAUDE_CODE_MCP_SERVER_URL; other hosts pass --server-url.
         const config = loadConfig();
         const agent = requireAgent(config, args);
+        const asked = str(args, 'server-url') ?? process.env.CLAUDE_CODE_MCP_SERVER_URL;
+        if (!asked) throw new Error('headers needs the requesting server URL (CLAUDE_CODE_MCP_SERVER_URL or --server-url).');
+        if (!config.url) throw new Error('No "url" in config.json; run tilori-agent init.');
+        const same = (a: URL, b: URL) => a.origin === b.origin && a.pathname.replace(/\/+$/, '') === b.pathname.replace(/\/+$/, '');
+        if (!same(buildMcpUrl(asked), buildMcpUrl(config.url))) {
+          throw new Error('Refusing: the MCP server URL does not match "url" in config.json.');
+        }
         process.stdout.write(JSON.stringify({ Authorization: `Bearer ${readKey(agent)}` }) + '\n');
         return 0;
       }
@@ -235,6 +253,31 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         log(`router serving ${handles.join(', ')} on ${socketPath()}`);
         signal.addEventListener('abort', () => server.close(), { once: true });
         await router.run(signal);
+        return 0;
+      }
+      case 'policy': {
+        // SessionStart hook: hands the session its coordination settings.
+        // Never fails the session start: unconfigured machines print nothing.
+        let config: TiloriConfig = {};
+        try {
+          config = loadConfig();
+        } catch (e) {
+          log((e as Error).message);
+          return 0;
+        }
+        let agent: string | null = null;
+        try {
+          agent = resolveAgent(config, str(args, 'agent'));
+        } catch {
+          agent = null;
+        }
+        if (!agent) return 0;
+        const text = policyText(coordinationPolicy(config, agent));
+        if (args.flags.has('hook')) {
+          process.stdout.write(
+            JSON.stringify({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: text } }) + '\n',
+          );
+        } else console.log(text);
         return 0;
       }
       case 'key-path': {

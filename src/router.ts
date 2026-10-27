@@ -17,11 +17,11 @@ export interface RouterOptions {
   logger?: (message: string) => void;
   /** Long-poll wait per poll_events call (default 20 s, max 25 s). */
   waitMs?: number;
-  /** Retry delay while a batch is held (no injector, busy, capped). Default 2 s. */
+  /** Base retry delay while a batch is held (no injector, busy). Busy
+   * retries back off exponentially from here up to 60 s. Default 2 s. */
   retryMs?: number;
   /** Re-check subscriptions this often (default 6 h); they expire after 30 days. */
   renewEveryMs?: number;
-  deliverTimeoutMs?: number;
   now?: () => number;
 }
 
@@ -39,26 +39,25 @@ function sleep(ms: number, signal?: AbortSignal, kick?: Promise<void>): Promise<
   });
 }
 
-function withTimeout(p: Promise<DeliverResult>, ms: number): Promise<DeliverResult> {
-  return new Promise((resolve) => {
-    const t = setTimeout(() => resolve('busy'), ms);
-    p.then(
-      (r) => {
-        clearTimeout(t);
-        resolve(r);
-      },
-      () => {
-        clearTimeout(t);
-        resolve('busy');
-      },
-    );
-  });
+/** A deliver that throws counts as busy; it never resolves early. */
+async function settle(p: Promise<DeliverResult>): Promise<DeliverResult> {
+  try {
+    return await p;
+  } catch {
+    return 'busy';
+  }
 }
 
 interface AgentState {
   cfg: RouterAgentConfig;
   limiter: WakeLimiter;
-  injector: Injector | null;
+  /** Live injectors, oldest first. The newest one receives wakes; when it
+   * leaves, the previous one takes over. */
+  injectors: Injector[];
+  /** Consecutive busy results, for exponential backoff. */
+  busy: number;
+  /** No delivery attempt before this time (busy backoff); new batches don't shorten it. */
+  retryAt: number;
   /** Fired when there may be something to flush (new batch, new injector). */
   kick: { promise: Promise<void>; fire: () => void };
   /** Fired after held batches were acknowledged, so pollers resume at once. */
@@ -90,7 +89,6 @@ export class Router {
   readonly #waitMs: number;
   readonly #retryMs: number;
   readonly #renewEveryMs: number;
-  readonly #deliverTimeoutMs: number;
   readonly #now: () => number;
 
   constructor(options: RouterOptions) {
@@ -98,14 +96,15 @@ export class Router {
     this.#waitMs = options.waitMs ?? 20_000;
     this.#retryMs = options.retryMs ?? 2_000;
     this.#renewEveryMs = options.renewEveryMs ?? 6 * 3600_000;
-    this.#deliverTimeoutMs = options.deliverTimeoutMs ?? 30_000;
     this.#now = options.now ?? Date.now;
     for (const cfg of options.agents) {
       if (this.#agents.has(cfg.handle)) throw new Error(`Agent ${cfg.handle} listed twice.`);
       this.#agents.set(cfg.handle, {
         cfg,
         limiter: new WakeLimiter(cfg.wakesPerHour ?? DEFAULT_WAKES_PER_HOUR, this.#now),
-        injector: null,
+        injectors: [],
+        busy: 0,
+        retryAt: 0,
         kick: makeKick(),
         polled: makeKick(),
         handedOff: new Set(),
@@ -123,16 +122,33 @@ export class Router {
     return this.#agents.get(handle)?.stats;
   }
 
-  /** Registers the injector for an agent. The newest registration wins; the
-   * returned function unregisters it (only if it is still current). */
+  /** Registers an injector for an agent. The newest live registration
+   * receives wakes; the returned function removes this one, and the previous
+   * registration (if still live) takes over. */
   register(handle: string, injector: Injector): () => void {
     const st = this.#agents.get(handle);
     if (!st) throw new Error(`This router does not serve agent ${handle}.`);
-    st.injector = injector;
+    st.injectors = st.injectors.filter((i) => i !== injector);
+    st.injectors.push(injector);
+    st.busy = 0;
+    st.retryAt = 0;
     this.#wake(st);
-    return () => {
-      if (st.injector === injector) st.injector = null;
-    };
+    return () => this.#drop(st, injector);
+  }
+
+  #drop(st: AgentState, injector: Injector) {
+    const before = st.injectors.length;
+    st.injectors = st.injectors.filter((i) => i !== injector);
+    if (st.injectors.length !== before) {
+      st.busy = 0;
+      st.retryAt = 0;
+      this.#wake(st);
+    }
+  }
+
+  /** Number of live injectors for an agent (for tests and status). */
+  injectorCount(handle: string): number {
+    return this.#agents.get(handle)?.injectors.length ?? 0;
   }
 
   #wake(st: AgentState) {
@@ -224,7 +240,7 @@ export class Router {
       } catch (cause) {
         if (signal.aborted) return;
         const msg = errText(cause);
-        if (/subscription/i.test(msg) && /not found|expired|unknown|no longer/i.test(msg)) {
+        if (/subscription/i.test(msg) && /not found|expired|unknown|unavailable|no longer/i.test(msg)) {
           this.#log(`[${handle}] ${sub.scope.type} subscription is gone; re-subscribing`);
           gen.abort();
           return;
@@ -279,7 +295,10 @@ export class Router {
         if (st.heldNotice !== s) this.#log(`[${handle}] ${s}`);
         st.heldNotice = s;
       };
-      if (!st.injector) {
+      const backingOff = st.retryAt - Date.now();
+      if (backingOff > 0) return backingOff;
+      const injector = st.injectors.at(-1);
+      if (!injector) {
         notice(`holding ${count} event(s): no injector registered for this agent yet`);
         return this.#retryMs * 5;
       }
@@ -291,14 +310,26 @@ export class Router {
         );
         return Math.min(capWait, 60_000);
       }
-      const injector = st.injector;
       const wake = buildWake(handle, fresh, randomUUID());
-      const result = await withTimeout(injector.deliver(wake), this.#deliverTimeoutMs);
-      if (result !== 'accepted') {
-        if (result === 'gone' && st.injector === injector) st.injector = null;
-        notice(`injector ${injector.kind} ${result}; holding ${count} event(s)`);
-        return this.#retryMs;
+      // Exactly one deliver is in flight per agent: this loop awaits it with
+      // no timeout, so a slow injector (an exec run, a busy session) is never
+      // invoked again for the same batch, and a late `accepted` still counts.
+      // A remote injector resolves `gone` when its connection drops.
+      const result = await settle(injector.deliver(wake));
+      if (result === 'gone') {
+        this.#drop(st, injector);
+        notice(`injector ${injector.kind} gone; ${st.injectors.length} left; holding ${count} event(s)`);
+        return st.injectors.length ? 1 : this.#retryMs;
       }
+      if (result !== 'accepted') {
+        st.busy++;
+        const backoff = Math.min(60_000, this.#retryMs * 2 ** (st.busy - 1));
+        st.retryAt = Date.now() + backoff;
+        notice(`injector ${injector.kind} busy (x${st.busy}); holding ${count} event(s), retry in ${backoff} ms`);
+        return backoff;
+      }
+      st.busy = 0;
+      st.retryAt = 0;
       st.limiter.record();
       st.stats.wakes++;
       st.stats.events += wake.events.length;
@@ -309,7 +340,9 @@ export class Router {
     }
 
     for (const d of batches) {
-      await client.acknowledge(d.subscription_id, d.delivery_id, signal);
+      // Not tied to the stop signal: a batch already handed off is always
+      // acknowledged, even while the router is stopping.
+      await client.acknowledge(d.subscription_id, d.delivery_id);
       st.handedOff.delete(d.delivery_id);
       pending.delete(d.subscription_id);
     }
