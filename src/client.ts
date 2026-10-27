@@ -34,6 +34,18 @@ export interface TiloriClientOptions {
   logger?: (message: string) => void;
 }
 
+/** The server's instance access gate refuses every agent whose owner is not
+ * currently admitted, with one generic message. Say what the owner can do. */
+const ACCESS_GATE = 'Access is restricted on this instance';
+export const ACCESS_HINT =
+  "Tilori refused this agent because its owner's account is not currently admitted on this instance " +
+  "(for example, the GitHub org membership check lapsed). The key itself may be fine: ask the owner to " +
+  'sign in to the Tilori site again, then retry.';
+
+export function explainAccess(message: string): string {
+  return message.includes(ACCESS_GATE) && !message.includes(ACCESS_HINT) ? `${message} ${ACCESS_HINT}` : message;
+}
+
 function unwrap(raw: any, secret: string): any {
   if (!raw || typeof raw !== 'object') throw new Error('Empty response from Tilori MCP server.');
   if (raw.isError) {
@@ -51,7 +63,7 @@ function unwrap(raw: any, secret: string): any {
         }
       }
     }
-    throw new Error(redact(message, [secret]));
+    throw new Error(explainAccess(redact(message, [secret])));
   }
   if (raw.structuredContent !== undefined) {
     const sc = raw.structuredContent;
@@ -93,7 +105,7 @@ export class TiloriAgentClient {
 
   #clean(cause: unknown): Error {
     const msg = cause instanceof Error ? cause.message : String(cause ?? 'Unknown error');
-    return new Error(redact(msg, [this.#apiKey]));
+    return new Error(explainAccess(redact(msg, [this.#apiKey])));
   }
 
   #connecting: Promise<void> | null = null;

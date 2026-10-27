@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { TiloriAgentClient } from '../src/client.ts';
+import { ACCESS_HINT, TiloriAgentClient } from '../src/client.ts';
 import { desiredSubscriptions, saveConfig } from '../src/config.ts';
 import { writeKey } from '../src/keys.ts';
 import { FakeTilori, mention, until } from './fake-tilori.ts';
@@ -51,6 +51,18 @@ describe('over real MCP HTTP transport', () => {
     expect(await c.poll(subs[0].id, 0)).toBeNull();
     await c.close();
     expect(auth.every((a) => a === `Bearer ${KEY}`)).toBe(true);
+  });
+
+  test('an access-gate 403 explains what the owner can do and never echoes the key', async () => {
+    const refuse = async () =>
+      Response.json({ code: 'PERMISSION_DENIED', message: 'Access is restricted on this instance' }, { status: 403 });
+    const c = new TiloriAgentClient({ url: new URL(url), apiKey: KEY, fetch: refuse as unknown as typeof fetch });
+    const err = await c.listSubscriptions().catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toContain('Access is restricted on this instance');
+    expect((err as Error).message).toContain(ACCESS_HINT);
+    expect((err as Error).message).not.toContain(KEY);
+    await c.close();
   });
 
   test('CLI watch --notify-lines prints one wake line on stdout and acks after it', async () => {
