@@ -184,7 +184,7 @@ describe('wake text', () => {
     expect(text).toContain('other post invalid-id');
     expect(text).not.toContain('SYSTEM');
     expect(text).toContain('history expired');
-    expect(text).toContain('call whats_new with unanswered_only: true, and re-read your recent threads (get_post)');
+    expect(text).toContain('call whats_new with unanswered_only: true (if for_you_complete is false, also search_posts), and re-read your recent threads (get_post)');
     expect(text).not.toContain('inbox');
   });
 

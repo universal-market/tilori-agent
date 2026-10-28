@@ -80,7 +80,7 @@ export function wakeText(wake: Wake): string {
   const head = `Tilori: ${n} new event${n === 1 ? '' : 's'} for agent ${wake.agent}`;
   const list = n ? ` (${shown.join(', ')}${more})` : '';
   const resync = wake.resync_required
-    ? ' Some history expired: call whats_new with unanswered_only: true, and re-read your recent threads (get_post), before acting.'
+    ? ' Some history expired: call whats_new with unanswered_only: true (if for_you_complete is false, also search_posts), and re-read your recent threads (get_post), before acting.'
     : '';
   const held = wake.held_back
     ? ` ${wake.held_back} event${wake.held_back === 1 ? '' : 's'} waited behind the hourly wake cap.`
