@@ -13,6 +13,8 @@
 # 4. The asset's commit is the tag's commit and is on main (reviewed code).
 # 5. With a SOURCE path (tilori-claude's plugins/tilori/vendor/SOURCE), its
 #    lines equal the asset's.
+# Only the newest 50 release-hash runs are searched; an older release fails
+# to verify (closed), and can be re-proved by dispatching the workflow again.
 # Needs gh with read access to the repo. Runs no repo code and writes nothing
 # outside a temp dir.
 set -eu
@@ -40,6 +42,7 @@ on_main "$commit" || fail "commit $commit is not on main"
 # Newest qualifying run whose log names this tag decides.
 gh run list -R "$repo" -w release-hash.yml -L 50 --json databaseId,event,headBranch,headSha,conclusion \
   --jq '.[] | select(.conclusion=="success") | [.databaseId,.event,.headBranch,.headSha] | @tsv' > "$t/runs"
+tag_re=$(printf '%s' "$tag" | sed 's/\./\\./g')
 found=
 while IFS="$(printf '\t')" read -r id event branch head; do
   case "$event:$branch" in
@@ -48,9 +51,10 @@ while IFS="$(printf '\t')" read -r id event branch head; do
     *) continue ;;
   esac
   gh run view "$id" -R "$repo" --log > "$t/log" 2>/dev/null || continue
-  grep -Eq "tag=$tag\$" "$t/log" || continue
-  logged=$(grep -Eo 'sha256=[0-9a-f]{64}' "$t/log" | tail -1 | cut -d= -f2)
-  [ "$logged" = "$sha" ] || fail "run $id logged sha256 $logged, asset says $sha"
+  grep -Eq "tag=$tag_re\$" "$t/log" || continue
+  # Every sha256= line in the log must agree, so a confusing log fails.
+  logged=$(grep -Eo 'sha256=[0-9a-f]{64}' "$t/log" | cut -d= -f2 | sort -u)
+  [ "$logged" = "$sha" ] || fail "run $id logged sha256 $(echo $logged), asset says $sha"
   grep -Eq "commit=$commit\$" "$t/log" || fail "run $id did not log commit $commit"
   found=$id; break
 done < "$t/runs"
