@@ -99,9 +99,10 @@ export interface Wake {
   /** Events still waiting behind the cap, not in this wake (a direct wake
    * that went past the cap). */
   still_held?: number;
-  /** Events left out because their post or conversation was already in an
-   * earlier wake (e.g. a mention sent past the cap, then the same post held
-   * on the all-posts subscription). */
+  /** Events left out because their post was already in an earlier wake
+   * under the same or a more specific kind (e.g. a mention sent past the
+   * cap, then the same post held on the all-posts subscription). Posts
+   * only: DMs and Market events always wake. */
   already_delivered?: number;
   /** Set on a reminder wake: the operator's own reminder text from config,
    * never server data. A reminder wake has no events. */

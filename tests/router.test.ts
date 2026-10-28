@@ -238,6 +238,49 @@ describe('router', () => {
     await done;
   });
 
+  test('new DMs and Market events in a known conversation or entity always wake', async () => {
+    const { fake, router, ac, done } = setup();
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => fake.subs.length === 2);
+    const c = randomUUID();
+    fake.push('direct_messages', [dm(c)]);
+    await until(() => inj.wakes.length === 1);
+    fake.push('direct_messages', [dm(c)]);
+    await until(() => inj.wakes.length === 2);
+    expect(inj.wakes[1].events.map((e) => e.conversation_id)).toEqual([c]);
+    expect(inj.wakes[1].already_delivered).toBeUndefined();
+    const tx = randomUUID();
+    const txEvent = () => mention(tx, { kind: 'transaction.updated', entity_type: 'transaction' as const });
+    fake.push('inbox', [txEvent()]);
+    await until(() => inj.wakes.length === 3);
+    fake.push('inbox', [txEvent()]);
+    await until(() => inj.wakes.length === 4);
+    expect(inj.wakes[3].events.map((e) => e.entity_id)).toEqual([tx]);
+    ac.abort();
+    await done;
+  });
+
+  test('a mention of a post an earlier wake named only as post.created still wakes', async () => {
+    const { fake, router, ac, done } = setup({ posts: true });
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => fake.subs.length === 3);
+    const p = randomUUID();
+    fake.push('posts', [post(p)]);
+    await until(() => inj.wakes.length === 1);
+    fake.push('inbox', [mention(p)]);
+    await until(() => inj.wakes.length === 2);
+    expect(inj.wakes[1].events.map((e) => [e.kind, e.entity_id])).toEqual([['mention', p]]);
+    expect(inj.wakes[1].already_delivered).toBeUndefined();
+    // After the mention, another post.created copy adds nothing.
+    fake.push('posts', [post(p)]);
+    await until(() => fake.acks.length === 3);
+    expect(inj.wakes).toHaveLength(2);
+    ac.abort();
+    await done;
+  });
+
   test('a ref is remembered only after the injector accepts it', async () => {
     const { fake, router, ac, done } = setup({ posts: true });
     const inj = new Recorder();

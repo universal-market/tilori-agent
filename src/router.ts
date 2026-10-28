@@ -2,8 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { MAX_POLL_SUBSCRIPTIONS, MultiPollUnsupported, type TiloriAgentClient } from './client.ts';
 import { DEFAULT_DIRECT_WAKES_PER_HOUR, DEFAULT_WAKES_PER_HOUR, type Reminder } from './config.ts';
 import { WakeLimiter } from './ratelimit.ts';
-import type { AgentDelivery, AgentSubscription, DeliverResult, Injector, SubscriptionSpec } from './types.ts';
-import { buildWake, refKey, toRefs } from './wake.ts';
+import type { AgentDelivery, AgentSubscription, DeliverResult, EventRef, Injector, SubscriptionSpec } from './types.ts';
+import { KIND_RANK, buildWake, refKey, toRefs } from './wake.ts';
 
 /** How long a delivered post or conversation is remembered. Longer than the
  * wake cap can hold a batch (one hour), so a held copy of something that went
@@ -73,10 +73,12 @@ interface AgentState {
   directSubs: Set<string>;
   /** Batches (by delivery id) the wake cap has delayed, for the wake's count. */
   capHeld: Set<string>;
-  /** Posts and conversations (by `refKey`) handed to an injector recently,
-   * oldest first, with the time. Kept across generations: a held batch is
-   * re-served after a renewal and must still be recognised. */
-  recent: Map<string, number>;
+  /** Posts (by `refKey`) handed to an injector recently, oldest first, with
+   * the time and the highest kind rank they went out under. Only posts: a
+   * reply is a new post id, but a conversation or a Market entity gets new
+   * events under the same id, which must always wake. Kept across
+   * generations: a held batch is re-served after a renewal. */
+  recent: Map<string, { at: number; rank: number }>;
   /** Live injectors, oldest first. The newest one receives wakes; when it
    * leaves, the previous one takes over. */
   injectors: Injector[];
@@ -588,6 +590,14 @@ export class Router {
 
   /** Tries to hand held batches to the agent's injector. Returns 0 when done,
    * else how long to wait before retrying. Logs counts only, never content. */
+  /** A post an earlier wake already named under this kind or a more specific
+   * one. A mention after a plain post.created still wakes. */
+  #seen(st: AgentState, r: EventRef): boolean {
+    if (r.entity_type !== 'post') return false;
+    const prev = st.recent.get(refKey(r));
+    return prev !== undefined && (KIND_RANK[r.kind] ?? 0) <= prev.rank;
+  }
+
   async #flush(st: AgentState, pending: Map<string, AgentDelivery>, signal?: AbortSignal): Promise<number> {
     const { client, handle } = st.cfg;
     const batches = [...pending.values()];
@@ -600,13 +610,13 @@ export class Router {
     // all-posts subscription) costs no wake: those refs reached an injector,
     // so it is acknowledged without one, even over the cap.
     const now = this.#now();
-    for (const [key, at] of st.recent) {
+    for (const [key, { at }] of st.recent) {
       if (now - at <= RECENT_MS) break;
       st.recent.delete(key);
     }
     const known = (d: AgentDelivery) => {
       const refs = toRefs([d]);
-      return !d.resync_required && refs.length > 0 && refs.every((r) => st.recent.has(refKey(r)));
+      return !d.resync_required && refs.length > 0 && refs.every((r) => this.#seen(st, r));
     };
     const stale = fresh.filter(known);
     if (stale.length) {
@@ -656,11 +666,12 @@ export class Router {
       const wake = buildWake(handle, send, randomUUID());
       // Counted from batches, not wake.events, which may be deduplicated.
       const events = (ds: AgentDelivery[]) => ds.reduce((n, d) => n + d.events.length, 0);
-      const already = toRefs(send).filter((r) => st.recent.has(refKey(r))).length;
-      if (already) {
-        wake.events = wake.events.filter((r) => !st.recent.has(refKey(r)));
-        wake.already_delivered = already;
-      }
+      // Leave out posts an earlier wake already named; count the events
+      // whose post is gone from this wake (not ones a mention still carries).
+      wake.events = wake.events.filter((r) => !this.#seen(st, r));
+      const kept = new Set(wake.events.map(refKey));
+      const already = toRefs(send).filter((r) => this.#seen(st, r) && !kept.has(refKey(r))).length;
+      if (already) wake.already_delivered = already;
       const stillHeld = events(fresh) - events(send);
       const heldBack = events(send.filter((d) => st.capHeld.has(d.delivery_id)));
       if (heldBack) wake.held_back = heldBack;
@@ -698,8 +709,10 @@ export class Router {
       // hides a ref from the next wake.
       const at = this.#now();
       for (const r of wake.events) {
+        if (r.entity_type !== 'post') continue;
+        const rank = Math.max(KIND_RANK[r.kind] ?? 0, st.recent.get(refKey(r))?.rank ?? 0);
         st.recent.delete(refKey(r));
-        st.recent.set(refKey(r), at);
+        st.recent.set(refKey(r), { at, rank });
       }
       while (st.recent.size > MAX_RECENT) st.recent.delete(st.recent.keys().next().value!);
       this.#log(

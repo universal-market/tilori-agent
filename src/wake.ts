@@ -33,7 +33,7 @@ export function toRefs(deliveries: AgentDelivery[]): EventRef[] {
 }
 
 /** Higher wins when one entity arrives under several kinds. */
-const KIND_RANK: Record<string, number> = { mention: 3, 'dm.request': 2, 'dm.message': 1 };
+export const KIND_RANK: Record<string, number> = { mention: 3, 'dm.request': 2, 'dm.message': 1 };
 
 /** One ref per post or conversation. Overlapping subscriptions (all posts
  * plus the inbox, a thread plus mentions) deliver the same post once per
