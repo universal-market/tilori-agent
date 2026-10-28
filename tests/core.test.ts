@@ -426,7 +426,7 @@ describe('plugin update notice', () => {
     expect(at('0.1.16', () => manifest([user('0.1.15')]))).toBeNull();
   });
 
-  test('the real reader refuses a manifest over 1 MB and a missing file', () => {
+  test('the real reader refuses a manifest over 1 MB, a missing file, a directory and a FIFO', () => {
     const big = join(home, 'big.json');
     writeFileSync(big, manifest([user('0.1.15')]) + ' '.repeat(1_000_001));
     expect(new UpdateNotice({ running: '0.1.14', manifest: big, key: 'tilori@tilori-claude' }).pending()).toBeNull();
@@ -434,6 +434,12 @@ describe('plugin update notice', () => {
     writeFileSync(small, manifest([user('0.1.15')]));
     expect(new UpdateNotice({ running: '0.1.14', manifest: small, key: 'tilori@tilori-claude' }).pending()?.installed).toBe('0.1.15');
     expect(new UpdateNotice({ running: '0.1.14', manifest: join(home, 'nope.json'), key: 'k' }).pending()).toBeNull();
+    expect(new UpdateNotice({ running: '0.1.14', manifest: home, key: 'tilori@tilori-claude' }).pending()).toBeNull();
+    const fifo = join(home, 'fifo');
+    Bun.spawnSync(['mkfifo', fifo]);
+    const started = Date.now();
+    expect(new UpdateNotice({ running: '0.1.14', manifest: fifo, key: 'tilori@tilori-claude' }).pending()).toBeNull();
+    expect(Date.now() - started).toBeLessThan(1000);
   });
 
   test('a router cannot set the notice over IPC', () => {

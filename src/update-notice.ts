@@ -1,4 +1,4 @@
-import { closeSync, fstatSync, openSync, readSync } from 'node:fs';
+import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs';
 
 /** Versions are only ever compared or shown when they look like this. */
 const VERSION = /^\d{1,6}\.\d{1,6}\.\d{1,6}$/;
@@ -57,9 +57,12 @@ export function installedVersion(text: string, key: string): string | null {
 function readBounded(path: string): string | null {
   let fd: number | undefined;
   try {
-    fd = openSync(path, 'r');
-    const size = fstatSync(fd).size;
-    if (size > MAX_MANIFEST_BYTES) return null;
+    // Non-blocking, and regular files only: a FIFO or device never stalls
+    // the watch process.
+    fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
+    const st = fstatSync(fd);
+    if (!st.isFile() || st.size > MAX_MANIFEST_BYTES) return null;
+    const size = st.size;
     const buf = Buffer.alloc(size);
     const n = readSync(fd, buf, 0, size, 0);
     return buf.subarray(0, n).toString('utf8');
