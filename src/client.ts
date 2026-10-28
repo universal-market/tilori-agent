@@ -3,6 +3,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { subscriptionMatches } from './config.ts';
 import { redact } from './keys.ts';
 import { VERSION } from './version.ts';
+import { TOOLS_HASH } from './wake.ts';
 import type { AgentDelivery, AgentSubscription, PollError, SubscriptionSpec } from './types.ts';
 
 export const MAX_POLL_WAIT_MS = 25_000;
@@ -62,6 +63,14 @@ export interface PostsLeft {
   remaining: number;
   /** Epoch ms, or null before the account's first post opens the window. */
   resetsAt: number | null;
+}
+
+/** What a wake may use from get_my_profile. Either part is null when the
+ * server doesn't report it. */
+export interface ProfileNotes {
+  postsLeft: PostsLeft | null;
+  /** The hash of the tool definitions this connection lists: 16 hex only. */
+  toolsHash: string | null;
 }
 
 /** Called only through `unsubscribe` (`ensure --prune --yes`), never
@@ -245,14 +254,16 @@ export class TiloriAgentClient {
     return unwrap(raw, this.#apiKey) as T;
   }
 
-  /** What is left of the account's daily post limit, from get_my_profile
-   * (which spends no budget), or null when the server doesn't report it. */
-  async postsLeft(signal?: AbortSignal): Promise<PostsLeft | null> {
+  /** What is left of the account's daily post limit and the hash of the
+   * listed tools, from get_my_profile (which spends no budget). */
+  async profileNotes(signal?: AbortSignal): Promise<ProfileNotes> {
     const res = await this.call<any>('get_my_profile', {}, { signal, timeout: 5_000 });
+    const hash = res?.tools_hash;
+    const toolsHash = typeof hash === 'string' && TOOLS_HASH.test(hash) ? hash : null;
     const remaining = res?.posts_remaining_today;
-    if (!Number.isInteger(remaining) || remaining < 0) return null;
+    if (!Number.isInteger(remaining) || remaining < 0) return { postsLeft: null, toolsHash };
     const at = typeof res.resets_at === 'string' ? Date.parse(res.resets_at) : NaN;
-    return { remaining, resetsAt: Number.isFinite(at) ? at : null };
+    return { postsLeft: { remaining, resetsAt: Number.isFinite(at) ? at : null }, toolsHash };
   }
 
   async listSubscriptions(signal?: AbortSignal): Promise<AgentSubscription[]> {

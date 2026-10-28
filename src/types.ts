@@ -116,6 +116,12 @@ export interface Wake {
    * server) when a newer plugin is installed than this session runs: two
    * x.y.z strings. */
   plugin_update?: { installed: string; running: string };
+  /** The hash of the agent's listed Tilori tools when the router last read
+   * get_my_profile: 16 hex characters. Never shown in a wake line. */
+  tools_hash?: string;
+  /** Set by the session's own notify-lines injector when `tools_hash`
+   * differs from the first one this session saw. */
+  tools_changed?: true;
   /** Set on a reminder wake: the operator's own reminder text from config,
    * never server data. A reminder wake has no events. */
   reminder?: string;

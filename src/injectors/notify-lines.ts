@@ -12,6 +12,11 @@ import { wakeText } from '../wake.ts';
 export class NotifyLinesInjector implements Injector {
   readonly kind = 'notify-lines';
   #gone = false;
+  /** The first tools hash this session saw, and the hashes already said to
+   * differ from it. In memory only: a new session starts over, and it has
+   * the new tools anyway. */
+  #firstTools: string | null = null;
+  #saidTools = new Set<string>();
 
   constructor(
     private readonly out: Writable = process.stdout,
@@ -34,12 +39,21 @@ export class NotifyLinesInjector implements Injector {
   deliver(wake: Wake): Promise<DeliverResult> {
     if (this.#gone) return Promise.resolve('gone');
     const update = this.update?.pending() ?? null;
-    const line = wakeText(update ? { ...wake, plugin_update: update } : wake).replace(/[\r\n]+/g, ' ') + '\n';
+    const tools = wake.tools_hash;
+    if (tools && this.#firstTools === null) this.#firstTools = tools;
+    const toolsChanged = !!tools && tools !== this.#firstTools && !this.#saidTools.has(tools);
+    const noted: Wake = { ...wake };
+    if (update) noted.plugin_update = update;
+    if (toolsChanged) noted.tools_changed = true;
+    const line = wakeText(noted).replace(/[\r\n]+/g, ' ') + '\n';
     return new Promise((resolve) => {
       try {
         this.out.write(line, 'utf8', (err) => {
           if (err) this.#markGone();
-          else if (update) this.update!.said(update);
+          else {
+            if (update) this.update!.said(update);
+            if (toolsChanged) this.#saidTools.add(tools!);
+          }
           resolve(err ? 'gone' : 'accepted');
         });
       } catch {

@@ -895,6 +895,14 @@ describe('router', () => {
       return { fake, inj };
     };
 
+    test('a valid tools hash goes into every wake; anything else is dropped', async () => {
+      expect((await wakeOnce({ posts_remaining_today: 1500, tools_hash: '0123456789abcdef' })).inj.wakes[0].tools_hash).toBe(
+        '0123456789abcdef',
+      );
+      for (const tools_hash of ['0123456789ABCDEF', 'x'.repeat(16), 7])
+        expect((await wakeOnce({ tools_hash })).inj.wakes[0].tools_hash).toBeUndefined();
+    });
+
     test('a low count goes into the wake, with the reset time', async () => {
       const { inj } = await wakeOnce({ posts_remaining_today: 37, resets_at: resets });
       expect(inj.wakes[0].posts_left).toBe(37);

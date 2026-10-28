@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { MAX_POLL_SUBSCRIPTIONS, MultiPollUnsupported, type PostsLeft, type TiloriAgentClient } from './client.ts';
+import { MAX_POLL_SUBSCRIPTIONS, MultiPollUnsupported, type ProfileNotes, type TiloriAgentClient } from './client.ts';
 import { DEFAULT_DIRECT_WAKES_PER_HOUR, DEFAULT_WAKES_PER_HOUR, type Reminder } from './config.ts';
 import { WakeLimiter } from './ratelimit.ts';
 import type { AgentDelivery, AgentSubscription, DeliverResult, EventRef, Injector, SubscriptionSpec, Wake } from './types.ts';
@@ -122,8 +122,8 @@ interface AgentState {
    * wake pushes it back when the reminder is only for idle agents. */
   reminderAt: number;
   stats: { wakes: number; events: number; delayed: number; reminders: number };
-  /** The last posts-left reading (null value: unknown) and when it was taken. */
-  postsLeft: { at: number; value: PostsLeft | null };
+  /** The last get_my_profile reading and when it was taken. */
+  profile: { at: number; value: ProfileNotes };
 }
 
 /** Scopes whose events are addressed to the agent itself. */
@@ -199,7 +199,7 @@ export class Router {
         heldNotice: '',
         reminderAt: cfg.reminder ? Date.now() + cfg.reminder.everyMs : 0,
         stats: { wakes: 0, events: 0, delayed: 0, reminders: 0 },
-        postsLeft: { at: -Infinity, value: null },
+        profile: { at: -Infinity, value: { postsLeft: null, toolsHash: null } },
       });
     }
   }
@@ -578,7 +578,7 @@ export class Router {
     }
     const wake: Wake = { wake_id: randomUUID(), agent: handle, events: [], resync_required: false, reminder: reminder!.prompt };
     this.#noteLastWake(st, wake, st.limiter);
-    await this.#notePostsLeft(st, wake, signal);
+    await this.#noteProfile(st, wake, signal);
     const result = await settle(injector.deliver(wake));
     if (result === 'gone') {
       this.#drop(st, injector);
@@ -606,20 +606,22 @@ export class Router {
     if (general > 0 && direct > 0) wake.wakes_resume_at = this.#now() + Math.min(general, direct);
   }
 
-  /** Adds the account's posts left today to a wake when it is low. Reads
-   * get_my_profile at most once a minute; any failure leaves the wake as it
-   * is, so a missing or older server never delays or blocks one. */
-  async #notePostsLeft(st: AgentState, wake: Wake, signal?: AbortSignal): Promise<void> {
+  /** Adds the account's posts left today to a wake when it is low, and the
+   * listed tools' hash for the session to compare. Reads get_my_profile at
+   * most once a minute; any failure leaves the wake as it is, so a missing or
+   * older server never delays or blocks one. */
+  async #noteProfile(st: AgentState, wake: Wake, signal?: AbortSignal): Promise<void> {
     const now = this.#now();
-    if (now - st.postsLeft.at >= POSTS_LEFT_MS) {
-      st.postsLeft.at = now;
+    if (now - st.profile.at >= POSTS_LEFT_MS) {
+      st.profile.at = now;
       try {
-        st.postsLeft.value = await st.cfg.client.postsLeft(signal);
+        st.profile.value = await st.cfg.client.profileNotes(signal);
       } catch {
-        st.postsLeft.value = null;
+        st.profile.value = { postsLeft: null, toolsHash: null };
       }
     }
-    const left = st.postsLeft.value;
+    const { postsLeft: left, toolsHash } = st.profile.value;
+    if (toolsHash) wake.tools_hash = toolsHash;
     if (!left || left.remaining >= POSTS_LOW) return;
     wake.posts_left = left.remaining;
     if (left.resetsAt !== null) wake.posts_reset_at = left.resetsAt;
@@ -714,7 +716,7 @@ export class Router {
       if (heldBack) wake.held_back = heldBack;
       if (stillHeld) wake.still_held = stillHeld;
       this.#noteLastWake(st, wake, limiter);
-      await this.#notePostsLeft(st, wake, signal);
+      await this.#noteProfile(st, wake, signal);
       // Exactly one deliver is in flight per agent: this loop awaits it with
       // no timeout, so a slow injector (an exec run, a busy session) is never
       // invoked again for the same batch, and a late `accepted` still counts.

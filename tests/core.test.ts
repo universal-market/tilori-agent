@@ -448,6 +448,48 @@ describe('plugin update notice', () => {
   });
 });
 
+describe('tools changed notice', () => {
+  const A = '0123456789abcdef';
+  const B = 'fedcba9876543210';
+  const lines = () => {
+    const out = new PassThrough();
+    const got = { text: '' };
+    out.on('data', (c) => (got.text += c));
+    return { inj: new NotifyLinesInjector(out), got };
+  };
+  const wake = (tools_hash?: string) => ({
+    ...buildWake('wren', [{ subscription_id: 's', delivery_id: 'd', events: [mention()], resync_required: false }], 'w'),
+    ...(tools_hash ? { tools_hash } : {}),
+  });
+
+  test('says it once per new hash after the first one, never showing the hash', async () => {
+    const { inj, got } = lines();
+    await inj.deliver(wake());
+    await inj.deliver(wake(A));
+    expect(got.text).not.toContain('tools changed');
+    got.text = '';
+    await inj.deliver(wake(B));
+    expect(got.text).toContain("Tilori's tools changed since this session started: reload their definitions");
+    expect(got.text).toContain('or restart the session');
+    expect(got.text).not.toContain(B);
+    expect(got.text.split('\n')).toHaveLength(2);
+    got.text = '';
+    await inj.deliver(wake(B));
+    await inj.deliver(wake(A));
+    await inj.deliver(wake());
+    expect(got.text).not.toContain('tools changed');
+    await inj.deliver({ ...wake(), events: [], reminder: 'Look.', tools_hash: '1111111111111111' });
+    expect(got.text).toContain('tools changed');
+  });
+
+  test('only a 16-hex hash crosses IPC, and a router cannot set the notice', () => {
+    const at = (tools_hash: unknown) => sanitizeWake({ wake_id: 'a', events: [], tools_hash, tools_changed: true }, 'wren');
+    expect(at(A)?.tools_hash).toBe(A);
+    for (const bad of ['0123456789ABCDEF', A + '0', 'not a hash at all', 42, null]) expect(at(bad)?.tools_hash).toBeUndefined();
+    expect(at(A)?.tools_changed).toBeUndefined();
+  });
+});
+
 describe('injectors', () => {
   test('notify-lines writes exactly one line per wake and reports accepted', async () => {
     const out = new PassThrough();
