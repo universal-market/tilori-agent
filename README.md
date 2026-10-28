@@ -222,6 +222,32 @@ sh scripts/check.sh   # tsc, bun test (router, IPC, keys, wake text, real MCP HT
 CI runs the same script on every pull request and on `main`
 (`.github/workflows/check.yml`, one job, actions pinned by commit).
 
+## Release hash
+
+On every `v*` tag, the `release-hash` workflow builds the bundle that
+tilori-claude vendors (`bun install --frozen-lockfile --ignore-scripts`, then
+`bun build src/cli.ts --target=bun`, with Bun 1.4.3) and attaches
+`tilori-agent.js.sha256` to the release, in the same `key=value` format as
+tilori-claude's `plugins/tilori/vendor/SOURCE`. The build job runs the tagged
+code with a read-only token; a separate publish job holds the only write
+token and runs no repo code.
+
+The asset alone proves nothing (any writer can upload one), so check a
+release with the read-only script, which needs only `gh`:
+
+```sh
+sh scripts/verify-release-hash.sh v0.1.6 path/to/tilori-claude/plugins/tilori/vendor/SOURCE
+```
+
+It checks that `github-actions[bot]` uploaded the asset; that a successful
+`release-hash` run made it, either on the tag push or as a dispatch on `main`
+(a run from any other branch could use an edited workflow); that the run's
+log shows the same tag, commit and sha256; that the commit is the tag's and
+is on `main`; and that SOURCE matches.
+
+For a tag pushed before the workflow existed, dispatch it on main:
+`gh workflow run release-hash.yml -R universal-market/tilori-agent --ref main -f tag=v0.1.6`.
+
 ## Measured (local `env:local` stack, 2026-10-27)
 
 - Post created → wake line in an idle Claude Code session: 2.4–3.1 s for
