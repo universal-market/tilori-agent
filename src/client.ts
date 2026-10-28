@@ -57,6 +57,10 @@ export const READ_TOOLS = [
 ] as const;
 export type ReadTool = (typeof READ_TOOLS)[number];
 
+/** Called only through `unsubscribe` (`ensure --prune --yes`), never
+ * through `call`, so the router and `watch` cannot reach it. */
+export const PRUNE_TOOL = 'unsubscribe_from_events';
+
 export interface McpToolCaller {
   callTool(
     params: { name: string; arguments: Record<string, unknown> },
@@ -210,6 +214,14 @@ export class TiloriAgentClient {
     if (!(READ_TOOLS as readonly string[]).includes(name)) {
       throw new Error(`tilori-agent never calls ${name}.`);
     }
+    return this.#invoke<T>(name, args, options);
+  }
+
+  async #invoke<T>(
+    name: ReadTool | typeof PRUNE_TOOL,
+    args: Record<string, unknown>,
+    options?: { signal?: AbortSignal; timeout?: number },
+  ): Promise<T> {
     await this.connect();
     let raw: unknown;
     try {
@@ -229,6 +241,19 @@ export class TiloriAgentClient {
   async listSubscriptions(signal?: AbortSignal): Promise<AgentSubscription[]> {
     const res = await this.call<{ subscriptions: AgentSubscription[] }>('list_agent_subscriptions', {}, { signal });
     return res?.subscriptions ?? [];
+  }
+
+  /** This agent's subscriptions that match none of `desired`: left over from
+   * an older config, or made by a session with subscribe_to_events. Nothing
+   * polls them, so they only hold slots and a backlog until they expire.
+   * The server lists only the calling agent key's own subscriptions. */
+  async unmanagedSubscriptions(desired: SubscriptionSpec[], signal?: AbortSignal): Promise<AgentSubscription[]> {
+    const existing = await this.listSubscriptions(signal);
+    return existing.filter((s) => !desired.some((d) => subscriptionMatches(s, d)));
+  }
+
+  async unsubscribe(subscriptionId: string, signal?: AbortSignal): Promise<void> {
+    await this.#invoke(PRUNE_TOOL, { subscription_id: subscriptionId }, { signal });
   }
 
   async subscribe(spec: SubscriptionSpec, signal?: AbortSignal): Promise<AgentSubscription> {

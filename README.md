@@ -119,7 +119,7 @@ tilori-agent init --agent wren --url https://<deployment>.convex.site/mcp/tilori
 | `watch --notify-lines [--agent <h>]` | Claude Code monitor mode. Prints one wake line per wake on stdout and nothing else. Attaches to the local router if one serves the agent; otherwise polls directly. Exits when its parent session ends or stdout closes, without acking. |
 | `watch --exec "<cmd>" [--agent <h>]` | Headless. Runs `<cmd>` per wake with `$TILORI_WAKE_TEXT`, `$TILORI_WAKE_JSON` (ids only) and the line on stdin |
 | `router` | One router per person per machine, for every agent with a key file. Injectors attach over the socket. Agents with `"injector": "exec"` run their command in-process. |
-| `ensure [--agent <h>]` | Create or renew the agent's subscriptions and print them |
+| `ensure [--agent <h>] [--prune [--yes]]` | Create or renew the agent's subscriptions and print them, plus `unmanaged` ones config doesn't ask for (nothing polls those). `--prune --yes` unsubscribes the listed unmanaged ones and reports `pruned` and `failed` per id (exit 1 on any failure); `--prune` alone lists them and exits 2 if any are listed. Only this agent's own subscriptions are touched. Restart the router on a new config before pruning |
 | `headers [--agent <h>] [--server-url <u>]` | Print `{"Authorization":"Bearer …"}` for an MCP `headersHelper`, **only** if the requesting server URL (`$CLAUDE_CODE_MCP_SERVER_URL`, which Claude Code sets for helpers, or `--server-url`) matches `url` in config.json. Otherwise it prints nothing and exits 1, so the key can't be sent to another host. |
 | `policy [--agent <h>] [--hook]` | Print the session's Tilori settings (agent, `trusted_owners`, and `coordination_community` if set). `--hook` emits SessionStart JSON for the Claude plugin. |
 
@@ -230,6 +230,32 @@ sh scripts/check.sh   # tsc, bun test (router, IPC, keys, wake text, real MCP HT
 
 CI runs the same script on every pull request and on `main`
 (`.github/workflows/check.yml`, one job, actions pinned by commit).
+
+## Release hash
+
+On every `v*` tag, the `release-hash` workflow builds the bundle that
+tilori-claude vendors (`bun install --frozen-lockfile --ignore-scripts`, then
+`bun build src/cli.ts --target=bun`, with Bun 1.4.3) and attaches
+`tilori-agent.js.sha256` to the release, in the same `key=value` format as
+tilori-claude's `plugins/tilori/vendor/SOURCE`. The build job runs the tagged
+code with a read-only token; a separate publish job holds the only write
+token and runs no repo code.
+
+The asset alone proves nothing (any writer can upload one), so check a
+release with the read-only script, which needs only `gh`:
+
+```sh
+sh scripts/verify-release-hash.sh v0.1.6 path/to/tilori-claude/plugins/tilori/vendor/SOURCE
+```
+
+It checks that `github-actions[bot]` uploaded the asset; that a successful
+`release-hash` run made it, either on the tag push or as a dispatch on `main`
+(a run from any other branch could use an edited workflow); that the run's
+log shows the same tag, commit and sha256; that the commit is the tag's and
+is on `main`; and that SOURCE matches.
+
+For a tag pushed before the workflow existed, dispatch it on main:
+`gh workflow run release-hash.yml -R universal-market/tilori-agent --ref main -f tag=v0.1.6`.
 
 ## Measured (local `env:local` stack, 2026-10-27)
 
