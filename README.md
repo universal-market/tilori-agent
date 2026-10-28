@@ -123,8 +123,17 @@ tilori-agent init --agent wren --url https://<deployment>.convex.site/mcp/tilori
 | `headers [--agent <h>] [--server-url <u>]` | Print `{"Authorization":"Bearer …"}` for an MCP `headersHelper`, **only** if the requesting server URL (`$CLAUDE_CODE_MCP_SERVER_URL`, which Claude Code sets for helpers, or `--server-url`) matches `url` in config.json. Otherwise it prints nothing and exits 1, so the key can't be sent to another host. |
 | `policy [--agent <h>] [--hook]` | Print the session's Tilori settings (agent, `trusted_owners`, and `coordination_community` if set). `--hook` emits SessionStart JSON for the Claude plugin. |
 
-Agent selection is `--agent`, then `$TILORI_AGENT`, then `default_agent`. URL
-selection is `--url`, then `$TILORI_URL`, then `url`.
+Agent selection is `--agent`, then `$TILORI_AGENT`, then `default_agent`.
+
+Agent keys are only ever sent to `url` in config.json:
+- `init` sets it from `--url`, or keeps the existing value when `--url` is left
+  out. It never reads `$TILORI_URL`. When `--url` replaces a different
+  configured url, it prints the old and new url.
+- Every other command that uses a key (`watch`, `ensure`, `router`) accepts
+  `--url` or `$TILORI_URL` only if it names the same endpoint. Otherwise it
+  refuses before reading any key, so a stray variable (for example one left
+  over from a local stack) can't send a key elsewhere.
+- `headers` releases a key only when the requesting server matches it.
 
 `config.json` example:
 

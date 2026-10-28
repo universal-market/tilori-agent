@@ -11,7 +11,8 @@ import {
   reminderSettings,
   loadConfig,
   resolveAgent,
-  resolveUrl,
+  keyUrl,
+  sameEndpoint,
   saveConfig,
   type TiloriConfig,
 } from './config.ts';
@@ -27,6 +28,7 @@ Usage:
   tilori-agent init --agent <handle> --url <tilori-mcp-url> [--default] [--no-verify]
       Reads the agent's shared key from stdin and stores it at
       ~/.config/tilori/agents/<handle>.key (0600); records url and agent in config.json.
+      --url may be left out once config.json has a url; $TILORI_URL is never used.
   tilori-agent watch --notify-lines [--agent <handle>]
       Claude Code monitor mode: one fixed wake line per wake on stdout.
       Uses the local router if it serves the agent, else polls directly.
@@ -47,7 +49,8 @@ Usage:
       matches "url" in config.json.
 
 Agent selection: --agent, then $TILORI_AGENT, then "default_agent" in config.json.
-URL selection:   --url, then $TILORI_URL, then "url" in config.json.
+Keys are only sent to "url" in config.json, which init sets. Elsewhere --url
+or $TILORI_URL must match it, or the command refuses.
 Logs go to stderr and never include keys or event content.`;
 
 interface Args {
@@ -156,7 +159,13 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       case 'init': {
         const agent = validateHandle(str(args, 'agent') ?? '');
         const config = loadConfig();
-        const url = resolveUrl(config, str(args, 'url')).href;
+        // init sets the one URL keys may go to, so it takes it only from an
+        // explicit --url or the existing config, never from $TILORI_URL.
+        const given = str(args, 'url');
+        const url = buildMcpUrl(given ?? config.url).href;
+        if (config.url && !sameEndpoint(new URL(url), buildMcpUrl(config.url))) {
+          log(`replacing url in config.json: ${buildMcpUrl(config.url).href} -> ${url}`);
+        }
         const key = await readSecretFromStdin(`Shared Tilori key for ${agent}: `);
         if (!args.flags.has('no-verify')) {
           const client = new TiloriAgentClient({ url: new URL(url), apiKey: key });
@@ -186,8 +195,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         const asked = str(args, 'server-url') ?? process.env.CLAUDE_CODE_MCP_SERVER_URL;
         if (!asked) throw new Error('headers needs the requesting server URL (CLAUDE_CODE_MCP_SERVER_URL or --server-url).');
         if (!config.url) throw new Error('No "url" in config.json; run tilori-agent init.');
-        const same = (a: URL, b: URL) => a.origin === b.origin && a.pathname.replace(/\/+$/, '') === b.pathname.replace(/\/+$/, '');
-        if (!same(buildMcpUrl(asked), buildMcpUrl(config.url))) {
+        if (!sameEndpoint(buildMcpUrl(asked), buildMcpUrl(config.url))) {
           throw new Error('Refusing: the MCP server URL does not match "url" in config.json.');
         }
         process.stdout.write(JSON.stringify({ Authorization: `Bearer ${readKey(agent)}` }) + '\n');
@@ -196,7 +204,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       case 'ensure': {
         const config = loadConfig();
         const agent = requireAgent(config, args);
-        const client = new TiloriAgentClient({ url: resolveUrl(config, str(args, 'url')), apiKey: readKey(agent), logger: log });
+        const client = new TiloriAgentClient({ url: keyUrl(config, str(args, 'url')), apiKey: readKey(agent), logger: log });
         try {
           const subs = await client.ensureSubscriptions(desiredSubscriptions(config.agents?.[agent]), { signal });
           console.log(
@@ -222,7 +230,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         const exec = str(args, 'exec');
         if (!exec) throw new Error('watch needs --notify-lines or --exec "<command>".');
         const settings = config.agents?.[agent] ?? {};
-        const client = new TiloriAgentClient({ url: resolveUrl(config, str(args, 'url')), apiKey: readKey(agent), logger: log });
+        const client = new TiloriAgentClient({ url: keyUrl(config, str(args, 'url')), apiKey: readKey(agent), logger: log });
         const router = new Router({
           agents: [
             {
@@ -244,7 +252,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       }
       case 'router': {
         const config = loadConfig();
-        const url = resolveUrl(config, str(args, 'url'));
+        const url = keyUrl(config, str(args, 'url'));
         const handles = agentsWithKeys();
         if (!handles.length) throw new Error(`No agent keys in ${join(tiloriHome(), 'agents')}. Run tilori-agent init first.`);
         const agents: RouterAgentConfig[] = handles.map((handle) => {
