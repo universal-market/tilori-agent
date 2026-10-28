@@ -112,6 +112,10 @@ export interface Wake {
   posts_left?: number;
   /** When that daily window resets, epoch ms. */
   posts_reset_at?: number;
+  /** Set by the session's own notify-lines injector (never by a router or
+   * server) when a newer plugin is installed than this session runs: two
+   * x.y.z strings. */
+  plugin_update?: { installed: string; running: string };
   /** Set on a reminder wake: the operator's own reminder text from config,
    * never server data. A reminder wake has no events. */
   reminder?: string;

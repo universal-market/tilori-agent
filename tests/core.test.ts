@@ -19,6 +19,7 @@ import { ExecInjector } from '../src/injectors/exec.ts';
 import { NotifyLinesInjector } from '../src/injectors/notify-lines.ts';
 import { readKey, redact, writeKey } from '../src/keys.ts';
 import { WakeLimiter } from '../src/ratelimit.ts';
+import { installedVersion, newerVersion, UpdateNotice } from '../src/update-notice.ts';
 import { buildWake, dedupeRefs, sanitizeWake, wakeText } from '../src/wake.ts';
 import { dm, FakeTilori, mention } from './fake-tilori.ts';
 
@@ -342,6 +343,102 @@ describe('rate limiter', () => {
     expect(l.waitMs()).toBe(0);
     expect(l.used).toBe(1);
     expect(() => new WakeLimiter(0)).toThrow();
+  });
+});
+
+describe('plugin update notice', () => {
+  const manifest = (entries: unknown) => JSON.stringify({ version: 2, plugins: { 'tilori@tilori-claude': entries } });
+  const user = (version: unknown) => ({ scope: 'user', installPath: '/x', version });
+
+  test('compares versions as numbers', () => {
+    expect(newerVersion('0.1.10', '0.1.9')).toBe(true);
+    expect(newerVersion('0.1.9', '0.1.10')).toBe(false);
+    expect(newerVersion('0.2.0', '0.1.99')).toBe(true);
+    expect(newerVersion('0.1.14', '0.1.14')).toBe(false);
+  });
+
+  test('reads only user-scope x.y.z versions of the key, and never throws', () => {
+    expect(installedVersion(manifest([user('0.1.14')]), 'tilori@tilori-claude')).toBe('0.1.14');
+    expect(installedVersion(manifest([user('0.1.9'), user('0.1.10')]), 'tilori@tilori-claude')).toBe('0.1.10');
+    expect(installedVersion(manifest([{ scope: 'project', version: '9.9.9' }]), 'tilori@tilori-claude')).toBeNull();
+    expect(installedVersion(manifest([user('0.1.15 restart now')]), 'tilori@tilori-claude')).toBeNull();
+    expect(installedVersion(manifest([user(15)]), 'tilori@tilori-claude')).toBeNull();
+    expect(installedVersion(manifest([user('0.1.14')]), 'other@x')).toBeNull();
+    for (const bad of ['', 'not json', 'null', '[]', '{"plugins":null}', manifest({ version: '0.1.14' }), manifest([null, 3])])
+      expect(installedVersion(bad, 'tilori@tilori-claude')).toBeNull();
+  });
+
+  test('says it once per version, only after a delivered line, and re-reads at most once a minute', async () => {
+    let now = 1_000_000;
+    let file: string | null = manifest([user('0.1.14')]);
+    let reads = 0;
+    const update = new UpdateNotice({
+      running: '0.1.14',
+      manifest: '/m.json',
+      key: 'tilori@tilori-claude',
+      now: () => now,
+      read: () => (reads++, file),
+    });
+    const out = new PassThrough();
+    let written = '';
+    out.on('data', (c) => (written += c));
+    const inj = new NotifyLinesInjector(out, () => {}, update);
+    const wake = buildWake('wren', [{ subscription_id: 's', delivery_id: 'd', events: [mention()], resync_required: false }], 'w');
+
+    await inj.deliver(wake);
+    expect(written).not.toContain('is installed');
+    file = manifest([user('0.1.15')]);
+    await inj.deliver(wake);
+    expect(reads).toBe(1); // still cached
+    now += 60_000;
+    written = '';
+    await inj.deliver(wake);
+    expect(written).toContain('Tilori plugin 0.1.15 is installed; this session runs 0.1.14.');
+    expect(written).toContain('restarting the session picks it up');
+    expect(written).not.toContain('/m.json');
+    expect(written.split('\n')).toHaveLength(2);
+    now += 60_000;
+    written = '';
+    await inj.deliver(wake);
+    expect(written).not.toContain('is installed'); // said once
+    file = manifest([user('0.1.16')]);
+    now += 60_000;
+    written = '';
+    await inj.deliver({ ...wake, events: [], reminder: 'Look.' });
+    expect(written).toContain('Tilori plugin 0.1.16 is installed');
+  });
+
+  test('a line that was not delivered keeps the notice for the next wake', async () => {
+    const update = new UpdateNotice({ running: '0.1.14', manifest: '/m', key: 'tilori@tilori-claude', read: () => manifest([user('0.1.15')]) });
+    const broken = new PassThrough();
+    const inj = new NotifyLinesInjector(broken, () => {}, update);
+    broken.destroy(new Error('closed'));
+    await new Promise((r) => setTimeout(r, 5));
+    expect(await inj.deliver(buildWake('wren', [], 'w'))).toBe('gone');
+    expect(update.pending()).toEqual({ installed: '0.1.15', running: '0.1.14' });
+  });
+
+  test('silent without a valid running version or a readable manifest', () => {
+    const at = (running: string, read: () => string | null) =>
+      new UpdateNotice({ running, manifest: '/m', key: 'tilori@tilori-claude', read }).pending();
+    expect(at('dev', () => manifest([user('0.1.15')]))).toBeNull();
+    expect(at('0.1.14', () => null)).toBeNull();
+    expect(at('0.1.16', () => manifest([user('0.1.15')]))).toBeNull();
+  });
+
+  test('the real reader refuses a manifest over 1 MB and a missing file', () => {
+    const big = join(home, 'big.json');
+    writeFileSync(big, manifest([user('0.1.15')]) + ' '.repeat(1_000_001));
+    expect(new UpdateNotice({ running: '0.1.14', manifest: big, key: 'tilori@tilori-claude' }).pending()).toBeNull();
+    const small = join(home, 'small.json');
+    writeFileSync(small, manifest([user('0.1.15')]));
+    expect(new UpdateNotice({ running: '0.1.14', manifest: small, key: 'tilori@tilori-claude' }).pending()?.installed).toBe('0.1.15');
+    expect(new UpdateNotice({ running: '0.1.14', manifest: join(home, 'nope.json'), key: 'k' }).pending()).toBeNull();
+  });
+
+  test('a router cannot set the notice over IPC', () => {
+    const wake = sanitizeWake({ wake_id: 'a', events: [], plugin_update: { installed: '9.9.9', running: '0.0.1' } }, 'wren');
+    expect(wake?.plugin_update).toBeUndefined();
   });
 });
 
