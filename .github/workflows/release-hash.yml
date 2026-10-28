@@ -1,12 +1,19 @@
 # On a release tag, builds the bundle that tilori-claude vendors, with the
 # same steps as its tools/bundle-agent.sh (bun install --frozen-lockfile
 # --ignore-scripts; bun build src/cli.ts --target=bun) and the same pinned
-# Bun, and publishes its sha256 as the release asset tilori-agent.js.sha256.
-# Reviewers compare that file with tilori-claude's plugins/tilori/vendor/SOURCE,
-# a build the bundle's author doesn't control. No secrets; only this job can
-# write, and only to the release. For a tag pushed before this workflow
-# existed: gh workflow run release-hash.yml -f tag=v0.1.6
+# Bun, and publishes its sha256 as the release asset tilori-agent.js.sha256,
+# in the key=value format of tilori-claude's plugins/tilori/vendor/SOURCE.
+#
+# build runs the tagged code with a read-only token; publish holds the only
+# write token and runs no repo code (no checkout, no Bun). An asset alone
+# proves nothing, since any writer can upload one: check a release with
+# scripts/verify-release-hash.sh, which ties the asset to this workflow's run
+# on the tag (or on main, for a dispatch) and to its log.
+#
+# For a tag pushed before this workflow existed, dispatch it on main:
+#   gh workflow run release-hash.yml --ref main -f tag=v0.1.6
 name: release-hash
+run-name: release-hash ${{ inputs.tag || github.ref_name }}
 
 on:
   push:
@@ -20,15 +27,21 @@ on:
 permissions:
   contents: read
 
+env:
+  TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  BUN_VERSION: 1.4.3
+
 jobs:
-  hash:
+  build:
+    # Dispatch only from main. An edited workflow on another branch could drop
+    # this line; the verify script checks the run's event and branch instead.
+    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    permissions:
-      contents: write
-    env:
-      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-      BUN_VERSION: 1.4.3
+    outputs:
+      commit: ${{ steps.hash.outputs.commit }}
+      bun: ${{ steps.hash.outputs.bun }}
+      sha256: ${{ steps.hash.outputs.sha256 }}
     steps:
       - name: Check the tag name
         run: |
@@ -42,24 +55,40 @@ jobs:
         with:
           bun-version: ${{ env.BUN_VERSION }}
       - name: Build and hash
+        id: hash
         run: |
           [ "$(bun --version)" = "$BUN_VERSION" ] || { echo "expected Bun $BUN_VERSION, got $(bun --version)" >&2; exit 1; }
           bun install --frozen-lockfile --ignore-scripts
           bun build src/cli.ts --target=bun --outfile "$RUNNER_TEMP/tilori-agent.js"
-          # Same keys as tilori-claude's SOURCE, so the lines compare directly.
-          {
-            echo "repo=$GITHUB_REPOSITORY"
-            echo "tag=$TAG"
-            echo "commit=$(git rev-parse HEAD)"
-            echo "bun=$(bun --version)"
-            echo "sha256=$(sha256sum "$RUNNER_TEMP/tilori-agent.js" | cut -d' ' -f1)"
-          } > "$RUNNER_TEMP/tilori-agent.js.sha256"
-          cat "$RUNNER_TEMP/tilori-agent.js.sha256"
+          commit=$(git rev-parse HEAD)
+          sha=$(sha256sum "$RUNNER_TEMP/tilori-agent.js" | cut -d' ' -f1)
+          # These lines in the run log are what verify-release-hash.sh compares.
+          echo "tag=$TAG"; echo "commit=$commit"; echo "bun=$BUN_VERSION"; echo "sha256=$sha"
+          { echo "commit=$commit"; echo "bun=$BUN_VERSION"; echo "sha256=$sha"; } >> "$GITHUB_OUTPUT"
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          COMMIT: ${{ needs.build.outputs.commit }}
+          BUN: ${{ needs.build.outputs.bun }}
+          SHA256: ${{ needs.build.outputs.sha256 }}
         run: |
+          printf '%s\n' "$TAG" | grep -Eqx 'v[0-9]+\.[0-9]+\.[0-9]+' || { echo "not a release tag: $TAG" >&2; exit 1; }
+          printf '%s\n' "$COMMIT" | grep -Eqx '[0-9a-f]{40}' || { echo "bad commit from build" >&2; exit 1; }
+          printf '%s\n' "$BUN" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+' || { echo "bad bun version from build" >&2; exit 1; }
+          printf '%s\n' "$SHA256" | grep -Eqx '[0-9a-f]{64}' || { echo "bad sha256 from build" >&2; exit 1; }
+          f="$RUNNER_TEMP/tilori-agent.js.sha256"
+          # Same keys and order as tilori-claude's SOURCE, so the lines compare directly.
+          printf 'repo=%s\ntag=%s\ncommit=%s\nbun=%s\nsha256=%s\n' "$GITHUB_REPOSITORY" "$TAG" "$COMMIT" "$BUN" "$SHA256" > "$f"
+          cat "$f"
           gh release view "$TAG" >/dev/null 2>&1 \
-            || gh release create "$TAG" --verify-tag --title "$TAG" --notes "tilori-agent.js.sha256: sha256 of the bundle built by CI from this tag (release-hash workflow)."
-          gh release upload "$TAG" "$RUNNER_TEMP/tilori-agent.js.sha256" --clobber
+            || gh release create "$TAG" --verify-tag --title "$TAG" --notes "tilori-agent.js.sha256: sha256 of the bundle built by CI from this tag (release-hash workflow). Check it with scripts/verify-release-hash.sh."
+          gh release upload "$TAG" "$f" --clobber
