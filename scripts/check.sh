@@ -1,9 +1,10 @@
 #!/bin/sh
-# Local checks (no CI needed): typecheck, tests, and a secret scan of tracked files.
+# Checks: typecheck, tests, hostile cwd and a secret scan of tracked files.
+# CI runs this on every PR (.github/workflows/check.yml); run it locally too.
 set -eu
 cd "$(dirname "$0")/.."
 BUN="${BUN:-$(command -v bun || echo "$HOME/.bun/bin/bun")}"
-[ -d node_modules ] || "$BUN" install --frozen-lockfile
+[ -d node_modules ] || "$BUN" install --frozen-lockfile --ignore-scripts
 echo "== typecheck"; ./node_modules/.bin/tsc --noEmit -p .
 echo "== tests"; PATH="$(dirname "$BUN"):$PATH" "$BUN" test ./tests
 echo "== hostile cwd"; PATH="$(dirname "$BUN"):$PATH" sh tests/hostile-cwd.sh

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { MAX_POLL_SUBSCRIPTIONS, MultiPollUnsupported, type TiloriAgentClient } from './client.ts';
-import { DEFAULT_DIRECT_WAKES_PER_HOUR, DEFAULT_WAKES_PER_HOUR } from './config.ts';
+import { DEFAULT_DIRECT_WAKES_PER_HOUR, DEFAULT_WAKES_PER_HOUR, type Reminder } from './config.ts';
 import { WakeLimiter } from './ratelimit.ts';
 import type { AgentDelivery, AgentSubscription, DeliverResult, Injector, SubscriptionSpec } from './types.ts';
 import { buildWake } from './wake.ts';
@@ -12,6 +12,8 @@ export interface RouterAgentConfig {
   wakesPerHour?: number;
   /** Cap for direct wakes (mentions, DMs, inbox), separate from wakesPerHour. */
   directWakesPerHour?: number;
+  /** A periodic wake with the operator's own text (validated by reminderSettings). */
+  reminder?: Reminder;
 }
 
 export interface RouterOptions {
@@ -99,7 +101,10 @@ interface AgentState {
   /** When the oldest batch now held arrived (0 when none is held). */
   heldSince: number;
   heldNotice: string;
-  stats: { wakes: number; events: number; delayed: number };
+  /** When the next reminder is due (unused without a reminder). An event
+   * wake pushes it back when the reminder is only for idle agents. */
+  reminderAt: number;
+  stats: { wakes: number; events: number; delayed: number; reminders: number };
 }
 
 /** Scopes whose events are addressed to the agent itself. */
@@ -172,7 +177,8 @@ export class Router {
         handedOff: new Set(),
         heldSince: 0,
         heldNotice: '',
-        stats: { wakes: 0, events: 0, delayed: 0 },
+        reminderAt: cfg.reminder ? Date.now() + cfg.reminder.everyMs : 0,
+        stats: { wakes: 0, events: 0, delayed: 0, reminders: 0 },
       });
     }
   }
@@ -502,7 +508,9 @@ export class Router {
     let failures = 0;
     while (!signal.aborted) {
       if (!pending.size) {
-        await sleep(60_000, signal, st.kick.promise);
+        const due = st.cfg.reminder ? st.reminderAt - Date.now() : Infinity;
+        if (due <= 0) await this.#remind(st);
+        else await sleep(Math.min(60_000, due), signal, st.kick.promise);
         continue;
       }
       let waitMs: number;
@@ -527,6 +535,43 @@ export class Router {
     const restart = st.onPolled;
     st.onPolled = null;
     restart?.();
+  }
+
+  /** Sends a due reminder. It runs in the flush loop, so it is never in
+   * flight alongside an event wake, and only while no batch is held (an event
+   * wake is on its way then). A reminder is skipped, not queued, when there is
+   * no injector, the wake cap is used up or the session is busy: each means
+   * the agent isn't idle or can't take it, and the next one comes an interval
+   * later. */
+  async #remind(st: AgentState): Promise<void> {
+    const { handle, reminder } = st.cfg;
+    const injector = st.injectors.at(-1);
+    st.reminderAt = Date.now() + reminder!.everyMs;
+    if (!injector) {
+      this.#log(`[${handle}] reminder skipped: no injector registered`);
+      return;
+    }
+    if (st.limiter.waitMs() > 0) {
+      this.#log(`[${handle}] reminder skipped: wake cap reached (${st.limiter.perHour}/hour)`);
+      return;
+    }
+    const result = await settle(
+      injector.deliver({ wake_id: randomUUID(), agent: handle, events: [], resync_required: false, reminder: reminder!.prompt }),
+    );
+    if (result === 'gone') {
+      this.#drop(st, injector);
+      // Try the previous injector, if any, at once.
+      st.reminderAt = Date.now();
+      return;
+    }
+    if (result !== 'accepted') {
+      this.#log(`[${handle}] reminder skipped: injector ${injector.kind} busy`);
+      return;
+    }
+    st.limiter.record();
+    st.stats.wakes++;
+    st.stats.reminders++;
+    this.#log(`[${handle}] woke ${injector.kind} with a reminder`);
   }
 
   /** Tries to hand held batches to the agent's injector. Returns 0 when done,
@@ -601,6 +646,7 @@ export class Router {
       st.busy = 0;
       st.retryAt = 0;
       limiter.record();
+      if (st.cfg.reminder?.onlyWhenIdle) st.reminderAt = Date.now() + st.cfg.reminder.everyMs;
       st.stats.wakes++;
       st.stats.events += wake.events.length;
       st.stats.delayed = stillHeld;

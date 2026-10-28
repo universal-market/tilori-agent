@@ -24,6 +24,7 @@ function setup(
     now?: () => number;
     coalesceMs?: number;
     subscriptions?: SubscriptionSpec[];
+    reminder?: { everyMs: number; prompt: string; onlyWhenIdle: boolean };
   } = {},
 ) {
   const fake = new FakeTilori();
@@ -38,6 +39,7 @@ function setup(
         subscriptions,
         wakesPerHour: opts.wakesPerHour,
         directWakesPerHour: opts.directWakesPerHour,
+        reminder: opts.reminder,
       },
     ],
     logger: (m) => logs.push(m),
@@ -633,6 +635,87 @@ describe('router', () => {
     expect(later.some((p) => p.ids[0] === id)).toBe(false);
     await until(() => fake.polls.slice(n).some((p) => p.ids[0] === id));
     expect(Date.now() - at).toBeGreaterThanOrEqual(280);
+    ac.abort();
+    await done;
+  });
+
+  test('a reminder wakes with its text and no events, repeats, and counts against the cap', async () => {
+    const reminder = { everyMs: 100, prompt: 'Look for work.', onlyWhenIdle: true };
+    const { fake, router, ac, done } = setup({ reminder });
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => inj.wakes.length === 2);
+    expect(inj.wakes[0]).toMatchObject({ agent: 'wren', events: [], reminder: 'Look for work.' });
+    expect(fake.acks).toHaveLength(0);
+    expect(router.stats('wren')).toMatchObject({ wakes: 2, reminders: 2 });
+    ac.abort();
+    await done;
+  });
+
+  test('without a reminder setting, a quiet agent is never woken', async () => {
+    const { router, ac, done } = setup();
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(inj.wakes).toHaveLength(0);
+    ac.abort();
+    await done;
+  });
+
+  test('only_when_idle: an event wake pushes the reminder back', async () => {
+    const reminder = { everyMs: 300, prompt: 'Look for work.', onlyWhenIdle: true };
+    const { fake, router, ac, done } = setup({ reminder });
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => fake.subs.length === 2);
+    // Keep the agent busy with a mention every 100 ms, well inside the interval.
+    for (let i = 0; i < 6; i++) {
+      fake.push('inbox', [mention()]);
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    expect(inj.wakes.length).toBeGreaterThan(0);
+    expect(inj.wakes.some((w) => w.reminder !== undefined)).toBe(false);
+    // Quiet again: the reminder follows.
+    await until(() => inj.wakes.some((w) => w.reminder !== undefined));
+    ac.abort();
+    await done;
+  });
+
+  test('without only_when_idle, the reminder comes on schedule despite event wakes', async () => {
+    const reminder = { everyMs: 250, prompt: 'Look for work.', onlyWhenIdle: false };
+    const { fake, router, ac, done } = setup({ reminder });
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => fake.subs.length === 2);
+    for (let i = 0; i < 6 && !inj.wakes.some((w) => w.reminder); i++) {
+      fake.push('inbox', [mention()]);
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    expect(inj.wakes.some((w) => w.reminder === 'Look for work.')).toBe(true);
+    ac.abort();
+    await done;
+  });
+
+  test('a reminder is skipped, not queued, when the cap is used up or the session is busy', async () => {
+    let t = 1_000_000;
+    const reminder = { everyMs: 100, prompt: 'Look for work.', onlyWhenIdle: true };
+    const { fake, router, ac, done, logs } = setup({ wakesPerHour: 1, directWakesPerHour: 0, reminder, now: () => t });
+    const inj = new Recorder();
+    inj.next = ['busy'];
+    router.register('wren', inj);
+    await until(() => logs.some((l) => l.includes('reminder skipped: injector test busy')));
+    // The first accepted reminder uses the only wake this hour...
+    await until(() => inj.wakes.length === 1);
+    expect(inj.wakes[0].reminder).toBe('Look for work.');
+    // ...so the next one is skipped, and a mention waits behind the cap.
+    await until(() => logs.some((l) => l.includes('reminder skipped: wake cap reached (1/hour)')));
+    fake.push('inbox', [mention()]);
+    await new Promise((r) => setTimeout(r, 150));
+    expect(inj.wakes).toHaveLength(1);
+    t += 3600_001;
+    router.register('wren', inj);
+    await until(() => fake.acks.length === 1);
+    expect(inj.wakes[1].events[0].kind).toBe('mention');
     ac.abort();
     await done;
   });

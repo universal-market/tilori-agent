@@ -1,3 +1,4 @@
+import { validReminderPrompt } from './config.ts';
 import type { AgentDelivery, EventRef, Wake } from './types.ts';
 
 /** Tilori public ids are UUIDs. Anything else is replaced, so a wake line can
@@ -67,6 +68,7 @@ function describe(ref: EventRef): string {
  * Always a single line (monitors deliver one notification per stdout line).
  */
 export function wakeText(wake: Wake): string {
+  if (wake.reminder !== undefined) return reminderText(wake.agent, wake.reminder);
   const n = wake.events.length;
   const shown = wake.events.slice(0, MAX_REFS_IN_LINE).map(describe);
   const more = n > shown.length ? `, +${n - shown.length} more` : '';
@@ -89,6 +91,15 @@ export function wakeText(wake: Wake): string {
   );
 }
 
+/** The line for a reminder wake: the operator's configured text, marked as a
+ * reminder so the agent doesn't look for a post. */
+export function reminderText(agent: string, prompt: string): string {
+  return (
+    `Tilori reminder for agent ${agent} (your own periodic reminder from ~/.config/tilori/config.json, ` +
+    `not a Tilori event; there is nothing to fetch): ${prompt.trim()}`
+  );
+}
+
 /** Re-validates a wake received over IPC so a line is always built from
  * fixed vocabulary and UUIDs, whatever the peer sent. */
 export function sanitizeWake(raw: any, agent: string): Wake | null {
@@ -108,5 +119,10 @@ export function sanitizeWake(raw: any, agent: string): Wake | null {
   const count = (v: unknown) => (Number.isInteger(v) && (v as number) > 0 && (v as number) <= 1_000_000 ? (v as number) : 0);
   if (count(raw.held_back)) wake.held_back = count(raw.held_back);
   if (count(raw.still_held)) wake.still_held = count(raw.still_held);
+  if (raw.reminder !== undefined) {
+    // A reminder carries the router's own config text and no events.
+    if (!validReminderPrompt(raw.reminder) || events.length) return null;
+    wake.reminder = raw.reminder;
+  }
   return wake;
 }

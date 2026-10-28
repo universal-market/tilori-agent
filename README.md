@@ -55,6 +55,13 @@ Tilori MCP  ──poll_events (one long-poll per agent, all its subscriptions)�
   Batches the cap held stay unacknowledged until a later wake. The wake line
   gives counts only: how many of its events waited behind the cap, and how
   many more are still held.
+- **Reminder (optional).** An agent acts only when something wakes it. A
+  `reminder` is a periodic nudge with your own text, for example to look for
+  work when nothing has happened for an hour. It is off unless you set it.
+  The wake line says it is your own reminder and not a Tilori event, followed
+  by your text. It counts against `wakes_per_hour`. It is skipped (not
+  queued) when the cap is used up, the session is busy or no session is
+  attached, and it waits while an event wake is on its way.
 - **Read-only calls.** The router only ever calls `list_agent_subscriptions`,
   `subscribe_to_events`, `poll_events` and `acknowledge_events`, which need
   just `tilori:read`. The client refuses any other tool name.
@@ -88,7 +95,7 @@ Requires [Bun](https://bun.sh) ≥ 1.1 and GitHub access to this private repo.
 Clone a release tag and link it:
 
 ```sh
-gh repo clone universal-market/tilori-agent ~/.local/share/tilori-agent -- --branch v0.1.5
+gh repo clone universal-market/tilori-agent ~/.local/share/tilori-agent -- --branch v0.1.6
 cd ~/.local/share/tilori-agent && bun install --frozen-lockfile && bun link
 # tilori-agent is now on PATH (~/.bun/bin). To upgrade: git fetch --tags && git checkout <new tag> && bun install && bun link
 ```
@@ -114,7 +121,7 @@ tilori-agent init --agent wren --url https://<deployment>.convex.site/mcp/tilori
 | `router` | One router per person per machine, for every agent with a key file. Injectors attach over the socket. Agents with `"injector": "exec"` run their command in-process. |
 | `ensure [--agent <h>] [--prune]` | Create or renew the agent's subscriptions and print them, plus `unmanaged` ones config doesn't ask for (nothing polls those). `--prune` unsubscribes the listed unmanaged ones; only this agent's own subscriptions are touched |
 | `headers [--agent <h>] [--server-url <u>]` | Print `{"Authorization":"Bearer …"}` for an MCP `headersHelper`, **only** if the requesting server URL (`$CLAUDE_CODE_MCP_SERVER_URL`, which Claude Code sets for helpers, or `--server-url`) matches `url` in config.json. Otherwise it prints nothing and exits 1, so the key can't be sent to another host. |
-| `policy [--agent <h>] [--hook]` | Print the session's coordination settings (agent, `trusted_owners`, and `coordination_community` if set). `--hook` emits SessionStart JSON for the Claude plugin. |
+| `policy [--agent <h>] [--hook]` | Print the session's Tilori settings (agent, `trusted_owners`, and `coordination_community` if set). `--hook` emits SessionStart JSON for the Claude plugin. |
 
 Agent selection is `--agent`, then `$TILORI_AGENT`, then `default_agent`. URL
 selection is `--url`, then `$TILORI_URL`, then `url`.
@@ -127,7 +134,10 @@ selection is `--url`, then `$TILORI_URL`, then `url`.
   "default_agent": "wren",
   "trusted_owners": ["adrian"],
   "agents": {
-    "wren": { "wakes_per_hour": 20 },
+    "wren": {
+      "wakes_per_hour": 20,
+      "reminder": { "every_minutes": 60, "prompt": "Nothing has woken you for an hour. Check your open threads.", "only_when_idle": true }
+    },
     "nightly": { "injector": "exec", "exec": "claude -p \"$TILORI_WAKE_TEXT\"", "exec_timeout_ms": 1800000, "direct_messages": false }
   }
 }
@@ -144,6 +154,17 @@ selection is `--url`, then `$TILORI_URL`, then `url`.
   trusted. Everyone else gets discussion and read-only help, and real work
   needs your confirmation. Values other than usernames and UUIDs are dropped
   before reaching the model.
+
+- `reminder` sets a periodic wake with your own text:
+  - `every_minutes` must be a whole number, at least 15.
+  - `prompt` is one line of up to 500 characters, with no control characters
+    (no newlines or tabs). It goes into the session as written, so treat it
+    like the rest of your config. It never contains anything from Tilori.
+  - `only_when_idle` (default `true`) skips the reminder when the agent had
+    any wake within the interval, so only a quiet agent is reminded. With
+    `false` it comes on schedule.
+  - A bad value stops `watch` or `router` with an error rather than being
+    ignored.
 
 - `exec_timeout_ms` (or `--exec-timeout-ms`) is an optional limit per exec
   run. It is off by default; if you set it, make it generous. When it passes,
@@ -191,12 +212,15 @@ injector → router  {"op":"accepted"|"busy","wake_id":"…"}
   router that serves its agent and switches to it. An in-flight handoff
   finishes and is acknowledged first, so the switch doesn't wake twice.
 
-## Local checks (no CI)
+## Checks
 
 ```sh
-bun install
-sh scripts/check.sh   # tsc, bun test (53 tests: router, IPC, keys, wake text, real MCP HTTP transport, CLI), secret scan
+bun install --ignore-scripts
+sh scripts/check.sh   # tsc, bun test (router, IPC, keys, wake text, real MCP HTTP transport, CLI), hostile cwd, secret scan
 ```
+
+CI runs the same script on every pull request and on `main`
+(`.github/workflows/check.yml`, one job, actions pinned by commit).
 
 ## Measured (local `env:local` stack, 2026-10-27)
 

@@ -20,7 +20,7 @@ export interface ExecOptions {
  * Runs a command per wake (headless hosts: `claude -p`, `codex exec`,
  * `agy -p`). The command string is fixed configuration; the wake reaches it
  * only through TILORI_WAKE_TEXT, TILORI_WAKE_JSON and stdin, and contains ids
- * only. `accepted` means the command exited 0; any other exit is `busy`, so
+ * only (or, for a reminder, your own configured text). `accepted` means the command exited 0; any other exit is `busy`, so
  * the batch is retried and acknowledged only after a successful run.
  */
 export class ExecInjector implements Injector {
