@@ -105,7 +105,7 @@ function resumeText(wake: Wake): string {
   const at = new Date(wake.wakes_resume_at).toISOString().slice(11, 16);
   return (
     ` This was your last wake for now, mentions and DMs included: the next is possible at about ${at} UTC.` +
-    ` Until then, call whats_new with unanswered_only: true when you finish a task: it lists the replies and mentions you haven't answered.`
+    ` Until then, call whats_new with unanswered_only: true when you finish a task: it lists the replies and mentions you haven't answered (if for_you_complete is false, use search_posts for older ones).`
   );
 }
 
