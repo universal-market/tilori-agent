@@ -154,6 +154,73 @@ describe('over real MCP HTTP transport', () => {
     rmSync(runDir, { recursive: true, force: true });
   }, 20000);
 
+  test('CLI ensure lists unmanaged subscriptions, and removes them only with --prune', async () => {
+    const env = { ...process.env, TILORI_HOME: join(home, 'tilori'), TILORI_AGENT: 'wren' };
+    process.env.TILORI_HOME = env.TILORI_HOME;
+    writeKey('wren', KEY);
+    saveConfig({ url, default_agent: 'wren' });
+    delete process.env.TILORI_HOME;
+    const cli = join(import.meta.dir, '../src/cli.ts');
+    // Async: the CLI talks to this process's server, which spawnSync would block.
+    const run = async (...args: string[]) => {
+      const p = Bun.spawn(['bun', cli, ...args], { env, stdout: 'pipe', stderr: 'pipe' });
+      const [stdout, stderr, exitCode] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+      return { stdout, stderr, exitCode };
+    };
+    // Left over from an older config, or made by a session: not in config.
+    const extra = [
+      { scope: { type: 'posts' as const }, exclude_self: true },
+      { scope: { type: 'mentions' as const }, exclude_self: true },
+    ];
+    const c = new TiloriAgentClient({ url: new URL(url), apiKey: KEY });
+    // The router's path (call) stays read-only: only unsubscribe() can prune.
+    await expect(c.call('unsubscribe_from_events' as any, { subscription_id: 'x' })).rejects.toThrow('never calls');
+    const made = await Promise.all(extra.map((spec) => c.subscribe(spec)));
+    await c.close();
+    const ids = made.map((s) => s.id).sort();
+
+    const list = await run('ensure');
+    expect(list.exitCode).toBe(0);
+    const listed = JSON.parse(list.stdout);
+    expect(listed.unmanaged.map((s: any) => s.id).sort()).toEqual(ids);
+    expect(listed.pruned).toBeUndefined();
+    expect(list.stderr).toContain('2 unmanaged subscription(s) listed; run with --prune --yes');
+    const managed = listed.subscriptions.map((s: any) => s.id);
+
+    // --prune without --yes lists, removes nothing and exits 2.
+    const unconfirmed = await run('ensure', '--prune');
+    expect(unconfirmed.exitCode).toBe(2);
+    expect(JSON.parse(unconfirmed.stdout).unmanaged.map((s: any) => s.id).sort()).toEqual(ids);
+    expect(unconfirmed.stderr).toContain('nothing removed. Re-run with --prune --yes');
+    expect(fake.unsubscribed).toHaveLength(0);
+
+    // One unsubscribe fails: the other is still removed, both are reported, exit 1.
+    fake.failUnsubscribe.add(ids[0]);
+    const partial = await run('ensure', '--prune', '--yes');
+    expect(partial.exitCode).toBe(1);
+    const part = JSON.parse(partial.stdout);
+    expect(part.pruned).toEqual([ids[1]]);
+    expect(part.failed.map((f: any) => f.id)).toEqual([ids[0]]);
+    expect(partial.stderr).toContain(`could not unsubscribe ${ids[0]}`);
+    fake.failUnsubscribe.clear();
+
+    // Confirmed: removes exactly what is listed, never a managed subscription.
+    const prune = await run('ensure', '--prune', '--yes');
+    expect(prune.exitCode).toBe(0);
+    const pruned = JSON.parse(prune.stdout);
+    expect(pruned.unmanaged.map((s: any) => s.id)).toEqual([ids[0]]);
+    expect(pruned.pruned).toEqual([ids[0]]);
+    expect(pruned.failed).toEqual([]);
+    expect([...fake.unsubscribed].sort()).toEqual(ids);
+    expect(fake.subs.map((s) => s.id).sort()).toEqual([...managed].sort());
+    for (const r of [list, unconfirmed, partial, prune]) expect(r.stderr).not.toContain(KEY);
+
+    // Nothing left: --prune alone now exits 0.
+    const again = await run('ensure', '--prune');
+    expect(again.exitCode).toBe(0);
+    expect(JSON.parse(again.stdout).unmanaged).toEqual([]);
+  }, 30000);
+
   test('CLI headers prints the bearer header, and fails closed on a wide key file', async () => {
     const env = { ...process.env, TILORI_HOME: join(home, 'tilori'), TILORI_AGENT: 'wren', CLAUDE_CODE_MCP_SERVER_URL: url };
     const cli = join(import.meta.dir, '../src/cli.ts');
