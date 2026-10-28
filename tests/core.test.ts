@@ -9,6 +9,7 @@ import {
   coordinationPolicy,
   policyText,
   desiredSubscriptions,
+  keyUrl,
   loadConfig,
   reminderSettings,
   resolveAgent,
@@ -77,6 +78,25 @@ describe('config', () => {
     expect(() => buildMcpUrl('http://example.com/mcp')).toThrow(/HTTPS/);
     expect(() => buildMcpUrl('https://u:p@example.com')).toThrow(/credentials/);
     expect(() => buildMcpUrl(undefined)).toThrow(/init/);
+  });
+
+  test('keyUrl: keys go only to config.url; a flag or $TILORI_URL may only repeat it', () => {
+    const config = { url: 'https://x.convex.site/mcp/tilori/v1' };
+    expect(keyUrl(config).href).toBe('https://x.convex.site/mcp/tilori/v1');
+    // The same endpoint, written differently, is accepted.
+    expect(keyUrl(config, 'https://x.convex.site/mcp/tilori/v1/').href).toBe(config.url);
+    expect(keyUrl(config, 'https://x.convex.site/mcp/tilori/v1?agent=wren').href).toBe(config.url);
+    expect(() => keyUrl(config, 'https://evil.example/mcp/tilori/v1')).toThrow(/--url does not match/);
+    expect(() => keyUrl(config, 'https://x.convex.site/other')).toThrow(/--url does not match/);
+    process.env.TILORI_URL = 'http://127.0.0.1:3211';
+    expect(() => keyUrl(config)).toThrow(/TILORI_URL does not match/);
+    // A matching flag doesn't excuse a mismatched variable.
+    expect(() => keyUrl(config, config.url)).toThrow(/TILORI_URL does not match/);
+    process.env.TILORI_URL = config.url;
+    expect(keyUrl(config).href).toBe(config.url);
+    delete process.env.TILORI_URL;
+    // No configured url: refuse rather than fall back to the flag.
+    expect(() => keyUrl({}, 'https://x.convex.site/mcp/tilori/v1')).toThrow(/init/);
   });
 
   test('agent resolution: flag, then env, then default_agent', () => {

@@ -177,7 +177,7 @@ export function resolveAgent(config: TiloriConfig, explicit?: string): string | 
  * key, so no ?agent= parameter is added (it may only repeat the key's agent). */
 export function buildMcpUrl(rawUrl: string | undefined): URL {
   if (!rawUrl || !rawUrl.trim()) {
-    throw new Error('No Tilori URL. Set "url" in ~/.config/tilori/config.json (tilori-agent init) or TILORI_URL.');
+    throw new Error('No Tilori URL. Run tilori-agent init --url <tilori-mcp-url>.');
   }
   let url: URL;
   try {
@@ -195,8 +195,31 @@ export function buildMcpUrl(rawUrl: string | undefined): URL {
   return url;
 }
 
-export function resolveUrl(config: TiloriConfig, explicit?: string): URL {
-  return buildMcpUrl(explicit || process.env.TILORI_URL || config.url);
+/** Whether two normalized MCP URLs name the same endpoint (origin and path). */
+export function sameEndpoint(a: URL, b: URL): boolean {
+  const path = (u: URL) => u.pathname.replace(/\/+$/, '');
+  return a.origin === b.origin && path(a) === path(b);
+}
+
+/**
+ * The only URL an agent key may be sent to: "url" in config.json. A --url
+ * flag or $TILORI_URL may only repeat it; anything else fails closed before
+ * a key is read, so a stray variable can never redirect the key. `init` is
+ * the one place config.url is set, and it does not use this.
+ */
+export function keyUrl(config: TiloriConfig, explicit?: string): URL {
+  if (!config.url) throw new Error('No "url" in config.json; run tilori-agent init --url <tilori-mcp-url>.');
+  const configured = buildMcpUrl(config.url);
+  const others: [string, string | undefined][] = [
+    ['--url', explicit],
+    ['TILORI_URL', process.env.TILORI_URL],
+  ];
+  for (const [name, raw] of others) {
+    if (raw && !sameEndpoint(buildMcpUrl(raw), configured)) {
+      throw new Error(`Refusing: ${name} does not match "url" in config.json; agent keys are only sent there.`);
+    }
+  }
+  return configured;
 }
 
 export function normalizeFilter(

@@ -1,5 +1,5 @@
 import { TiloriAgentClient } from './client.ts';
-import { desiredSubscriptions, reminderSettings, resolveUrl, type TiloriConfig } from './config.ts';
+import { desiredSubscriptions, keyUrl, reminderSettings, type TiloriConfig } from './config.ts';
 import { NotifyLinesInjector } from './injectors/notify-lines.ts';
 import { attachToRouter, probeRouter, socketIdentity, socketPath } from './ipc.ts';
 import { readKey } from './keys.ts';
@@ -21,8 +21,10 @@ export interface NotifyLinesOptions {
 /** Builds a one-agent router that talks to Tilori directly with the agent's key. */
 export function directRouter(opts: NotifyLinesOptions): Router {
   const settings = opts.config.agents?.[opts.agent] ?? {};
+  // Checked before the key is read.
+  const url = keyUrl(opts.config, opts.url);
   const client = new TiloriAgentClient({
-    url: resolveUrl(opts.config, opts.url),
+    url,
     apiKey: readKey(opts.agent),
     logger: opts.logger,
   });

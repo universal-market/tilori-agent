@@ -1,12 +1,12 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { chmodSync, mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { ACCESS_HINT, TiloriAgentClient } from '../src/client.ts';
-import { desiredSubscriptions, saveConfig } from '../src/config.ts';
+import { desiredSubscriptions, loadConfig, saveConfig } from '../src/config.ts';
 import { writeKey } from '../src/keys.ts';
 import { FakeTilori, mention, until } from './fake-tilori.ts';
 
@@ -243,5 +243,133 @@ describe('over real MCP HTTP transport', () => {
     expect(bad.stdout.toString()).toBe('');
     expect(bad.stderr.toString()).not.toContain(KEY);
     chmodSync(join(home, 'tilori', 'agents', 'wren.key'), 0o600);
+  });
+
+  describe('keys go only to config.url', () => {
+    // A second server that must never see a request.
+    let evil: ReturnType<typeof Bun.serve>;
+    let evilUrl: string;
+    const evilHits: string[] = [];
+    beforeAll(() => {
+      evil = Bun.serve({
+        hostname: '127.0.0.1',
+        port: 0,
+        fetch(req) {
+          evilHits.push(req.headers.get('authorization') ?? '');
+          return new Response('no', { status: 401 });
+        },
+      });
+      evilUrl = `http://127.0.0.1:${evil.port}/mcp/tilori/v1`;
+    });
+    afterAll(() => evil.stop(true));
+
+    const cli = join(import.meta.dir, '../src/cli.ts');
+    const fresh = () => {
+      const dir = mkdtempSync(join(tmpdir(), 'ta-keyurl-'));
+      chmodSync(dir, 0o700);
+      return { dir, env: { ...process.env, TILORI_HOME: join(dir, 'tilori'), TILORI_SOCKET: join(dir, 'none.sock'), TILORI_AGENT: 'wren' } };
+    };
+    const configIn = (dir: string) => {
+      process.env.TILORI_HOME = join(dir, 'tilori');
+      try {
+        return loadConfig();
+      } finally {
+        delete process.env.TILORI_HOME;
+      }
+    };
+
+    test('a first init ignores $TILORI_URL and verifies against --url only', async () => {
+      const { dir, env } = fresh();
+      // Async: init verifies against the fake server in this process.
+      const proc = Bun.spawn(['bun', cli, 'init', '--agent', 'wren', '--url', url], {
+        env: { ...env, TILORI_URL: evilUrl },
+        stdin: new TextEncoder().encode(KEY + '\n'),
+        stderr: 'pipe',
+      });
+      expect(await proc.exited).toBe(0);
+      expect(configIn(dir).url).toBe(url);
+      expect(evilHits).toEqual([]);
+      rmSync(dir, { recursive: true, force: true });
+    }, 15000);
+
+    test('init without --url never falls back to $TILORI_URL', () => {
+      const { dir, env } = fresh();
+      const r = Bun.spawnSync(['bun', cli, 'init', '--agent', 'wren', '--no-verify'], {
+        env: { ...env, TILORI_URL: evilUrl },
+        stdin: new TextEncoder().encode(KEY + '\n'),
+      });
+      expect(r.exitCode).toBe(1);
+      expect(r.stderr.toString()).toContain('init --url');
+      expect(r.stderr.toString()).not.toContain(KEY);
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    test('init --url replacing a configured url says old and new', () => {
+      const { dir, env } = fresh();
+      process.env.TILORI_HOME = env.TILORI_HOME;
+      saveConfig({ url: 'https://old.example/mcp/tilori/v1' });
+      delete process.env.TILORI_HOME;
+      const r = Bun.spawnSync(['bun', cli, 'init', '--agent', 'wren', '--url', url, '--no-verify'], {
+        env,
+        stdin: new TextEncoder().encode(KEY + '\n'),
+      });
+      expect(r.exitCode).toBe(0);
+      expect(r.stderr.toString()).toContain(`replacing url in config.json: https://old.example/mcp/tilori/v1 -> ${url}`);
+      expect(configIn(dir).url).toBe(url);
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    test('a redirect from the configured server is refused, not followed', async () => {
+      // The SDK already refuses cross-origin redirects; a same-origin one to
+      // another path would still carry the key there without redirect: 'error'.
+      const seen: string[] = [];
+      const redirector = Bun.serve({
+        hostname: '127.0.0.1',
+        port: 0,
+        fetch(req) {
+          const path = new URL(req.url).pathname;
+          seen.push(`${path} ${req.headers.get('authorization') ? 'key' : '-'}`);
+          return path === '/mcp/tilori/v1'
+            ? new Response(null, { status: 307, headers: { location: '/elsewhere' } })
+            : new Response('no', { status: 401 });
+        },
+      });
+      const c = new TiloriAgentClient({ url: new URL(`http://127.0.0.1:${redirector.port}/mcp/tilori/v1`), apiKey: KEY });
+      const err = await c.listSubscriptions().catch((e: Error) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).not.toContain(KEY);
+      await c.close();
+      redirector.stop(true);
+      expect(seen.filter((s) => s.startsWith('/elsewhere'))).toEqual([]);
+    });
+
+    test('ensure, watch and router refuse a mismatched url before reading any key', () => {
+      const { dir, env } = fresh();
+      process.env.TILORI_HOME = env.TILORI_HOME;
+      saveConfig({ url, default_agent: 'wren' });
+      writeKey('wren', KEY);
+      delete process.env.TILORI_HOME;
+      // An unreadable key file would fail on read, so a refusal message
+      // (not a key error) shows the URL check came first.
+      chmodSync(join(dir, 'tilori', 'agents', 'wren.key'), 0o000);
+      const cases: [string[], Record<string, string>][] = [
+        [['ensure'], { TILORI_URL: evilUrl }],
+        [['ensure', '--url', evilUrl], {}],
+        [['watch', '--notify-lines', '--wait-ms', '50'], { TILORI_URL: evilUrl }],
+        [['watch', '--exec', 'true'], { TILORI_URL: evilUrl }],
+        [['router'], { TILORI_URL: evilUrl }],
+      ];
+      for (const [args, extra] of cases) {
+        const r = Bun.spawnSync(['bun', cli, ...args], { env: { ...env, ...extra }, timeout: 8000 });
+        const err = r.stderr.toString();
+        expect(r.exitCode).toBe(1);
+        expect(err).toMatch(/Refusing: (--url|TILORI_URL) does not match "url" in config.json/);
+        expect(err).not.toContain(KEY);
+      }
+      expect(evilHits).toEqual([]);
+      chmodSync(join(dir, 'tilori', 'agents', 'wren.key'), 0o600);
+      expect(readFileSync(join(dir, 'tilori', 'agents', 'wren.key'), 'utf8').trim()).toBe(KEY);
+      rmSync(dir, { recursive: true, force: true });
+    }, 30000);
   });
 });

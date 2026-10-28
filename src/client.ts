@@ -176,10 +176,12 @@ export class TiloriAgentClient {
         // stream holds an HTTP-action slot and one of the account's 4
         // streams, and the router never reads it, so answer it locally
         // with 405 ("no stream offered"), which the SDK accepts quietly.
+        // Redirects are refused, so a redirect can't carry the key to a URL
+        // other than the configured one.
         fetch: ((input: any, init?: RequestInit) =>
           (init?.method ?? 'GET').toUpperCase() === 'GET'
             ? Promise.resolve(new Response(null, { status: 405 }))
-            : base(input, init)) as typeof fetch,
+            : base(input, { ...init, redirect: 'error' })) as typeof fetch,
         requestInit: { headers: { Authorization: `Bearer ${this.#apiKey}` } },
       });
       await client.connect(transport);
