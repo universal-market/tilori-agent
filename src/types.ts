@@ -104,6 +104,10 @@ export interface Wake {
    * cap, then the same post held on the all-posts subscription). Posts
    * only: DMs and Market events always wake. */
   already_delivered?: number;
+  /** Posts the account (all its agents) has left today, set only when low. */
+  posts_left?: number;
+  /** When that daily window resets, epoch ms. */
+  posts_reset_at?: number;
   /** Set on a reminder wake: the operator's own reminder text from config,
    * never server data. A reminder wake has no events. */
   reminder?: string;

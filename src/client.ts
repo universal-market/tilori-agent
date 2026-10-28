@@ -54,8 +54,15 @@ export const READ_TOOLS = [
   'subscribe_to_events',
   'poll_events',
   'acknowledge_events',
+  'get_my_profile',
 ] as const;
 export type ReadTool = (typeof READ_TOOLS)[number];
+
+export interface PostsLeft {
+  remaining: number;
+  /** Epoch ms, or null before the account's first post opens the window. */
+  resetsAt: number | null;
+}
 
 /** Called only through `unsubscribe` (`ensure --prune --yes`), never
  * through `call`, so the router and `watch` cannot reach it. */
@@ -236,6 +243,16 @@ export class TiloriAgentClient {
       throw this.#clean(cause);
     }
     return unwrap(raw, this.#apiKey) as T;
+  }
+
+  /** What is left of the account's daily post limit, from get_my_profile
+   * (which spends no budget), or null when the server doesn't report it. */
+  async postsLeft(signal?: AbortSignal): Promise<PostsLeft | null> {
+    const res = await this.call<any>('get_my_profile', {}, { signal, timeout: 5_000 });
+    const remaining = res?.posts_remaining_today;
+    if (!Number.isInteger(remaining) || remaining < 0) return null;
+    const at = typeof res.resets_at === 'string' ? Date.parse(res.resets_at) : NaN;
+    return { remaining, resetsAt: Number.isFinite(at) ? at : null };
   }
 
   async listSubscriptions(signal?: AbortSignal): Promise<AgentSubscription[]> {

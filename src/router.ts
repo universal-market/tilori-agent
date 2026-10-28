@@ -1,14 +1,18 @@
 import { randomUUID } from 'node:crypto';
-import { MAX_POLL_SUBSCRIPTIONS, MultiPollUnsupported, type TiloriAgentClient } from './client.ts';
+import { MAX_POLL_SUBSCRIPTIONS, MultiPollUnsupported, type PostsLeft, type TiloriAgentClient } from './client.ts';
 import { DEFAULT_DIRECT_WAKES_PER_HOUR, DEFAULT_WAKES_PER_HOUR, type Reminder } from './config.ts';
 import { WakeLimiter } from './ratelimit.ts';
-import type { AgentDelivery, AgentSubscription, DeliverResult, EventRef, Injector, SubscriptionSpec } from './types.ts';
+import type { AgentDelivery, AgentSubscription, DeliverResult, EventRef, Injector, SubscriptionSpec, Wake } from './types.ts';
 import { KIND_RANK, buildWake, refKey, toRefs } from './wake.ts';
 
 /** How long a delivered post or conversation is remembered. Longer than the
  * wake cap can hold a batch (one hour), so a held copy of something that went
  * out past the cap is still recognised when the cap lifts. */
 const RECENT_MS = 2 * 3600_000;
+/** Below this many posts left today, wakes say how many (UNI-393). */
+const POSTS_LOW = 100;
+/** How long a posts-left reading is reused before get_my_profile again. */
+const POSTS_LEFT_MS = 60_000;
 /** Bound on that memory, so a firehose can't grow it without limit. */
 const MAX_RECENT = 5_000;
 
@@ -118,6 +122,8 @@ interface AgentState {
    * wake pushes it back when the reminder is only for idle agents. */
   reminderAt: number;
   stats: { wakes: number; events: number; delayed: number; reminders: number };
+  /** The last posts-left reading (null value: unknown) and when it was taken. */
+  postsLeft: { at: number; value: PostsLeft | null };
 }
 
 /** Scopes whose events are addressed to the agent itself. */
@@ -193,6 +199,7 @@ export class Router {
         heldNotice: '',
         reminderAt: cfg.reminder ? Date.now() + cfg.reminder.everyMs : 0,
         stats: { wakes: 0, events: 0, delayed: 0, reminders: 0 },
+        postsLeft: { at: -Infinity, value: null },
       });
     }
   }
@@ -569,9 +576,9 @@ export class Router {
       this.#log(`[${handle}] reminder skipped: wake cap reached (${st.limiter.perHour}/hour)`);
       return;
     }
-    const result = await settle(
-      injector.deliver({ wake_id: randomUUID(), agent: handle, events: [], resync_required: false, reminder: reminder!.prompt }),
-    );
+    const wake: Wake = { wake_id: randomUUID(), agent: handle, events: [], resync_required: false, reminder: reminder!.prompt };
+    await this.#notePostsLeft(st, wake);
+    const result = await settle(injector.deliver(wake));
     if (result === 'gone') {
       this.#drop(st, injector);
       // Try the previous injector, if any, at once.
@@ -588,8 +595,25 @@ export class Router {
     this.#log(`[${handle}] woke ${injector.kind} with a reminder`);
   }
 
-  /** Tries to hand held batches to the agent's injector. Returns 0 when done,
-   * else how long to wait before retrying. Logs counts only, never content. */
+  /** Adds the account's posts left today to a wake when it is low. Reads
+   * get_my_profile at most once a minute; any failure leaves the wake as it
+   * is, so a missing or older server never delays or blocks one. */
+  async #notePostsLeft(st: AgentState, wake: Wake): Promise<void> {
+    const now = this.#now();
+    if (now - st.postsLeft.at >= POSTS_LEFT_MS) {
+      st.postsLeft.at = now;
+      try {
+        st.postsLeft.value = await st.cfg.client.postsLeft();
+      } catch {
+        st.postsLeft.value = null;
+      }
+    }
+    const left = st.postsLeft.value;
+    if (!left || left.remaining >= POSTS_LOW) return;
+    wake.posts_left = left.remaining;
+    if (left.resetsAt !== null) wake.posts_reset_at = left.resetsAt;
+  }
+
   /** A post an earlier wake already named under this kind or a more specific
    * one. A mention after a plain post.created still wakes. */
   #seen(st: AgentState, r: EventRef): boolean {
@@ -598,6 +622,8 @@ export class Router {
     return prev !== undefined && (KIND_RANK[r.kind] ?? 0) <= prev.rank;
   }
 
+  /** Tries to hand held batches to the agent's injector. Returns 0 when done,
+   * else how long to wait before retrying. Logs counts only, never content. */
   async #flush(st: AgentState, pending: Map<string, AgentDelivery>, signal?: AbortSignal): Promise<number> {
     const { client, handle } = st.cfg;
     const batches = [...pending.values()];
@@ -676,6 +702,7 @@ export class Router {
       const heldBack = events(send.filter((d) => st.capHeld.has(d.delivery_id)));
       if (heldBack) wake.held_back = heldBack;
       if (stillHeld) wake.still_held = stillHeld;
+      await this.#notePostsLeft(st, wake);
       // Exactly one deliver is in flight per agent: this loop awaits it with
       // no timeout, so a slow injector (an exec run, a busy session) is never
       // invoked again for the same batch, and a late `accepted` still counts.

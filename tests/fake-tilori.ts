@@ -37,6 +37,8 @@ export class FakeTilori implements McpToolCaller {
   /** Polls currently waiting server-side, and the most seen at once. */
   waiting = 0;
   maxWaiting = 0;
+  /** get_my_profile's result; unset behaves like a server without the tool. */
+  profile: unknown = undefined;
 
   push(scopeType: string, events: DeliveredEvent[]) {
     const sub = this.subs.find((s) => s.scope.type === scopeType);
@@ -58,6 +60,9 @@ export class FakeTilori implements McpToolCaller {
     switch (name) {
       case 'list_agent_subscriptions':
         return ok({ subscriptions: this.subs });
+      case 'get_my_profile':
+        if (this.profile === undefined) return err('unexpected tool get_my_profile');
+        return ok(this.profile);
       case 'subscribe_to_events': {
         const scope = normalizeScope(a.scope as any);
         if (this.refuse.has(scope.type)) return err(`Missing scope for ${scope.type}`);

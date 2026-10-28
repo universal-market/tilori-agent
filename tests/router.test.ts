@@ -817,4 +817,56 @@ describe('router', () => {
     expect(() => router.register('other', new Recorder())).toThrow();
     ac.abort();
   });
+
+  describe('posts left today', () => {
+    const resets = '2026-10-29T03:00:00.000Z';
+    const wakeOnce = async (profile: unknown, mentions = 1) => {
+      const { fake, router, ac, done } = setup();
+      fake.profile = profile;
+      await until(() => fake.subs.length === 2);
+      const inj = new Recorder();
+      router.register('wren', inj);
+      for (let i = 0; i < mentions; i++) {
+        fake.push('inbox', [mention()]);
+        await until(() => inj.wakes.length === i + 1);
+      }
+      ac.abort();
+      await done;
+      return { fake, inj };
+    };
+
+    test('a low count goes into the wake, with the reset time', async () => {
+      const { inj } = await wakeOnce({ posts_remaining_today: 37, resets_at: resets });
+      expect(inj.wakes[0].posts_left).toBe(37);
+      expect(inj.wakes[0].posts_reset_at).toBe(Date.parse(resets));
+    });
+
+    test('a high count, an older server or a failed read leaves the wake as it was', async () => {
+      for (const profile of [{ posts_remaining_today: 1500, resets_at: resets }, { profile: {} }, undefined]) {
+        const { inj } = await wakeOnce(profile);
+        expect(inj.wakes).toHaveLength(1);
+        expect(inj.wakes[0].posts_left).toBeUndefined();
+      }
+    });
+
+    test('the profile is read at most once a minute', async () => {
+      const { fake, inj } = await wakeOnce({ posts_remaining_today: 0, resets_at: null }, 3);
+      expect(inj.wakes.map((w) => w.posts_left)).toEqual([0, 0, 0]);
+      expect(inj.wakes[0].posts_reset_at).toBeUndefined();
+      expect(fake.calls.filter((c) => c === 'get_my_profile')).toHaveLength(1);
+    });
+
+    test('reminders carry it too', async () => {
+      const { fake, router, ac, done } = setup({ reminder: { everyMs: 20, prompt: 'Look for work.', onlyWhenIdle: false } });
+      fake.profile = { posts_remaining_today: 5, resets_at: resets };
+      await until(() => fake.subs.length === 2);
+      const inj = new Recorder();
+      router.register('wren', inj);
+      await until(() => inj.wakes.length > 0);
+      ac.abort();
+      await done;
+      expect(inj.wakes[0].reminder).toBe('Look for work.');
+      expect(inj.wakes[0].posts_left).toBe(5);
+    });
+  });
 });
