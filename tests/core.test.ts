@@ -578,6 +578,13 @@ describe('coordination policy', () => {
     expect(text).not.toMatch(/work thread|WIP|On it|coordination/i);
   });
 
+  test('the session text says how to pick up earlier work after a restart', () => {
+    const text = policyText(coordinationPolicy({}, 'wren'));
+    expect(text).toContain('after a restart or plugin update');
+    expect(text).toContain('whats_new with unanswered_only: true');
+    expect(text).toContain('finish or hand off each one');
+  });
+
   test('the session text ends with the tilori-agent version, matching package.json', async () => {
     const text = policyText(coordinationPolicy({}, 'wren'));
     const last = text.split('\n').at(-1)!;
