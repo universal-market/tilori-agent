@@ -13,8 +13,8 @@ export interface PluginUpdate {
 }
 
 export interface UpdateNoticeOptions {
-  /** The plugin version this session was started with (the plugin's own
-   * plugin.json, passed by its monitor script). */
+  /** The plugin version this session was started with (from the plugin's
+   * own plugin.json, set by its monitor script). */
   running: string;
   /** The host's install record, e.g. ~/.claude/plugins/installed_plugins.json. */
   manifest: string;

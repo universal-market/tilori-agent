@@ -32,12 +32,13 @@ Usage:
       ~/.config/tilori/agents/<handle>.key (0600); records url and agent in config.json.
       --url may be left out once config.json has a url; $TILORI_URL is never used.
   tilori-agent watch --notify-lines [--agent <handle>]
-         [--running-version <x.y.z> --installed-manifest <file> --installed-key <key>]
       Claude Code monitor mode: one fixed wake line per wake on stdout.
       Uses the local router if it serves the agent, else polls directly.
-      With all three update flags (the plugin's monitor passes them), a wake
-      says once when the manifest's user install of <key> is newer than
-      <x.y.z>, so the agent can tell its user to restart.
+      When the plugin's monitor sets TILORI_PLUGIN_VERSION (x.y.z),
+      TILORI_PLUGIN_MANIFEST (the host's install record) and TILORI_PLUGIN_KEY,
+      a wake says once when that record's user install is newer, so the agent
+      can tell its user to restart. (Environment, not flags: an older CLI
+      ignores them instead of refusing to start.)
   tilori-agent watch --exec "<command>" [--agent <handle>] [--exec-timeout-ms <ms>]
       Runs <command> per wake (ids only, via $TILORI_WAKE_TEXT / $TILORI_WAKE_JSON / stdin).
   tilori-agent router
@@ -71,17 +72,7 @@ interface Args {
 
 export function parseArgs(argv: string[]): Args {
   const flags = new Map<string, string | true>();
-  const valued = new Set([
-    'agent',
-    'url',
-    'exec',
-    'wait-ms',
-    'server-url',
-    'exec-timeout-ms',
-    'running-version',
-    'installed-manifest',
-    'installed-key',
-  ]);
+  const valued = new Set(['agent', 'url', 'exec', 'wait-ms', 'server-url', 'exec-timeout-ms']);
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
     if (!a.startsWith('--')) throw new Error(`Unexpected argument: ${a}`);
@@ -275,9 +266,9 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         const agent = requireAgent(config, args);
         const waitMs = str(args, 'wait-ms') ? Number(str(args, 'wait-ms')) : undefined;
         if (args.flags.has('notify-lines')) {
-          const running = str(args, 'running-version');
-          const manifest = str(args, 'installed-manifest');
-          const key = str(args, 'installed-key');
+          const running = process.env.TILORI_PLUGIN_VERSION;
+          const manifest = process.env.TILORI_PLUGIN_MANIFEST;
+          const key = process.env.TILORI_PLUGIN_KEY;
           const update = running && manifest && key ? new UpdateNotice({ running, manifest, key }) : undefined;
           await runNotifyLines({ agent, config, url: str(args, 'url'), signal, logger: log, waitMs, update });
           return 0;

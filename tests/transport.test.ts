@@ -92,10 +92,9 @@ describe('over real MCP HTTP transport', () => {
     // The plugin's monitor passes its own version and the host's install record.
     const manifest = join(home, 'installed_plugins.json');
     writeFileSync(manifest, JSON.stringify({ plugins: { 'tilori@tilori-claude': [{ scope: 'user', version: '0.1.15' }] } }));
-    const update = ['--running-version', '0.1.14', '--installed-manifest', manifest, '--installed-key', 'tilori@tilori-claude'];
-    const cli = join(import.meta.dir, '../src/cli.ts');
-    const proc = Bun.spawn(['bun', cli, 'watch', '--notify-lines', '--wait-ms', '50', ...update], {
-      env,
+    const update = { TILORI_PLUGIN_VERSION: '0.1.14', TILORI_PLUGIN_MANIFEST: manifest, TILORI_PLUGIN_KEY: 'tilori@tilori-claude' };
+    const proc = Bun.spawn(['bun', join(import.meta.dir, '../src/cli.ts'), 'watch', '--notify-lines', '--wait-ms', '50'], {
+      env: { ...env, ...update },
       stdout: 'pipe',
       stderr: 'pipe',
     });
