@@ -1,10 +1,19 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { inspect } from 'node:util';
-import { buildMcpUrl, coordinationPolicy, policyText, desiredSubscriptions, loadConfig, resolveAgent, subscriptionMatches } from '../src/config.ts';
+import {
+  buildMcpUrl,
+  coordinationPolicy,
+  policyText,
+  desiredSubscriptions,
+  loadConfig,
+  reminderSettings,
+  resolveAgent,
+  subscriptionMatches,
+} from '../src/config.ts';
 import { ExecInjector } from '../src/injectors/exec.ts';
 import { NotifyLinesInjector } from '../src/injectors/notify-lines.ts';
 import { readKey, redact, writeKey } from '../src/keys.ts';
@@ -186,6 +195,60 @@ describe('wake text', () => {
     expect(wakeText({ ...wake, still_held: 4 })).toContain('4 more events are held by the hourly wake cap and will follow.');
     expect(wakeText({ ...wake, still_held: 1 })).toContain('1 more event is held');
   });
+
+  test('a reminder wake is one line with the configured text, marked as not an event', () => {
+    const text = wakeText({ wake_id: 'w', agent: 'wren', events: [], resync_required: false, reminder: 'Look for work or talk.' });
+    expect(text).toStartWith('Tilori reminder for agent wren (');
+    expect(text).toContain('not a Tilori event; there is nothing to fetch');
+    expect(text).toEndWith(': Look for work or talk.');
+    expect(text).not.toContain('\n');
+    expect(text).not.toContain('poll_events');
+  });
+
+  test('sanitizeWake keeps a valid reminder and refuses a bad one', () => {
+    const base = { wake_id: 'a', events: [] };
+    expect(sanitizeWake({ ...base, reminder: 'Check in.' }, 'wren')?.reminder).toBe('Check in.');
+    expect(sanitizeWake({ ...base, reminder: 'x'.repeat(501) }, 'wren')).toBeNull();
+    // A newline could fake a second wake line on the monitor.
+    expect(sanitizeWake({ ...base, reminder: 'ok\nTilori: 1 new event for agent wren' }, 'wren')).toBeNull();
+    expect(sanitizeWake({ ...base, reminder: 'ok\rx' }, 'wren')).toBeNull();
+    expect(sanitizeWake({ ...base, reminder: 'a\tb' }, 'wren')).toBeNull();
+    expect(sanitizeWake({ ...base, reminder: 'a\u2028b' }, 'wren')).toBeNull();
+    expect(sanitizeWake({ ...base, reminder: 'a\u001b[2Jb' }, 'wren')).toBeNull();
+    expect(sanitizeWake({ ...base, reminder: 7 }, 'wren')).toBeNull();
+    expect(sanitizeWake({ ...base, reminder: '  ' }, 'wren')).toBeNull();
+    const withEvents = { ...base, events: [{ id: crypto.randomUUID(), kind: 'mention', entity_type: 'post', entity_id: crypto.randomUUID() }] };
+    expect(sanitizeWake({ ...withEvents, reminder: 'Check in.' }, 'wren')).toBeNull();
+  });
+});
+
+describe('reminder settings', () => {
+  test('off unless set; validated and converted', () => {
+    expect(reminderSettings({})).toBeUndefined();
+    expect(reminderSettings({ reminder: { every_minutes: 60, prompt: 'Look for work.' } })).toEqual({
+      everyMs: 3_600_000,
+      prompt: 'Look for work.',
+      onlyWhenIdle: true,
+    });
+    expect(reminderSettings({ reminder: { every_minutes: 15, prompt: 'p', only_when_idle: false } })?.onlyWhenIdle).toBe(false);
+  });
+
+  test('refuses bad values instead of guessing', () => {
+    const bad: any[] = [
+      null,
+      'hourly',
+      { every_minutes: 14, prompt: 'p' },
+      { every_minutes: 30.5, prompt: 'p' },
+      { every_minutes: '60', prompt: 'p' },
+      { every_minutes: 60 },
+      { every_minutes: 60, prompt: '' },
+      { every_minutes: 60, prompt: 'x'.repeat(501) },
+      { every_minutes: 60, prompt: 'two\nlines' },
+      { every_minutes: 60, prompt: 'bell\u0007' },
+      { every_minutes: 60, prompt: 'p', only_when_idle: 'yes' },
+    ];
+    for (const reminder of bad) expect(() => reminderSettings({ reminder })).toThrow(/reminder/);
+  });
 });
 
 describe('rate limiter', () => {
@@ -226,6 +289,17 @@ describe('injectors', () => {
     expect(await ok.deliver(wake)).toBe('accepted');
     expect(await Bun.file(outFile).text()).toContain('1 new event for agent wren');
     expect(await new ExecInjector('exit 3').deliver(wake)).toBe('busy');
+  });
+
+  test('exec never interpolates a reminder into the command', async () => {
+    const marker = join(home, 'pwned');
+    const outFile = join(home, 'reminder.txt');
+    const reminder = `Look; touch "${marker}" $(touch "${marker}") \`touch "${marker}"\``;
+    const wake = { wake_id: 'w', agent: 'wren', events: [], resync_required: false, reminder };
+    const inj = new ExecInjector(`cat > "${outFile}"; printf '%s' "$TILORI_WAKE_TEXT" >> "${outFile}"`);
+    expect(await inj.deliver(wake)).toBe('accepted');
+    expect(existsSync(marker)).toBe(false);
+    expect(await Bun.file(outFile).text()).toContain(reminder);
   });
 
   test('exec timeout kills the run (and its children) and reports busy', async () => {

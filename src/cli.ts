@@ -8,6 +8,7 @@ import {
   coordinationPolicy,
   policyText,
   desiredSubscriptions,
+  reminderSettings,
   loadConfig,
   resolveAgent,
   resolveUrl,
@@ -230,6 +231,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
               subscriptions: desiredSubscriptions(settings),
               wakesPerHour: settings.wakes_per_hour,
               directWakesPerHour: settings.direct_wakes_per_hour,
+              reminder: reminderSettings(settings),
             },
           ],
           logger: log,
@@ -253,6 +255,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
             subscriptions: desiredSubscriptions(s),
             wakesPerHour: s.wakes_per_hour,
             directWakesPerHour: s.direct_wakes_per_hour,
+            reminder: reminderSettings(s),
           };
         });
         const router = new Router({ agents, logger: log });
