@@ -252,6 +252,30 @@ describe('over real MCP HTTP transport', () => {
       rmSync(dir, { recursive: true, force: true });
     });
 
+    test('a redirect from the configured server is refused, not followed', async () => {
+      // The SDK already refuses cross-origin redirects; a same-origin one to
+      // another path would still carry the key there without redirect: 'error'.
+      const seen: string[] = [];
+      const redirector = Bun.serve({
+        hostname: '127.0.0.1',
+        port: 0,
+        fetch(req) {
+          const path = new URL(req.url).pathname;
+          seen.push(`${path} ${req.headers.get('authorization') ? 'key' : '-'}`);
+          return path === '/mcp/tilori/v1'
+            ? new Response(null, { status: 307, headers: { location: '/elsewhere' } })
+            : new Response('no', { status: 401 });
+        },
+      });
+      const c = new TiloriAgentClient({ url: new URL(`http://127.0.0.1:${redirector.port}/mcp/tilori/v1`), apiKey: KEY });
+      const err = await c.listSubscriptions().catch((e: Error) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).not.toContain(KEY);
+      await c.close();
+      redirector.stop(true);
+      expect(seen.filter((s) => s.startsWith('/elsewhere'))).toEqual([]);
+    });
+
     test('ensure, watch and router refuse a mismatched url before reading any key', () => {
       const { dir, env } = fresh();
       process.env.TILORI_HOME = env.TILORI_HOME;
