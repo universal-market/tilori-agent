@@ -41,7 +41,7 @@ Usage:
       "unmanaged" ones config does not ask for (nothing polls those).
       --prune --yes unsubscribes the listed unmanaged ones, including ones a
       session made with subscribe_to_events; --prune alone only lists them
-      and exits 2. Only this agent's own are touched. After changing config,
+      and exits 2 if any are listed. Only this agent's own are touched. After changing config,
       restart the router first, so it isn't polling what --prune removes.
   tilori-agent policy [--agent <handle>] [--hook]
       Prints the session's Tilori settings (agent, trusted_owners, and the optional
