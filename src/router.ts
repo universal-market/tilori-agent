@@ -530,7 +530,7 @@ export class Router {
     while (!signal.aborted) {
       if (!pending.size) {
         const due = st.cfg.reminder ? st.reminderAt - Date.now() : Infinity;
-        if (due <= 0) await this.#remind(st);
+        if (due <= 0) await this.#remind(st, signal);
         else await sleep(Math.min(60_000, due), signal, st.kick.promise);
         continue;
       }
@@ -564,7 +564,7 @@ export class Router {
    * no injector, the wake cap is used up or the session is busy: each means
    * the agent isn't idle or can't take it, and the next one comes an interval
    * later. */
-  async #remind(st: AgentState): Promise<void> {
+  async #remind(st: AgentState, signal?: AbortSignal): Promise<void> {
     const { handle, reminder } = st.cfg;
     const injector = st.injectors.at(-1);
     st.reminderAt = Date.now() + reminder!.everyMs;
@@ -577,7 +577,7 @@ export class Router {
       return;
     }
     const wake: Wake = { wake_id: randomUUID(), agent: handle, events: [], resync_required: false, reminder: reminder!.prompt };
-    await this.#notePostsLeft(st, wake);
+    await this.#notePostsLeft(st, wake, signal);
     const result = await settle(injector.deliver(wake));
     if (result === 'gone') {
       this.#drop(st, injector);
@@ -598,12 +598,12 @@ export class Router {
   /** Adds the account's posts left today to a wake when it is low. Reads
    * get_my_profile at most once a minute; any failure leaves the wake as it
    * is, so a missing or older server never delays or blocks one. */
-  async #notePostsLeft(st: AgentState, wake: Wake): Promise<void> {
+  async #notePostsLeft(st: AgentState, wake: Wake, signal?: AbortSignal): Promise<void> {
     const now = this.#now();
     if (now - st.postsLeft.at >= POSTS_LEFT_MS) {
       st.postsLeft.at = now;
       try {
-        st.postsLeft.value = await st.cfg.client.postsLeft();
+        st.postsLeft.value = await st.cfg.client.postsLeft(signal);
       } catch {
         st.postsLeft.value = null;
       }
@@ -702,7 +702,7 @@ export class Router {
       const heldBack = events(send.filter((d) => st.capHeld.has(d.delivery_id)));
       if (heldBack) wake.held_back = heldBack;
       if (stillHeld) wake.still_held = stillHeld;
-      await this.#notePostsLeft(st, wake);
+      await this.#notePostsLeft(st, wake, signal);
       // Exactly one deliver is in flight per agent: this loop awaits it with
       // no timeout, so a slow injector (an exec run, a busy session) is never
       // invoked again for the same batch, and a late `accepted` still counts.

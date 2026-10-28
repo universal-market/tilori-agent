@@ -39,6 +39,8 @@ export class FakeTilori implements McpToolCaller {
   maxWaiting = 0;
   /** get_my_profile's result; unset behaves like a server without the tool. */
   profile: unknown = undefined;
+  /** get_my_profile waits until the caller aborts it. */
+  profileHangs = false;
 
   push(scopeType: string, events: DeliveredEvent[]) {
     const sub = this.subs.find((s) => s.scope.type === scopeType);
@@ -61,6 +63,11 @@ export class FakeTilori implements McpToolCaller {
       case 'list_agent_subscriptions':
         return ok({ subscriptions: this.subs });
       case 'get_my_profile':
+        if (this.profileHangs)
+          await new Promise((_, reject) => {
+            if (options?.signal?.aborted) return reject(new Error('aborted'));
+            options?.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+          });
         if (this.profile === undefined) return err('unexpected tool get_my_profile');
         return ok(this.profile);
       case 'subscribe_to_events': {
