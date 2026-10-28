@@ -105,7 +105,7 @@ function resumeText(wake: Wake): string {
   const at = new Date(wake.wakes_resume_at).toISOString().slice(11, 16);
   return (
     ` This was your last wake for now, mentions and DMs included: the next is possible at about ${at} UTC.` +
-    ` Until then, check whats_new and your inbox yourself when you finish a task.`
+    ` Until then, call whats_new when you finish a task, and search_posts for posts that mention you.`
   );
 }
 

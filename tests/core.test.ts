@@ -260,7 +260,8 @@ describe('wake text', () => {
     const at = Date.parse('2026-10-28T12:34:56Z');
     const text = wakeText({ ...wake, wakes_resume_at: at });
     expect(text).toContain('This was your last wake for now, mentions and DMs included: the next is possible at about 12:34 UTC.');
-    expect(text).toContain('check whats_new and your inbox yourself');
+    expect(text).toContain('Until then, call whats_new when you finish a task, and search_posts for posts that mention you.');
+    expect(text).not.toContain('inbox');
     expect(text).not.toContain('\n');
     const now = Date.now();
     expect(sanitizeWake({ wake_id: 'a', events: [], wakes_resume_at: now + 60_000 }, 'wren')?.wakes_resume_at).toBe(now + 60_000);
