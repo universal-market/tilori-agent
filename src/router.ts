@@ -3,7 +3,14 @@ import { MAX_POLL_SUBSCRIPTIONS, MultiPollUnsupported, type TiloriAgentClient } 
 import { DEFAULT_DIRECT_WAKES_PER_HOUR, DEFAULT_WAKES_PER_HOUR, type Reminder } from './config.ts';
 import { WakeLimiter } from './ratelimit.ts';
 import type { AgentDelivery, AgentSubscription, DeliverResult, Injector, SubscriptionSpec } from './types.ts';
-import { buildWake } from './wake.ts';
+import { buildWake, refKey, toRefs } from './wake.ts';
+
+/** How long a delivered post or conversation is remembered. Longer than the
+ * wake cap can hold a batch (one hour), so a held copy of something that went
+ * out past the cap is still recognised when the cap lifts. */
+const RECENT_MS = 2 * 3600_000;
+/** Bound on that memory, so a firehose can't grow it without limit. */
+const MAX_RECENT = 5_000;
 
 export interface RouterAgentConfig {
   handle: string;
@@ -66,6 +73,10 @@ interface AgentState {
   directSubs: Set<string>;
   /** Batches (by delivery id) the wake cap has delayed, for the wake's count. */
   capHeld: Set<string>;
+  /** Posts and conversations (by `refKey`) handed to an injector recently,
+   * oldest first, with the time. Kept across generations: a held batch is
+   * re-served after a renewal and must still be recognised. */
+  recent: Map<string, number>;
   /** Live injectors, oldest first. The newest one receives wakes; when it
    * leaves, the previous one takes over. */
   injectors: Injector[];
@@ -163,6 +174,7 @@ export class Router {
         directLimiter: directLimiter(cfg.directWakesPerHour, this.#now),
         directSubs: new Set(),
         capHeld: new Set(),
+        recent: new Map(),
         injectors: [],
         busy: 0,
         retryAt: 0,
@@ -582,7 +594,29 @@ export class Router {
     const count = batches.reduce((n, d) => n + d.events.length, 0);
 
     // Re-ack batches already handed off whose ack failed earlier.
-    const fresh = batches.filter((d) => !st.handedOff.has(d.delivery_id));
+    let fresh = batches.filter((d) => !st.handedOff.has(d.delivery_id));
+    // A batch naming only posts and conversations an earlier wake already
+    // named (a mention sent past the cap, then the same post held on the
+    // all-posts subscription) costs no wake: those refs reached an injector,
+    // so it is acknowledged without one, even over the cap.
+    const now = this.#now();
+    for (const [key, at] of st.recent) {
+      if (now - at <= RECENT_MS) break;
+      st.recent.delete(key);
+    }
+    const known = (d: AgentDelivery) => {
+      const refs = toRefs([d]);
+      return !d.resync_required && refs.length > 0 && refs.every((r) => st.recent.has(refKey(r)));
+    };
+    const stale = fresh.filter(known);
+    if (stale.length) {
+      for (const d of stale) {
+        st.handedOff.add(d.delivery_id);
+        st.capHeld.delete(d.delivery_id);
+      }
+      fresh = fresh.filter((d) => !stale.includes(d));
+      this.#log(`[${handle}] ${stale.reduce((n, d) => n + d.events.length, 0)} event(s) already in an earlier wake; acknowledged without waking`);
+    }
     if (fresh.length) {
       const notice = (s: string) => {
         if (st.heldNotice !== s) this.#log(`[${handle}] ${s}`);
@@ -622,6 +656,11 @@ export class Router {
       const wake = buildWake(handle, send, randomUUID());
       // Counted from batches, not wake.events, which may be deduplicated.
       const events = (ds: AgentDelivery[]) => ds.reduce((n, d) => n + d.events.length, 0);
+      const already = toRefs(send).filter((r) => st.recent.has(refKey(r))).length;
+      if (already) {
+        wake.events = wake.events.filter((r) => !st.recent.has(refKey(r)));
+        wake.already_delivered = already;
+      }
       const stillHeld = events(fresh) - events(send);
       const heldBack = events(send.filter((d) => st.capHeld.has(d.delivery_id)));
       if (heldBack) wake.held_back = heldBack;
@@ -655,6 +694,14 @@ export class Router {
         st.handedOff.add(d.delivery_id);
         st.capHeld.delete(d.delivery_id);
       }
+      // Remembered only once accepted, so a busy or gone attempt never
+      // hides a ref from the next wake.
+      const at = this.#now();
+      for (const r of wake.events) {
+        st.recent.delete(refKey(r));
+        st.recent.set(refKey(r), at);
+      }
+      while (st.recent.size > MAX_RECENT) st.recent.delete(st.recent.keys().next().value!);
       this.#log(
         `[${handle}] woke ${injector.kind} with ${wake.events.length} event(s)` +
           (limiter === st.directLimiter ? ` past the wake cap; ${stillHeld} still held` : ''),

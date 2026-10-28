@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { describe, expect, test } from 'bun:test';
 import { desiredSubscriptions } from '../src/config.ts';
 import { ExecInjector } from '../src/injectors/exec.ts';
@@ -200,6 +201,54 @@ describe('router', () => {
     expect(inj.wakes[3].events.map((e) => e.kind)).toEqual(['post.created', 'post.created']);
     expect(inj.wakes[3].held_back).toBe(2);
     await until(() => fake.acks.length === 4);
+    ac.abort();
+    await done;
+  });
+
+  test('a post already sent past the cap is left out when its held copy goes out', async () => {
+    let t = 1_000_000;
+    const { fake, router, ac, done, logs } = setup({ wakesPerHour: 1, posts: true, now: () => t });
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => fake.subs.length === 3);
+    fake.push('posts', [post()]);
+    await until(() => inj.wakes.length === 1);
+    // Over the cap: the same post arrives on posts (held) and as a mention
+    // (sent past the cap). A second post is only on posts.
+    const p = randomUUID();
+    const q = randomUUID();
+    fake.push('posts', [post(p), post(q)]);
+    await until(() => router.stats('wren')!.delayed === 2);
+    fake.push('inbox', [mention(p)]);
+    await until(() => inj.wakes.length === 2);
+    expect(inj.wakes[1].events.map((e) => e.entity_id)).toEqual([p]);
+    t += 3600_001;
+    router.register('wren', inj);
+    await until(() => inj.wakes.length === 3);
+    expect(inj.wakes[2].events.map((e) => e.entity_id)).toEqual([q]);
+    expect(inj.wakes[2].already_delivered).toBe(1);
+    expect(inj.wakes[2].held_back).toBe(2);
+    await until(() => fake.acks.length === 3);
+    // A held batch with nothing new is acknowledged without a wake.
+    fake.push('posts', [post(q)]);
+    await until(() => fake.acks.length === 4);
+    expect(inj.wakes).toHaveLength(3);
+    expect(logs.some((l) => l.includes('acknowledged without waking'))).toBe(true);
+    ac.abort();
+    await done;
+  });
+
+  test('a ref is remembered only after the injector accepts it', async () => {
+    const { fake, router, ac, done } = setup({ posts: true });
+    const inj = new Recorder();
+    inj.next = ['busy'];
+    router.register('wren', inj);
+    await until(() => fake.subs.length === 3);
+    const p = randomUUID();
+    fake.push('inbox', [mention(p)]);
+    await until(() => inj.wakes.length === 1);
+    expect(inj.wakes[0].events.map((e) => e.entity_id)).toEqual([p]);
+    expect(inj.wakes[0].already_delivered).toBeUndefined();
     ac.abort();
     await done;
   });
