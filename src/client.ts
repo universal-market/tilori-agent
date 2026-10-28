@@ -2,6 +2,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { subscriptionMatches } from './config.ts';
 import { redact } from './keys.ts';
+import { VERSION } from './version.ts';
 import type { AgentDelivery, AgentSubscription, PollError, SubscriptionSpec } from './types.ts';
 
 export const MAX_POLL_WAIT_MS = 25_000;
@@ -9,7 +10,6 @@ export const MAX_POLL_WAIT_MS = 25_000;
 export const MAX_POLL_SUBSCRIPTIONS = 8;
 /** Upper bound on a server-suggested pause, so a bad value cannot stall us. */
 export const MAX_RETRY_AFTER_MS = 60_000;
-const VERSION = '0.1.6';
 
 /** The server does not accept `subscription_ids` (a deployment from before
  * UNI-380); poll each subscription separately instead. */

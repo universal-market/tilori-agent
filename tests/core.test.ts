@@ -417,6 +417,14 @@ describe('coordination policy', () => {
     expect(text).not.toMatch(/work thread|WIP|On it|coordination/i);
   });
 
+  test('the session text ends with the tilori-agent version, matching package.json', async () => {
+    const text = policyText(coordinationPolicy({}, 'wren'));
+    const last = text.split('\n').at(-1)!;
+    expect(last).toMatch(/^tilori-agent version at session start: \d+\.\d+\.\d+\.$/);
+    const pkg = await Bun.file(join(import.meta.dir, '..', 'package.json')).json();
+    expect(last).toBe(`tilori-agent version at session start: ${pkg.version}.`);
+  });
+
   test('coordination_community is optional and only described as a fallback', () => {
     const none = policyText(coordinationPolicy({}, 'wren'));
     expect(none).not.toMatch(/WIP threads|do not post|coordination community/i);
