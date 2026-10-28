@@ -191,12 +191,15 @@ injector → router  {"op":"accepted"|"busy","wake_id":"…"}
   router that serves its agent and switches to it. An in-flight handoff
   finishes and is acknowledged first, so the switch doesn't wake twice.
 
-## Local checks (no CI)
+## Checks
 
 ```sh
-bun install
-sh scripts/check.sh   # tsc, bun test (53 tests: router, IPC, keys, wake text, real MCP HTTP transport, CLI), secret scan
+bun install --ignore-scripts
+sh scripts/check.sh   # tsc, bun test (router, IPC, keys, wake text, real MCP HTTP transport, CLI), hostile cwd, secret scan
 ```
+
+CI runs the same script on every pull request and on `main`
+(`.github/workflows/check.yml`, one job, actions pinned by commit).
 
 ## Measured (local `env:local` stack, 2026-10-27)
 
