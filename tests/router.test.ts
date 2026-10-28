@@ -779,6 +779,31 @@ describe('router', () => {
     await done;
   });
 
+  test('a reminder that spends the last wake carries the notice', async () => {
+    const t = 1_000_000;
+    const reminder = { everyMs: 100, prompt: 'Look for work.', onlyWhenIdle: true };
+    // No direct lane: the reminder takes the only general slot, so nothing
+    // else (mentions included) can wake the agent for an hour.
+    const { router, ac, done } = setup({ reminder, wakesPerHour: 1, directWakesPerHour: 0, now: () => t });
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => inj.wakes.length === 1);
+    expect(inj.wakes[0].wakes_resume_at).toBe(t + 3600_000);
+    ac.abort();
+    await done;
+  });
+
+  test('a reminder leaves the notice off while a direct slot is free', async () => {
+    const reminder = { everyMs: 100, prompt: 'Look for work.', onlyWhenIdle: true };
+    const { router, ac, done } = setup({ reminder, wakesPerHour: 1, directWakesPerHour: 1, now: () => 1_000_000 });
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => inj.wakes.length === 1);
+    expect(inj.wakes[0].wakes_resume_at).toBeUndefined();
+    ac.abort();
+    await done;
+  });
+
   test('without a reminder setting, a quiet agent is never woken', async () => {
     const { router, ac, done } = setup();
     const inj = new Recorder();

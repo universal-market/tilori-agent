@@ -73,14 +73,14 @@ function describe(ref: EventRef): string {
  * Always a single line (monitors deliver one notification per stdout line).
  */
 export function wakeText(wake: Wake): string {
-  if (wake.reminder !== undefined) return reminderText(wake.agent, wake.reminder) + postsLeftText(wake);
+  if (wake.reminder !== undefined) return reminderText(wake.agent, wake.reminder) + resumeText(wake) + postsLeftText(wake);
   const n = wake.events.length;
   const shown = wake.events.slice(0, MAX_REFS_IN_LINE).map(describe);
   const more = n > shown.length ? `, +${n - shown.length} more` : '';
   const head = `Tilori: ${n} new event${n === 1 ? '' : 's'} for agent ${wake.agent}`;
   const list = n ? ` (${shown.join(', ')}${more})` : '';
   const resync = wake.resync_required
-    ? ' Some history expired: re-read your Tilori inbox before acting.'
+    ? ' Some history expired: re-read your recent threads (search_posts, get_post) before acting.'
     : '';
   const held = wake.held_back
     ? ` ${wake.held_back} event${wake.held_back === 1 ? '' : 's'} waited behind the hourly wake cap.`
