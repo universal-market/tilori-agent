@@ -1,5 +1,6 @@
 import type { Writable } from 'node:stream';
 import type { DeliverResult, Injector, Wake } from '../types.ts';
+import type { UpdateNotice } from '../update-notice.ts';
 import { wakeText } from '../wake.ts';
 
 /**
@@ -16,6 +17,10 @@ export class NotifyLinesInjector implements Injector {
     private readonly out: Writable = process.stdout,
     /** Called once when the stream breaks (the session is gone). */
     private readonly onGone: () => void = () => {},
+    /** Adds a one-time "newer plugin installed" note to the next wake. It
+     * lives here, in the session's own process, because a shared router
+     * can't know which plugin version each session runs. */
+    private readonly update?: UpdateNotice,
   ) {
     out.on('error', () => this.#markGone());
   }
@@ -28,11 +33,13 @@ export class NotifyLinesInjector implements Injector {
 
   deliver(wake: Wake): Promise<DeliverResult> {
     if (this.#gone) return Promise.resolve('gone');
-    const line = wakeText(wake).replace(/[\r\n]+/g, ' ') + '\n';
+    const update = this.update?.pending() ?? null;
+    const line = wakeText(update ? { ...wake, plugin_update: update } : wake).replace(/[\r\n]+/g, ' ') + '\n';
     return new Promise((resolve) => {
       try {
         this.out.write(line, 'utf8', (err) => {
           if (err) this.#markGone();
+          else if (update) this.update!.said(update);
           resolve(err ? 'gone' : 'accepted');
         });
       } catch {

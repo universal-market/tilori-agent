@@ -5,6 +5,7 @@ import { attachToRouter, probeRouter, socketIdentity, socketPath } from './ipc.t
 import { readKey } from './keys.ts';
 import { Router } from './router.ts';
 import type { Injector } from './types.ts';
+import type { UpdateNotice } from './update-notice.ts';
 
 export interface NotifyLinesOptions {
   agent: string;
@@ -16,6 +17,8 @@ export interface NotifyLinesOptions {
   waitMs?: number;
   /** How often direct mode checks for a router to attach to (default 15 s). */
   routerCheckMs?: number;
+  /** Says once when a newer plugin is installed than this session runs. */
+  update?: UpdateNotice;
 }
 
 /** Builds a one-agent router that talks to Tilori directly with the agent's key. */
@@ -69,7 +72,7 @@ export async function runNotifyLines(opts: NotifyLinesOptions): Promise<void> {
       // acknowledging, so the held batch is re-served to the next session.
       log('stdout closed; exiting');
       process.exit(0);
-    });
+    }, opts.update);
   const path = socketPath();
   // A router that refused this agent (it doesn't serve it) is not retried
   // until the socket is replaced.

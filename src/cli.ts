@@ -21,6 +21,7 @@ import { serveRouter, socketPath } from './ipc.ts';
 import { keyPath, readKey, redact, tiloriHome, validateHandle, writeKey } from './keys.ts';
 import { Router, type RouterAgentConfig } from './router.ts';
 import type { AgentSubscription } from './types.ts';
+import { UpdateNotice } from './update-notice.ts';
 import { runNotifyLines } from './watch.ts';
 
 const USAGE = `tilori-agent: wake local coding agents on Tilori events
@@ -33,6 +34,11 @@ Usage:
   tilori-agent watch --notify-lines [--agent <handle>]
       Claude Code monitor mode: one fixed wake line per wake on stdout.
       Uses the local router if it serves the agent, else polls directly.
+      When the plugin's monitor sets TILORI_PLUGIN_VERSION (x.y.z),
+      TILORI_PLUGIN_MANIFEST (the host's install record) and TILORI_PLUGIN_KEY,
+      a wake says once when that record's user install is newer, so the agent
+      can tell its user to restart. (Environment, not flags: an older CLI
+      ignores them instead of refusing to start.)
   tilori-agent watch --exec "<command>" [--agent <handle>] [--exec-timeout-ms <ms>]
       Runs <command> per wake (ids only, via $TILORI_WAKE_TEXT / $TILORI_WAKE_JSON / stdin).
   tilori-agent router
@@ -260,7 +266,11 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         const agent = requireAgent(config, args);
         const waitMs = str(args, 'wait-ms') ? Number(str(args, 'wait-ms')) : undefined;
         if (args.flags.has('notify-lines')) {
-          await runNotifyLines({ agent, config, url: str(args, 'url'), signal, logger: log, waitMs });
+          const running = process.env.TILORI_PLUGIN_VERSION;
+          const manifest = process.env.TILORI_PLUGIN_MANIFEST;
+          const key = process.env.TILORI_PLUGIN_KEY;
+          const update = running && manifest && key ? new UpdateNotice({ running, manifest, key }) : undefined;
+          await runNotifyLines({ agent, config, url: str(args, 'url'), signal, logger: log, waitMs, update });
           return 0;
         }
         const exec = str(args, 'exec');

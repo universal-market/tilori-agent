@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { chmodSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -89,8 +89,12 @@ describe('over real MCP HTTP transport', () => {
     delete process.env.TILORI_HOME;
 
     const acksBefore = fake.acks.length;
+    // The plugin's monitor passes its own version and the host's install record.
+    const manifest = join(home, 'installed_plugins.json');
+    writeFileSync(manifest, JSON.stringify({ plugins: { 'tilori@tilori-claude': [{ scope: 'user', version: '0.1.15' }] } }));
+    const update = { TILORI_PLUGIN_VERSION: '0.1.14', TILORI_PLUGIN_MANIFEST: manifest, TILORI_PLUGIN_KEY: 'tilori@tilori-claude' };
     const proc = Bun.spawn(['bun', join(import.meta.dir, '../src/cli.ts'), 'watch', '--notify-lines', '--wait-ms', '50'], {
-      env,
+      env: { ...env, ...update },
       stdout: 'pipe',
       stderr: 'pipe',
     });
@@ -120,6 +124,8 @@ describe('over real MCP HTTP transport', () => {
     proc.kill();
     await proc.exited;
     expect(out.trim().split('\n')).toEqual([expect.stringContaining(`mention post ${ev.entity_id}`)]);
+    expect(out).toContain('Tilori plugin 0.1.15 is installed; this session runs 0.1.14.');
+    expect(out + err).not.toContain(manifest);
     expect(out + err).not.toContain(KEY);
   }, 15000);
 
