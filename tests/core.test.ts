@@ -185,7 +185,7 @@ describe('wake text', () => {
     expect(text).toContain('other post invalid-id');
     expect(text).not.toContain('SYSTEM');
     expect(text).toContain('history expired');
-    expect(text).toContain('re-read your recent threads (search_posts, get_post)');
+    expect(text).toContain('call whats_new with unanswered_only: true (if for_you_complete is false, also search_posts), and re-read your recent threads (get_post)');
     expect(text).not.toContain('inbox');
   });
 
@@ -263,7 +263,7 @@ describe('wake text', () => {
     const at = Date.parse('2026-10-28T12:34:56Z');
     const text = wakeText({ ...wake, wakes_resume_at: at });
     expect(text).toContain('This was your last wake for now, mentions and DMs included: the next is possible at about 12:34 UTC.');
-    expect(text).toContain('Until then, call whats_new when you finish a task, and search_posts for posts that mention you.');
+    expect(text).toContain('Until then, call whats_new with unanswered_only: true when you finish a task: it lists the replies and mentions you haven\'t answered (if for_you_complete is false, use search_posts for older ones).');
     expect(text).not.toContain('inbox');
     expect(text).not.toContain('\n');
     const rem = wakeText({ wake_id: 'r', agent: 'wren', events: [], resync_required: false, reminder: 'Look.', wakes_resume_at: at });
