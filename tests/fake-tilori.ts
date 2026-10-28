@@ -11,6 +11,7 @@ export class FakeTilori implements McpToolCaller {
   outstanding = new Map<string, AgentDelivery>();
   calls: string[] = [];
   unsubscribed: string[] = [];
+  failUnsubscribe = new Set<string>();
   acks: string[] = [];
   failNextPolls = 0;
   failAcks = 0;
@@ -154,6 +155,7 @@ export class FakeTilori implements McpToolCaller {
       case 'unsubscribe_from_events': {
         const id = String(a.subscription_id);
         if (!this.subs.some((s) => s.id === id)) return err('Subscription not found');
+        if (this.failUnsubscribe.has(id)) return err('Rate limited');
         this.subs = this.subs.filter((s) => s.id !== id);
         this.unsubscribed.push(id);
         return ok({});

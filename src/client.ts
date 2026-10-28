@@ -57,7 +57,8 @@ export const READ_TOOLS = [
 ] as const;
 export type ReadTool = (typeof READ_TOOLS)[number];
 
-/** Called only by `ensure --prune`, never by the router or `watch`. */
+/** Called only through `unsubscribe` (`ensure --prune --yes`), never
+ * through `call`, so the router and `watch` cannot reach it. */
 export const PRUNE_TOOL = 'unsubscribe_from_events';
 
 export interface McpToolCaller {
@@ -204,13 +205,21 @@ export class TiloriAgentClient {
   }
 
   async call<T = any>(
-    name: ReadTool | typeof PRUNE_TOOL,
+    name: ReadTool,
     args: Record<string, unknown> = {},
     options?: { signal?: AbortSignal; timeout?: number },
   ): Promise<T> {
-    if (!(READ_TOOLS as readonly string[]).includes(name) && name !== PRUNE_TOOL) {
+    if (!(READ_TOOLS as readonly string[]).includes(name)) {
       throw new Error(`tilori-agent never calls ${name}.`);
     }
+    return this.#invoke<T>(name, args, options);
+  }
+
+  async #invoke<T>(
+    name: ReadTool | typeof PRUNE_TOOL,
+    args: Record<string, unknown>,
+    options?: { signal?: AbortSignal; timeout?: number },
+  ): Promise<T> {
     await this.connect();
     let raw: unknown;
     try {
@@ -242,7 +251,7 @@ export class TiloriAgentClient {
   }
 
   async unsubscribe(subscriptionId: string, signal?: AbortSignal): Promise<void> {
-    await this.call(PRUNE_TOOL, { subscription_id: subscriptionId }, { signal });
+    await this.#invoke(PRUNE_TOOL, { subscription_id: subscriptionId }, { signal });
   }
 
   async subscribe(spec: SubscriptionSpec, signal?: AbortSignal): Promise<AgentSubscription> {

@@ -36,11 +36,13 @@ Usage:
   tilori-agent router
       One router per person per machine for every agent with a key file.
       Injectors attach over ${'$'}XDG_RUNTIME_DIR/tilori/router.sock.
-  tilori-agent ensure [--agent <handle>] [--prune]
+  tilori-agent ensure [--agent <handle>] [--prune [--yes]]
       Creates or renews the agent's subscriptions and prints them, plus any
-      "unmanaged" ones config does not ask for (nothing polls those). --prune
-      then unsubscribes the listed unmanaged ones, including ones a session
-      made with subscribe_to_events. Only this agent's own are touched.
+      "unmanaged" ones config does not ask for (nothing polls those).
+      --prune --yes unsubscribes the listed unmanaged ones, including ones a
+      session made with subscribe_to_events; --prune alone only lists them
+      and exits 2. Only this agent's own are touched. After changing config,
+      restart the router first, so it isn't polling what --prune removes.
   tilori-agent policy [--agent <handle>] [--hook]
       Prints the session's Tilori settings (agent, trusted_owners, and the optional
       fallback coordination_community) for a session; --hook emits Claude Code
@@ -212,22 +214,38 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
             subscriptions: subs.map(brief),
             unmanaged: unmanaged.map(brief),
           };
-          if (args.flags.has('prune')) {
+          let code = 0;
+          if (args.flags.has('prune') && args.flags.has('yes')) {
             const pruned: string[] = [];
+            const failed: Array<{ id: string; error: string }> = [];
             for (const s of unmanaged) {
               log(`unsubscribing unmanaged ${s.scope.type} subscription ${s.id}`);
-              await client.unsubscribe(s.id, signal);
-              pruned.push(s.id);
+              try {
+                await client.unsubscribe(s.id, signal);
+                pruned.push(s.id);
+              } catch (cause) {
+                const error = cause instanceof Error ? cause.message : String(cause);
+                log(`could not unsubscribe ${s.id}: ${error}`);
+                failed.push({ id: s.id, error });
+              }
             }
             out.pruned = pruned;
+            out.failed = failed;
+            if (failed.length) code = 1;
+          } else if (args.flags.has('prune')) {
+            // Confirmation required: the listing above is what --yes removes.
+            if (unmanaged.length) {
+              log(`${unmanaged.length} unmanaged subscription(s) listed; nothing removed. Re-run with --prune --yes to remove them`);
+              code = 2;
+            }
           } else if (unmanaged.length) {
-            log(`${unmanaged.length} unmanaged subscription(s) listed; run with --prune to remove them`);
+            log(`${unmanaged.length} unmanaged subscription(s) listed; run with --prune --yes to remove them`);
           }
           console.log(JSON.stringify(out, null, 2));
+          return code;
         } finally {
           await client.close();
         }
-        return 0;
       }
       case 'watch': {
         const config = loadConfig();
