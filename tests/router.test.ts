@@ -317,6 +317,41 @@ describe('router', () => {
     await done;
   });
 
+  test('the wake that spends the last slot of both allowances says when the next is possible', async () => {
+    let t = 1_000_000;
+    const { fake, router, ac, done } = setup({ wakesPerHour: 1, directWakesPerHour: 1, now: () => t });
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => fake.subs.length === 2);
+    fake.push('inbox', [mention()]);
+    await until(() => inj.wakes.length === 1);
+    // General slot spent, but a direct one is still free: no notice.
+    expect(inj.wakes[0].wakes_resume_at).toBeUndefined();
+    t += 60_000;
+    fake.push('inbox', [mention()]);
+    await until(() => inj.wakes.length === 2);
+    // Both spent: the general slot frees first, an hour after the first wake.
+    expect(inj.wakes[1].wakes_resume_at).toBe(1_000_000 + 3600_000);
+    ac.abort();
+    await done;
+  });
+
+  test('without a direct lane, the last general slot carries the notice', async () => {
+    const t = 1_000_000;
+    const { fake, router, ac, done } = setup({ wakesPerHour: 2, directWakesPerHour: 0, now: () => t });
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => fake.subs.length === 2);
+    fake.push('inbox', [mention()]);
+    await until(() => inj.wakes.length === 1);
+    expect(inj.wakes[0].wakes_resume_at).toBeUndefined();
+    fake.push('inbox', [mention()]);
+    await until(() => inj.wakes.length === 2);
+    expect(inj.wakes[1].wakes_resume_at).toBe(t + 3600_000);
+    ac.abort();
+    await done;
+  });
+
   test('direct_wakes_per_hour 0 turns the direct lane off', async () => {
     let t = 1_000_000;
     const { fake, router, ac, done, logs } = setup({ wakesPerHour: 1, directWakesPerHour: 0, now: () => t });

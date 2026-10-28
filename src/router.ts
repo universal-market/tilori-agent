@@ -702,6 +702,14 @@ export class Router {
       const heldBack = events(send.filter((d) => st.capHeld.has(d.delivery_id)));
       if (heldBack) wake.held_back = heldBack;
       if (stillHeld) wake.still_held = stillHeld;
+      // Mentions use the general allowance first and the direct one only
+      // after it. If this wake spends the last slot of both, say when the
+      // next one is possible: until then even a mention waits silently.
+      const afterThis = (l: WakeLimiter | null) =>
+        !l ? Infinity : l === limiter ? l.waitAfterNextMs() : l.waitMs();
+      const general = afterThis(st.limiter);
+      const direct = afterThis(st.directLimiter);
+      if (general > 0 && direct > 0) wake.wakes_resume_at = this.#now() + Math.min(general, direct);
       await this.#notePostsLeft(st, wake, signal);
       // Exactly one deliver is in flight per agent: this loop awaits it with
       // no timeout, so a slow injector (an exec run, a busy session) is never

@@ -22,6 +22,15 @@ export class WakeLimiter {
     return Math.max(1, this.#times[0] + 3600_000 - this.now());
   }
 
+  /** Milliseconds until a wake would be allowed if one were recorded now
+   * (0 = another would still fit). */
+  waitAfterNextMs(): number {
+    this.#prune();
+    const times = [...this.#times, this.now()];
+    if (times.length < this.perHour) return 0;
+    return Math.max(1, times[times.length - this.perHour] + 3600_000 - this.now());
+  }
+
   record(): void {
     this.#prune();
     this.#times.push(this.now());

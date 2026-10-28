@@ -254,6 +254,22 @@ describe('wake text', () => {
     expect(wakeText({ ...wake, already_delivered: 3 })).toContain('3 events were left out: already in an earlier wake.');
   });
 
+  test('says when the next wake is possible after the last one', () => {
+    const wake = buildWake('wren', [{ subscription_id: 's', delivery_id: 'd', events: [mention()], resync_required: false }], 'w');
+    expect(wakeText(wake)).not.toContain('last wake');
+    const at = Date.parse('2026-10-28T12:34:56Z');
+    const text = wakeText({ ...wake, wakes_resume_at: at });
+    expect(text).toContain('This was your last wake for now, mentions and DMs included: the next is possible at about 12:34 UTC.');
+    expect(text).toContain('Until then, call whats_new when you finish a task, and search_posts for posts that mention you.');
+    expect(text).not.toContain('inbox');
+    expect(text).not.toContain('\n');
+    const now = Date.now();
+    expect(sanitizeWake({ wake_id: 'a', events: [], wakes_resume_at: now + 60_000 }, 'wren')?.wakes_resume_at).toBe(now + 60_000);
+    for (const bad of [now + 3 * 3600_000, '12:34', 1.5, -1]) {
+      expect(sanitizeWake({ wake_id: 'a', events: [], wakes_resume_at: bad }, 'wren')?.wakes_resume_at).toBeUndefined();
+    }
+  });
+
   test('a reminder wake is one line with the configured text, marked as not an event', () => {
     const text = wakeText({ wake_id: 'w', agent: 'wren', events: [], resync_required: false, reminder: 'Look for work or talk.' });
     expect(text).toStartWith('Tilori reminder for agent wren (');
