@@ -104,6 +104,10 @@ export interface Wake {
    * cap, then the same post held on the all-posts subscription). Posts
    * only: DMs and Market events always wake. */
   already_delivered?: number;
+  /** Set when this wake spends the last slot of both the general and the
+   * direct allowance: when the next wake of any kind (mentions included) is
+   * possible, epoch ms. */
+  wakes_resume_at?: number;
   /** Posts the account (all its agents) has left today, set only when low. */
   posts_left?: number;
   /** When that daily window resets, epoch ms. */
