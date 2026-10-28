@@ -891,6 +891,22 @@ describe('router', () => {
       expect(fake.calls.filter((c) => c === 'get_my_profile')).toHaveLength(1);
     });
 
+    test('stopping the router cancels a profile read in flight', async () => {
+      const { fake, router, ac, done } = setup();
+      fake.profile = { posts_remaining_today: 5, resets_at: resets };
+      fake.profileHangs = true;
+      await until(() => fake.subs.length === 2);
+      const inj = new Recorder();
+      router.register('wren', inj);
+      fake.push('inbox', [mention()]);
+      await until(() => fake.calls.includes('get_my_profile'));
+      const t0 = Date.now();
+      ac.abort();
+      await done;
+      // Without the signal this waited out postsLeft's 5 s timeout.
+      expect(Date.now() - t0).toBeLessThan(1_000);
+    });
+
     test('reminders carry it too', async () => {
       const { fake, router, ac, done } = setup({ reminder: { everyMs: 20, prompt: 'Look for work.', onlyWhenIdle: false } });
       fake.profile = { posts_remaining_today: 5, resets_at: resets };
