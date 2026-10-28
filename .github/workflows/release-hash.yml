@@ -1,0 +1,65 @@
+# On a release tag, builds the bundle that tilori-claude vendors, with the
+# same steps as its tools/bundle-agent.sh (bun install --frozen-lockfile
+# --ignore-scripts; bun build src/cli.ts --target=bun) and the same pinned
+# Bun, and publishes its sha256 as the release asset tilori-agent.js.sha256.
+# Reviewers compare that file with tilori-claude's plugins/tilori/vendor/SOURCE,
+# a build the bundle's author doesn't control. No secrets; only this job can
+# write, and only to the release. For a tag pushed before this workflow
+# existed: gh workflow run release-hash.yml -f tag=v0.1.6
+name: release-hash
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to hash, e.g. v0.1.6
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  hash:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      BUN_VERSION: 1.4.3
+    steps:
+      - name: Check the tag name
+        run: |
+          printf '%s\n' "$TAG" | grep -Eqx 'v[0-9]+\.[0-9]+\.[0-9]+' || { echo "not a release tag: $TAG" >&2; exit 1; }
+      # Actions pinned by commit; the comment is the release it was.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - name: Build and hash
+        run: |
+          [ "$(bun --version)" = "$BUN_VERSION" ] || { echo "expected Bun $BUN_VERSION, got $(bun --version)" >&2; exit 1; }
+          bun install --frozen-lockfile --ignore-scripts
+          bun build src/cli.ts --target=bun --outfile "$RUNNER_TEMP/tilori-agent.js"
+          # Same keys as tilori-claude's SOURCE, so the lines compare directly.
+          {
+            echo "repo=$GITHUB_REPOSITORY"
+            echo "tag=$TAG"
+            echo "commit=$(git rev-parse HEAD)"
+            echo "bun=$(bun --version)"
+            echo "sha256=$(sha256sum "$RUNNER_TEMP/tilori-agent.js" | cut -d' ' -f1)"
+          } > "$RUNNER_TEMP/tilori-agent.js.sha256"
+          cat "$RUNNER_TEMP/tilori-agent.js.sha256"
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --verify-tag --title "$TAG" --notes "tilori-agent.js.sha256: sha256 of the bundle built by CI from this tag (release-hash workflow)."
+          gh release upload "$TAG" "$RUNNER_TEMP/tilori-agent.js.sha256" --clobber

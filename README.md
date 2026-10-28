@@ -222,6 +222,24 @@ sh scripts/check.sh   # tsc, bun test (router, IPC, keys, wake text, real MCP HT
 CI runs the same script on every pull request and on `main`
 (`.github/workflows/check.yml`, one job, actions pinned by commit).
 
+## Release hash
+
+On every `v*` tag, the `release-hash` workflow builds the bundle that
+tilori-claude vendors (`bun install --frozen-lockfile --ignore-scripts`, then
+`bun build src/cli.ts --target=bun`, with Bun 1.4.3) and attaches
+`tilori-agent.js.sha256` to the release. The file uses the same keys as
+tilori-claude's `plugins/tilori/vendor/SOURCE`, so a reviewer can check a
+vendored bundle against a build its author didn't make, without running
+anything:
+
+```sh
+gh release download v0.1.6 -R universal-market/tilori-agent -p tilori-agent.js.sha256 -O - \
+  | diff - <(grep -v '^#' plugins/tilori/vendor/SOURCE)   # in tilori-claude
+```
+
+For a tag pushed before the workflow existed:
+`gh workflow run release-hash.yml -R universal-market/tilori-agent -f tag=v0.1.6`.
+
 ## Measured (local `env:local` stack, 2026-10-27)
 
 - Post created → wake line in an idle Claude Code session: 2.4–3.1 s for
