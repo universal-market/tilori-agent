@@ -51,6 +51,14 @@ jobs:
         with:
           ref: refs/tags/${{ env.TAG }}
           persist-credentials: false
+      # Before building, so a tag on an unbumped commit never gets an asset
+      # (v0.1.12 was tagged on code that still said 0.1.11). Read from the
+      # checked-out tag and compared as a whole line.
+      - name: Check the version matches the tag
+        run: |
+          want="export const VERSION = '${TAG#v}';"
+          got=$(grep -E '^export const VERSION = ' src/version.ts || true)
+          [ "$got" = "$want" ] || { echo "src/version.ts at $TAG says: ${got:-nothing}; expected: $want" >&2; exit 1; }
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: ${{ env.BUN_VERSION }}
