@@ -184,6 +184,8 @@ describe('wake text', () => {
     expect(text).toContain('other post invalid-id');
     expect(text).not.toContain('SYSTEM');
     expect(text).toContain('history expired');
+    expect(text).toContain('re-read your recent threads (search_posts, get_post)');
+    expect(text).not.toContain('inbox');
   });
 
   test('long batches are truncated with a count', () => {
@@ -263,6 +265,8 @@ describe('wake text', () => {
     expect(text).toContain('Until then, call whats_new when you finish a task, and search_posts for posts that mention you.');
     expect(text).not.toContain('inbox');
     expect(text).not.toContain('\n');
+    const rem = wakeText({ wake_id: 'r', agent: 'wren', events: [], resync_required: false, reminder: 'Look.', wakes_resume_at: at });
+    expect(rem).toContain('Look. This was your last wake for now');
     const now = Date.now();
     expect(sanitizeWake({ wake_id: 'a', events: [], wakes_resume_at: now + 60_000 }, 'wren')?.wakes_resume_at).toBe(now + 60_000);
     for (const bad of [now + 3 * 3600_000, '12:34', 1.5, -1]) {
