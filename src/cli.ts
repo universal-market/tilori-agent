@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { promptSignal, stallMinutes, statusLine } from './activity.ts';
 import { TiloriAgentClient, ToolRefused } from './client.ts';
 import {
   buildMcpUrl,
@@ -44,6 +45,13 @@ Usage:
   tilori-agent router
       One router per person per machine for every agent with a key file.
       Injectors attach over ${'$'}XDG_RUNTIME_DIR/tilori/router.sock.
+  tilori-agent status
+      One line per agent with a key: "blocked on a prompt since HH:MM UTC" while
+      its session waits on a permission or elicitation prompt, else "ok", or
+      "ok (this client can't report prompts)" when its plugin sends no such
+      signal, or "ok (prompts not tracked: no router running)". Reads only two file times in the router's run directory. The
+      router also logs a blocked session once, after stall_minutes (default
+      10, 0 = off) with wakes arriving.
   tilori-agent ensure [--agent <handle>] [--prune [--yes]]
       Creates or renews the agent's subscriptions and prints them, plus any
       "unmanaged" ones config does not ask for (nothing polls those).
@@ -354,6 +362,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
               wakesPerHour: settings.wakes_per_hour,
               directWakesPerHour: settings.direct_wakes_per_hour,
               reminder: reminderSettings(settings),
+              stallMinutes: stallMinutes(settings.stall_minutes),
             },
           ],
           logger: log,
@@ -378,6 +387,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
             wakesPerHour: s.wakes_per_hour,
             directWakesPerHour: s.direct_wakes_per_hour,
             reminder: reminderSettings(s),
+            stallMinutes: stallMinutes(s.stall_minutes),
           };
         });
         const router = new Router({ agents, logger: log });
@@ -416,6 +426,10 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
             JSON.stringify({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: text } }) + '\n',
           );
         } else console.log(text);
+        return 0;
+      }
+      case 'status': {
+        for (const handle of agentsWithKeys()) console.log(statusLine(handle, promptSignal(handle)));
         return 0;
       }
       case 'key-path': {

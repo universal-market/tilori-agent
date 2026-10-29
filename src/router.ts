@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { clock, promptSignal } from './activity.ts';
 import { MAX_POLL_SUBSCRIPTIONS, MultiPollUnsupported, type ProfileNotes, type TiloriAgentClient } from './client.ts';
 import { DEFAULT_DIRECT_WAKES_PER_HOUR, DEFAULT_WAKES_PER_HOUR, type Reminder } from './config.ts';
 import { WakeLimiter } from './ratelimit.ts';
@@ -29,6 +30,9 @@ export interface RouterAgentConfig {
   directWakesPerHour?: number;
   /** A periodic wake with the operator's own text (validated by reminderSettings). */
   reminder?: Reminder;
+  /** Log once when the session has been blocked on a prompt this long with
+   * wakes arriving (validated by stallMinutes; 0 or unset: off). */
+  stallMinutes?: number;
 }
 
 export interface RouterOptions {
@@ -132,6 +136,9 @@ interface AgentState {
   stats: { wakes: number; events: number; delayed: number; reminders: number };
   /** The last get_my_profile reading and when it was taken. */
   profile: { at: number; value: ProfileNotes };
+  /** The prompt the session is blocked on (by its signal's mtime), the wakes
+   * accepted since, and whether the stall line was logged for it. */
+  blocked: { since: number; wakes: number; logged: boolean };
 }
 
 /** Scopes whose events are addressed to the agent itself. */
@@ -211,6 +218,7 @@ export class Router {
         reminderAt: cfg.reminder ? Date.now() + cfg.reminder.everyMs : 0,
         stats: { wakes: 0, events: 0, delayed: 0, reminders: 0 },
         profile: { at: -Infinity, value: { postsLeft: null, toolsHash: null } },
+        blocked: { since: 0, wakes: 0, logged: false },
       });
     }
   }
@@ -627,6 +635,30 @@ export class Router {
     this.#log(`[${handle}] woke ${injector.kind} with a reminder`);
   }
 
+  /** After an accepted wake: if the session's host reports it blocked on a
+   * prompt for `stallMinutes`, log that once per prompt, with the wakes
+   * accepted since (the injector took them, but the session can't act). Only
+   * the handle, a time and a count are logged. */
+  #noteBlocked(st: AgentState): void {
+    const { handle, stallMinutes } = st.cfg;
+    if (!stallMinutes) return;
+    const { blockedSince } = promptSignal(handle);
+    const b = st.blocked;
+    if (blockedSince === null) {
+      if (b.logged) this.#log(`[${handle}] no longer blocked on a prompt`);
+      st.blocked = { since: 0, wakes: 0, logged: false };
+      return;
+    }
+    if (b.since !== blockedSince) st.blocked = { since: blockedSince, wakes: 0, logged: false };
+    st.blocked.wakes++;
+    // Wall clock, like the file mtime (not the injectable #now used for caps).
+    if (!st.blocked.logged && Date.now() - blockedSince >= stallMinutes * 60_000) {
+      st.blocked.logged = true;
+      const n = st.blocked.wakes;
+      this.#log(`[${handle}] blocked on a prompt since ${clock(blockedSince)}, ${n} wake${n === 1 ? '' : 's'} pending`);
+    }
+  }
+
   /** Mentions use the general allowance first and the direct one only after
    * it. If this wake (spending `limiter`) takes the last slot of both, say
    * when the next one is possible: until then even a mention waits silently. */
@@ -778,6 +810,7 @@ export class Router {
       if (st.cfg.reminder?.onlyWhenIdle) st.reminderAt = Date.now() + st.cfg.reminder.everyMs;
       st.stats.wakes++;
       st.stats.events += wake.events.length;
+      this.#noteBlocked(st);
       st.stats.delayed = stillHeld;
       st.heldNotice = '';
       for (const d of send) {

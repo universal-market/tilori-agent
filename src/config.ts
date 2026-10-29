@@ -38,6 +38,10 @@ export interface AgentSettings {
    * direct messages and inbox batches wake past `wakes_per_hour` up to this
    * many times an hour. Any account can mention or DM the agent, so keep it low. */
   direct_wakes_per_hour?: number;
+  /** Minutes a session may sit blocked on a prompt, with wakes arriving,
+   * before the router logs it once (default 10; 0 turns it off). Needs a
+   * host plugin that reports prompts (see activity.ts). */
+  stall_minutes?: number;
   /** Follow replies and mentions (default true). */
   inbox?: boolean;
   /** Follow direct messages; needs tilori:messages on the agent (default true). */
