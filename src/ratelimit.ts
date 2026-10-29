@@ -2,12 +2,28 @@
  * router delays and coalesces; nothing is dropped. */
 export class WakeLimiter {
   readonly #times: number[] = [];
+  #perHour: number;
 
   constructor(
-    readonly perHour: number,
+    perHour: number,
     private readonly now: () => number = Date.now,
   ) {
+    this.#perHour = WakeLimiter.#check(perHour);
+  }
+
+  static #check(perHour: number): number {
     if (!Number.isInteger(perHour) || perHour < 1) throw new Error('wakes_per_hour must be a positive integer.');
+    return perHour;
+  }
+
+  get perHour(): number {
+    return this.#perHour;
+  }
+
+  /** Changes the cap in place (live reload). Wakes already recorded this
+   * hour still count, so lowering the cap can't buy a fresh hour. */
+  resize(perHour: number): void {
+    this.#perHour = WakeLimiter.#check(perHour);
   }
 
   #prune(): void {
@@ -18,7 +34,7 @@ export class WakeLimiter {
   /** Milliseconds until a wake is allowed (0 = now). */
   waitMs(): number {
     this.#prune();
-    if (this.#times.length < this.perHour) return 0;
+    if (this.#times.length < this.#perHour) return 0;
     return Math.max(1, this.#times[0] + 3600_000 - this.now());
   }
 
@@ -27,8 +43,8 @@ export class WakeLimiter {
   waitAfterNextMs(): number {
     this.#prune();
     const times = [...this.#times, this.now()];
-    if (times.length < this.perHour) return 0;
-    return Math.max(1, times[times.length - this.perHour] + 3600_000 - this.now());
+    if (times.length < this.#perHour) return 0;
+    return Math.max(1, times[times.length - this.#perHour] + 3600_000 - this.now());
   }
 
   record(): void {

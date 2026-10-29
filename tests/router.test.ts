@@ -208,6 +208,100 @@ describe('router', () => {
     await done;
   });
 
+  test('a reload that raises the cap lets held broad traffic out at once', async () => {
+    let t = 1_000_000;
+    const { fake, router, ac, done, logs } = setup({ wakesPerHour: 1, posts: true, now: () => t });
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => fake.subs.length === 3);
+    fake.push('posts', [post()]);
+    await until(() => inj.wakes.length === 1);
+    fake.push('posts', [post(), post()]);
+    await until(() => router.stats('wren')!.delayed === 2);
+    expect(router.usage('wren')).toEqual({ wakes: { used: 1, limit: 1 }, direct: { used: 0, limit: 10 }, held: 2 });
+    expect(router.reload('wren', { wakesPerHour: 5, directWakesPerHour: 10, stallMinutes: 0 })).toEqual(['wakes_per_hour 1 -> 5']);
+    // No hour passes: the raised cap alone releases them.
+    await until(() => inj.wakes.length === 2);
+    expect(inj.wakes[1].events).toHaveLength(2);
+    expect(router.usage('wren')).toEqual({ wakes: { used: 2, limit: 5 }, direct: { used: 0, limit: 10 }, held: 0 });
+    expect(logs.some((l) => l.includes('settings reloaded'))).toBe(false);
+    ac.abort();
+    await done;
+  });
+
+  test('a reload that lowers the cap keeps the wakes already spent this hour', async () => {
+    let t = 1_000_000;
+    const { fake, router, ac, done } = setup({ wakesPerHour: 5, posts: true, now: () => t });
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => fake.subs.length === 3);
+    for (let i = 1; i <= 2; i++) {
+      fake.push('posts', [post()]);
+      await until(() => inj.wakes.length === i);
+    }
+    router.reload('wren', { wakesPerHour: 2, directWakesPerHour: 0, stallMinutes: 0 });
+    expect(router.usage('wren')).toEqual({ wakes: { used: 2, limit: 2 }, direct: null, held: 0 });
+    // Over the new cap, and the direct allowance is off: even a mention waits.
+    fake.push('inbox', [mention()]);
+    await until(() => router.stats('wren')!.delayed === 1);
+    expect(inj.wakes).toHaveLength(2);
+    // Turning the direct allowance back on lets it out.
+    expect(router.reload('wren', { wakesPerHour: 2, directWakesPerHour: 3, stallMinutes: 0 })).toEqual([
+      'direct_wakes_per_hour 0 -> 3',
+    ]);
+    await until(() => inj.wakes.length === 3);
+    expect(inj.wakes[2].events.map((e) => e.kind)).toEqual(['mention']);
+    ac.abort();
+    await done;
+  });
+
+  test('turning the direct allowance off and on again keeps this hour\'s direct wakes', async () => {
+    let t = 1_000_000;
+    const { fake, router, ac, done } = setup({ wakesPerHour: 1, directWakesPerHour: 2, now: () => t });
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => fake.subs.length === 2);
+    // One general wake, then both direct ones.
+    for (let i = 1; i <= 3; i++) {
+      fake.push('inbox', [mention()]);
+      await until(() => inj.wakes.length === i);
+    }
+    expect(router.usage('wren')!.direct).toEqual({ used: 2, limit: 2 });
+    router.reload('wren', { wakesPerHour: 1, directWakesPerHour: 0, stallMinutes: 0 });
+    expect(router.usage('wren')!.direct).toBeNull();
+    router.reload('wren', { wakesPerHour: 1, directWakesPerHour: 3, stallMinutes: 0 });
+    // Back on with a higher cap: the two spent wakes still count, one is left.
+    expect(router.usage('wren')!.direct).toEqual({ used: 2, limit: 3 });
+    fake.push('inbox', [mention()]);
+    await until(() => inj.wakes.length === 4);
+    fake.push('inbox', [mention()]);
+    await until(() => router.stats('wren')!.delayed === 1);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(inj.wakes).toHaveLength(4);
+    ac.abort();
+    await done;
+  });
+
+  test('a reload re-times a reminder but never adds one', async () => {
+    const { router, ac, done } = setup({ reminder: { everyMs: 3600_000, prompt: 'Check in.', onlyWhenIdle: false } });
+    const inj = new Recorder();
+    router.register('wren', inj);
+    const changed = router.reload('wren', { wakesPerHour: 20, directWakesPerHour: 10, reminderEveryMs: 50, stallMinutes: 0 });
+    expect(changed).toHaveLength(1);
+    expect(changed[0]).toStartWith('reminder.every_minutes 60 -> ');
+    await until(() => inj.wakes.some((w) => w.reminder === 'Check in.'));
+    ac.abort();
+    await done;
+    const plain = setup();
+    const inj2 = new Recorder();
+    plain.router.register('wren', inj2);
+    expect(plain.router.reload('wren', { wakesPerHour: 20, directWakesPerHour: 10, reminderEveryMs: 50, stallMinutes: 0 })).toEqual([]);
+    await new Promise((r) => setTimeout(r, 150));
+    expect(inj2.wakes).toHaveLength(0);
+    plain.ac.abort();
+    await plain.done;
+  });
+
   test('a post already sent past the cap is left out when its held copy goes out', async () => {
     let t = 1_000_000;
     const { fake, router, ac, done, logs } = setup({ wakesPerHour: 1, posts: true, now: () => t });
