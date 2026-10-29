@@ -93,6 +93,9 @@ interface AgentState {
   /** A separate allowance for direct signals, so broad traffic that used up
    * `limiter` never starves a mention or direct message. Null when turned off. */
   directLimiter: WakeLimiter | null;
+  /** The direct limiter while turned off by a reload, kept so turning it back
+   * on doesn't hand out a fresh hour. */
+  directOff: WakeLimiter | null;
   /** Subscriptions whose batches are direct signals (inbox, mentions, DMs). */
   directSubs: Set<string>;
   /** Batches (by delivery id) the wake cap has delayed, for the wake's count. */
@@ -207,6 +210,7 @@ export class Router {
         cfg,
         limiter: new WakeLimiter(cfg.wakesPerHour ?? DEFAULT_WAKES_PER_HOUR, this.#now),
         directLimiter: directLimiter(cfg.directWakesPerHour, this.#now),
+        directOff: null,
         directSubs: new Set(),
         capHeld: new Set(),
         recent: new Map(),
@@ -292,9 +296,15 @@ export class Router {
     note('wakes_per_hour', st.limiter.perHour, live.wakesPerHour);
     st.limiter.resize(live.wakesPerHour);
     note('direct_wakes_per_hour', st.directLimiter?.perHour ?? 0, live.directWakesPerHour);
-    if (live.directWakesPerHour === 0) st.directLimiter = null;
-    else if (st.directLimiter) st.directLimiter.resize(live.directWakesPerHour);
-    else st.directLimiter = new WakeLimiter(live.directWakesPerHour, this.#now);
+    if (live.directWakesPerHour === 0) {
+      st.directOff = st.directLimiter ?? st.directOff;
+      st.directLimiter = null;
+    } else {
+      // Off and on again keeps this hour's direct wakes: same limiter, resized.
+      st.directLimiter = st.directLimiter ?? st.directOff ?? new WakeLimiter(live.directWakesPerHour, this.#now);
+      st.directOff = null;
+      st.directLimiter.resize(live.directWakesPerHour);
+    }
     note('stall_minutes', st.cfg.stallMinutes ?? 0, live.stallMinutes);
     let reminder = st.cfg.reminder;
     if (reminder && live.reminderEveryMs !== undefined && live.reminderEveryMs !== reminder.everyMs) {

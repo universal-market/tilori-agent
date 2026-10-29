@@ -287,6 +287,35 @@ describe('live reload', () => {
     }
   });
 
+  test('a hand edit above the set bounds is not taken live', async () => {
+    writeConfig(FULL);
+    const fake = new FakeTilori();
+    const router = new Router({
+      agents: [{ handle: 'wren', client: fake.client(), subscriptions: desiredSubscriptions(), wakesPerHour: 20, stallMinutes: 10 }],
+      waitMs: 10,
+      retryMs: 10,
+      coalesceMs: 0,
+    });
+    const logs: string[] = [];
+    const ac = new AbortController();
+    followConfig(router, (m) => logs.push(m), ac.signal, configPath(), 20);
+    try {
+      const next = structuredClone(FULL);
+      next.agents!.wren.wakes_per_hour = 500;
+      writeFileSync(configPath(), text(next), { mode: 0o600 });
+      await until(() => logs.some((l) => l.includes('not reloaded')));
+      expect(logs.at(-1)).toBe(
+        'config.json not reloaded, keeping current settings: wakes_per_hour 500 is above 60, the most a running router takes; restart to apply it.',
+      );
+      expect(router.usage('wren')!.wakes.limit).toBe(20);
+      next.agents!.wren.wakes_per_hour = 60;
+      writeFileSync(configPath(), text(next), { mode: 0o600 });
+      await until(() => router.usage('wren')!.wakes.limit === 60);
+    } finally {
+      ac.abort();
+    }
+  });
+
   test('liveSettings validates as the router does at start', () => {
     expect(liveSettings({})).toEqual({ wakesPerHour: 20, directWakesPerHour: 10, reminderEveryMs: undefined, stallMinutes: 10 });
     expect(() => liveSettings({ wakes_per_hour: 0 })).toThrow();

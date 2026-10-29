@@ -255,6 +255,33 @@ describe('router', () => {
     await done;
   });
 
+  test('turning the direct allowance off and on again keeps this hour\'s direct wakes', async () => {
+    let t = 1_000_000;
+    const { fake, router, ac, done } = setup({ wakesPerHour: 1, directWakesPerHour: 2, now: () => t });
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => fake.subs.length === 2);
+    // One general wake, then both direct ones.
+    for (let i = 1; i <= 3; i++) {
+      fake.push('inbox', [mention()]);
+      await until(() => inj.wakes.length === i);
+    }
+    expect(router.usage('wren')!.direct).toEqual({ used: 2, limit: 2 });
+    router.reload('wren', { wakesPerHour: 1, directWakesPerHour: 0, stallMinutes: 0 });
+    expect(router.usage('wren')!.direct).toBeNull();
+    router.reload('wren', { wakesPerHour: 1, directWakesPerHour: 3, stallMinutes: 0 });
+    // Back on with a higher cap: the two spent wakes still count, one is left.
+    expect(router.usage('wren')!.direct).toEqual({ used: 2, limit: 3 });
+    fake.push('inbox', [mention()]);
+    await until(() => inj.wakes.length === 4);
+    fake.push('inbox', [mention()]);
+    await until(() => router.stats('wren')!.delayed === 1);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(inj.wakes).toHaveLength(4);
+    ac.abort();
+    await done;
+  });
+
   test('a reload re-times a reminder but never adds one', async () => {
     const { router, ac, done } = setup({ reminder: { everyMs: 3600_000, prompt: 'Check in.', onlyWhenIdle: false } });
     const inj = new Recorder();

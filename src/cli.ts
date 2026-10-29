@@ -50,9 +50,10 @@ Usage:
       One line per agent with a key: "blocked on a prompt since HH:MM UTC" while
       its session waits on a permission or elicitation prompt, else "ok", or
       "ok (this client can't report prompts)" when its plugin sends no such
-      signal, or "ok (prompts not tracked: no router running)". Reads only two file times in the router's run directory. The
-      router also logs a blocked session once, after stall_minutes (default
-      10, 0 = off) with wakes arriving.
+      signal, or "ok (prompts not tracked: no router running)". Reads only
+      two file times in the router's run directory. The router also logs a
+      blocked session once, after stall_minutes (default 10, 0 = off) with
+      wakes arriving.
   tilori-agent ensure [--agent <handle>] [--prune [--yes]]
       Creates or renews the agent's subscriptions and prints them, plus any
       "unmanaged" ones config does not ask for (nothing polls those).

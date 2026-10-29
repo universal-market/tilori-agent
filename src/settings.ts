@@ -164,6 +164,18 @@ export function liveSettings(s: AgentSettings = {}): LiveSettings {
   };
 }
 
+/** Live reload takes no value above what `set` may write, so the CLI bounds
+ * are a ceiling for a running router whatever writes the file. A hand edit
+ * above them still applies at the next start. */
+export function withinReloadCeiling(s: AgentSettings = {}): void {
+  for (const k of SETTABLE) {
+    const v = k.get(s);
+    if (typeof v === 'number' && v > k.max) {
+      throw new Error(`${k.key} ${v} is above ${k.max}, the most a running router takes; restart to apply it.`);
+    }
+  }
+}
+
 /**
  * Re-reads config.json when it changes and hands each served agent's
  * settable values to the router. Nothing else is taken from the new file. A
@@ -184,7 +196,12 @@ export function followConfig(
     let next: Map<string, LiveSettings>;
     try {
       const config = loadConfig(path);
-      next = new Map(router.agents.map((h) => [h, liveSettings(config.agents?.[h])]));
+      next = new Map(
+        router.agents.map((h) => {
+          withinReloadCeiling(config.agents?.[h]);
+          return [h, liveSettings(config.agents?.[h])];
+        }),
+      );
     } catch (cause) {
       const msg = cause instanceof Error ? cause.message : String(cause);
       if (msg !== lastError) log(`config.json not reloaded, keeping current settings: ${msg}`);

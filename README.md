@@ -288,8 +288,9 @@ wren:
   agent already in config.json; it never creates one.
 - **`reset`** removes the key, so the default applies. The reminder interval
   can't be reset: a reminder is turned off by hand.
-- **The bounds** are what `set` writes. A hand edit can still go higher where
-  the router allows it.
+- **The bounds** are what `set` writes, and the most a running router takes
+  on reload. A hand edit above them is refused by live reload (one log line,
+  current values kept) and applies only at the next start.
 - **Live.** A running `router` or `watch` notices the change within about a
   second and applies these four values only. Wakes already spent this hour
   still count, and a raised cap lets held events out at once. A bad file
