@@ -15,6 +15,10 @@ const POSTS_LOW = 100;
 const POSTS_LEFT_MS = 60_000;
 /** Bound on that memory, so a firehose can't grow it without limit. */
 const MAX_RECENT = 5_000;
+/** After a wake carrying an edit from a broad subscription, that subscription
+ * is not polled for this long, so the rest of an edit burst queues on the
+ * server and arrives as one batch: at most two wakes per burst (UNI-478). */
+const EDIT_PAUSE_MS = 60_000;
 
 export interface RouterAgentConfig {
   handle: string;
@@ -41,6 +45,8 @@ export interface RouterOptions {
    * by overlapping subscriptions (all posts plus the inbox) makes one wake,
    * not one per subscription. Default 3 s, about one server recheck. */
   coalesceMs?: number;
+  /** How long a broad subscription rests after an edit wake (default 60 s). */
+  editPauseMs?: number;
   now?: () => number;
 }
 
@@ -117,6 +123,8 @@ interface AgentState {
   handedOff: Set<string>;
   /** When the oldest batch now held arrived (0 when none is held). */
   heldSince: number;
+  /** Broad subscriptions resting after an edit wake, until when (Date.now()). */
+  paused: Map<string, number>;
   heldNotice: string;
   /** When the next reminder is due (unused without a reminder). An event
    * wake pushes it back when the reminder is only for idle agents. */
@@ -165,6 +173,7 @@ export class Router {
   readonly #retryMs: number;
   readonly #renewEveryMs: number;
   readonly #coalesceMs: number;
+  readonly #editPauseMs: number;
   readonly #now: () => number;
 
   constructor(options: RouterOptions) {
@@ -173,6 +182,7 @@ export class Router {
     this.#retryMs = options.retryMs ?? 2_000;
     this.#renewEveryMs = options.renewEveryMs ?? 6 * 3600_000;
     this.#coalesceMs = options.coalesceMs ?? 3_000;
+    this.#editPauseMs = options.editPauseMs ?? EDIT_PAUSE_MS;
     this.#now = options.now ?? Date.now;
     for (const cfg of options.agents) {
       if (this.#agents.has(cfg.handle)) throw new Error(`Agent ${cfg.handle} listed twice.`);
@@ -196,6 +206,7 @@ export class Router {
         renewIds: new Set(),
         handedOff: new Set(),
         heldSince: 0,
+        paused: new Map(),
         heldNotice: '',
         reminderAt: cfg.reminder ? Date.now() + cfg.reminder.everyMs : 0,
         stats: { wakes: 0, events: 0, delayed: 0, reminders: 0 },
@@ -344,9 +355,10 @@ export class Router {
         await sleep(this.#renewEveryMs, signal);
         return;
       }
-      const idle = usable.filter((s) => !pending.has(s.id));
+      const idle = usable.filter((s) => !pending.has(s.id) && this.#restingMs(st, s.id) <= 0);
       if (!idle.length) {
-        await sleep(this.#retryMs, signal, st.polled.promise);
+        const resting = usable.map((s) => this.#restingMs(st, s.id)).filter((ms) => ms > 0);
+        await sleep(Math.min(this.#retryMs, ...resting), signal, st.polled.promise);
         continue;
       }
       // Two abandoned calls (a restart, then a generation that ended
@@ -368,6 +380,7 @@ export class Router {
       const startedAt = Date.now();
       let restarted = false;
       let restartTimer: ReturnType<typeof setTimeout> | undefined;
+      let pauseTimer: ReturnType<typeof setTimeout> | undefined;
       if (idle.length < usable.length) {
         const restart = () => {
           if (call.signal.aborted) return;
@@ -380,6 +393,9 @@ export class Router {
           if (wait <= 0) restart();
           else restartTimer = setTimeout(restart, wait);
         };
+        // A resting subscription rejoins the long poll when its pause ends.
+        const resting = usable.map((s) => this.#restingMs(st, s.id)).filter((ms) => ms > 0);
+        if (resting.length) pauseTimer = setTimeout(() => st.onPolled?.(), Math.min(...resting));
       }
       try {
         const res = await client.pollMany(
@@ -463,9 +479,19 @@ export class Router {
       } finally {
         st.onPolled = null;
         clearTimeout(restartTimer);
+        clearTimeout(pauseTimer);
         signal.removeEventListener('abort', stopCall);
       }
     }
+  }
+
+  /** How long a subscription still rests after an edit wake (0 when not). */
+  #restingMs(st: AgentState, id: string): number {
+    const until = st.paused.get(id);
+    if (until === undefined) return 0;
+    const ms = until - Date.now();
+    if (ms <= 0) st.paused.delete(id);
+    return Math.max(0, ms);
   }
 
   /** Deadlines of abandoned calls that may still hold a server waiter. */
@@ -491,6 +517,11 @@ export class Router {
     while (!signal.aborted) {
       if (pending.has(sub.id)) {
         await sleep(this.#retryMs, signal, st.polled.promise);
+        continue;
+      }
+      const resting = this.#restingMs(st, sub.id);
+      if (resting > 0) {
+        await sleep(resting, signal);
         continue;
       }
       try {
@@ -746,6 +777,15 @@ export class Router {
       for (const d of send) {
         st.handedOff.add(d.delivery_id);
         st.capHeld.delete(d.delivery_id);
+        // An edit from a broad subscription rests it, so later edits of the
+        // burst arrive together. Direct subscriptions never rest, and a
+        // running pause is not extended: at most one pause length at a time.
+        if (
+          !st.directSubs.has(d.subscription_id) &&
+          this.#restingMs(st, d.subscription_id) <= 0 &&
+          d.events.some((e) => e.kind === 'post.edited')
+        )
+          st.paused.set(d.subscription_id, Date.now() + this.#editPauseMs);
       }
       // Remembered only once accepted, so a busy or gone attempt never
       // hides a ref from the next wake.

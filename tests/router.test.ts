@@ -25,6 +25,7 @@ function setup(
     posts?: boolean;
     now?: () => number;
     coalesceMs?: number;
+    editPauseMs?: number;
     subscriptions?: SubscriptionSpec[];
     reminder?: { everyMs: number; prompt: string; onlyWhenIdle: boolean };
   } = {},
@@ -48,6 +49,7 @@ function setup(
     waitMs: 10,
     retryMs: 10,
     coalesceMs: opts.coalesceMs ?? 0,
+    editPauseMs: opts.editPauseMs ?? 0,
     now: opts.now,
   });
   const ac = new AbortController();
@@ -331,6 +333,59 @@ describe('router', () => {
     fake.push('posts', [post(p)]);
     await until(() => fake.acks.length === 2);
     expect(inj.wakes).toHaveLength(1);
+    ac.abort();
+    await done;
+  });
+
+  test('a burst of edits gives at most two wakes: the first now, the rest together', async () => {
+    const { fake, router, ac, done } = setup({ posts: true, editPauseMs: 400 });
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => fake.subs.length === 3);
+    const p = randomUUID();
+    fake.push('posts', [edited(p)]);
+    await until(() => inj.wakes.length === 1);
+    const polls = fake.polls.length;
+    // Two more edits while the posts subscription rests: they queue.
+    fake.push('posts', [edited(p)]);
+    await Bun.sleep(100);
+    fake.push('posts', [edited(p)]);
+    await Bun.sleep(150);
+    expect(inj.wakes).toHaveLength(1);
+    await until(() => inj.wakes.length === 2);
+    expect(inj.wakes[1].events.map((e) => [e.kind, e.entity_id])).toEqual([['post.edited', p]]);
+    await Bun.sleep(150);
+    expect(inj.wakes).toHaveLength(2);
+    expect(fake.polls.length).toBeGreaterThan(polls); // the inbox kept polling
+    ac.abort();
+    await done;
+  });
+
+  test('a mention during an edit pause wakes at once; the pause is not extended', async () => {
+    const { fake, router, ac, done } = setup({ posts: true, editPauseMs: 600 });
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => fake.subs.length === 3);
+    fake.push('posts', [edited()]);
+    await until(() => inj.wakes.length === 1);
+    const paused = Date.now();
+    const q = randomUUID();
+    fake.push('inbox', [mention(q)]);
+    await until(() => inj.wakes.length === 2, 400);
+    expect(inj.wakes[1].events.map((e) => [e.kind, e.entity_id])).toEqual([['mention', q]]);
+    // An edit on the inbox (a direct subscription) doesn't rest anything,
+    // and wakes at once too.
+    fake.push('inbox', [edited(q)]);
+    await until(() => inj.wakes.length === 3, 400);
+    const r = randomUUID();
+    fake.push('inbox', [mention(r)]);
+    await until(() => inj.wakes.length === 4, 300);
+    expect(inj.wakes[3].events.map((e) => e.entity_id)).toEqual([r]);
+    // The posts pause still ends on time: an edit queued there wakes about
+    // 600 ms after the first wake, not later.
+    fake.push('posts', [edited()]);
+    await until(() => inj.wakes.length === 5, 2000);
+    expect(Date.now() - paused).toBeLessThan(1500);
     ac.abort();
     await done;
   });
