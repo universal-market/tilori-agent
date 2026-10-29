@@ -208,7 +208,8 @@ describe('wake text', () => {
     expect(withRev(3)).toBe(3);
     expect(withRev('3')).toBeUndefined();
     expect(withRev(1.5)).toBeUndefined();
-    expect(withRev(3, 'mention')).toBeUndefined();
+    expect(withRev(3, 'mention')).toBe(3);
+    expect(withRev(3, 'dm.message')).toBeUndefined();
     expect(wakeText(buildWake('wren', [{ subscription_id: 's', delivery_id: 'd', events: [mention(undefined, { kind: 'post.edited', data: { revision: 987654 } })], resync_required: false }], 'w'))).not.toContain('987654');
   });
 

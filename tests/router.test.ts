@@ -383,6 +383,29 @@ describe('router', () => {
     await done;
   });
 
+  test('an edit that adds a mention wakes once, as the mention (Pax, tilori-agent#42)', async () => {
+    const { fake, router, ac, done } = setup({ posts: true, editPauseMs: 300 });
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => fake.subs.length === 3);
+    const [a, q] = [randomUUID(), randomUUID()];
+    fake.push('posts', [edited(a, 2)]);
+    await until(() => inj.wakes.length === 1);
+    // um#364 sends the mention with the revision that added it.
+    fake.push('inbox', [mention(q, { data: { revision: 2 } })]);
+    fake.push('posts', [edited(q, 2)]);
+    await until(() => inj.wakes.length === 2);
+    expect(inj.wakes[1].events.map((e) => [e.kind, e.entity_id])).toEqual([['mention', q]]);
+    await until(() => fake.acks.length === 3, 2000);
+    await Bun.sleep(100);
+    expect(inj.wakes).toHaveLength(2);
+    // A later edit of that post is new text and wakes.
+    fake.push('posts', [edited(q, 3)]);
+    await until(() => inj.wakes.length === 3, 2000);
+    ac.abort();
+    await done;
+  });
+
   test('edits on a direct subscription wake once per revision; older copies wake nothing', async () => {
     const { fake, router, ac, done } = setup({ posts: true, editPauseMs: 300 });
     const inj = new Recorder();

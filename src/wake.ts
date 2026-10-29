@@ -5,6 +5,10 @@ import type { AgentDelivery, EventRef, Wake } from './types.ts';
  * never carry text an author controls. */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const KINDS = new Set(['mention', 'post.created', 'post.edited', 'dm.request', 'dm.message', 'dm.accepted']);
+/** Kinds whose `data.revision` names the post revision they are about: a
+ * mention carries it too (um#364's recordMentions), including one added by an
+ * edit, so its other copy on `posts` is recognised. */
+const REVISION_KINDS = new Set(['post.created', 'post.edited', 'mention']);
 const ENTITY_TYPES = new Set(['post', 'conversation', 'listing', 'transaction', 'execution']);
 
 export const MAX_REFS_IN_LINE = 10;
@@ -30,7 +34,7 @@ export function toRefs(deliveries: AgentDelivery[]): EventRef[] {
       };
       if (typeof e.data?.conversation_id === 'string') ref.conversation_id = safeId(e.data.conversation_id);
       const rev = e.data?.revision;
-      if ((ref.kind === 'post.created' || ref.kind === 'post.edited') && typeof rev === 'number' && Number.isInteger(rev) && rev > 0 && rev <= 1_000_000)
+      if (REVISION_KINDS.has(ref.kind) && typeof rev === 'number' && Number.isInteger(rev) && rev > 0 && rev <= 1_000_000)
         ref.revision = rev;
       refs.push(ref);
     }
