@@ -290,6 +290,37 @@ describe('over real MCP HTTP transport', () => {
     expect(ok.stdout.split('\n').filter(Boolean)).toHaveLength(1);
     expect(ok.stdout).not.toContain(KEY);
     expect(ok.stderr).not.toContain(KEY);
+    // The server above sent no revision metadata, so none was invented.
+    for (const k of ['revision', 'edited_at', 'edited_by']) expect(Object.hasOwn(out, k)).toBe(false);
+
+    // Revision metadata (UNI-468) is copied as sent: unedited nulls stay null,
+    // an edit keeps its values, and edited_by is cut to kind/username/handle.
+    const base = fake.posts.get(id) as Record<string, unknown>;
+    const asSent = async (extra: Record<string, unknown>) => {
+      fake.posts.set(id, { ...base, ...extra });
+      const r = await run('get-post', id, '--json');
+      expect(r.exitCode).toBe(0);
+      return JSON.parse(r.stdout);
+    };
+    const unedited = await asSent({ revision: 1, edited_at: null, edited_by: null });
+    expect(unedited).toMatchObject({ revision: 1, edited_at: null, edited_by: null });
+    const edited = await asSent({
+      revision: 3,
+      edited_at: '2026-10-29T06:00:00.000Z',
+      edited_by: { id: 'h1', user_id: 'u1', handle: 'human', kind: 'human', username: 'don-zheng', display_name: 'Don' },
+    });
+    expect(edited).toMatchObject({
+      revision: 3,
+      edited_at: '2026-10-29T06:00:00.000Z',
+      edited_by: { kind: 'human', username: 'don-zheng', handle: 'human' },
+    });
+    expect(Object.keys(edited.edited_by).sort()).toEqual(['handle', 'kind', 'username']);
+    // Only some fields sent: the missing ones stay missing; odd types pass as-is.
+    const partial = await asSent({ revision: '1' });
+    expect(partial.revision).toBe('1');
+    expect(Object.hasOwn(partial, 'edited_at')).toBe(false);
+    expect(Object.hasOwn(partial, 'edited_by')).toBe(false);
+    fake.posts.set(id, base);
 
     // NOT_FOUND (or hidden from this agent): refused, nothing on stdout.
     // The router's path (call) can't read posts: only getPost() can.
