@@ -3,7 +3,7 @@ import { createConnection, createServer, type Server, type Socket } from 'node:n
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { assertPrivate, ensurePrivateDir, tiloriHome, validateHandle } from './keys.ts';
-import type { Router } from './router.ts';
+import type { AgentUsage, Router } from './router.ts';
 import type { DeliverResult, Injector, Wake } from './types.ts';
 import { sanitizeWake } from './wake.ts';
 
@@ -16,6 +16,13 @@ import { sanitizeWake } from './wake.ts';
  *   router → injector  {"op":"wake","wake_id":"…","agent":"wren","events":[{id,kind,entity_type,entity_id}],"resync_required":false}
  *   router → injector  {"op":"wake","wake_id":"…","agent":"wren","events":[],"resync_required":false,"reminder":"…"}
  *   injector → router  {"op":"accepted"|"busy","wake_id":"…"}
+ *
+ * Or, as the first and only message, a usage query for `config show`:
+ *
+ *   client → router    {"op":"usage","v":1,"agent":"wren"}
+ *   router → client    {"op":"usage","agent":"wren","wakes":{used,limit},"direct":{used,limit}|null,"held":0}
+ *
+ * The answer is counts only, and the router closes the connection after it.
  *
  * No key or event content ever crosses the socket: wakes carry ids only. A
  * reminder wake carries the router's own configured text instead, which the
@@ -129,6 +136,19 @@ export async function serveRouter(router: Router, path = socketPath(), log: (m: 
     sock.on('close', () => unregister?.());
     sock.on('error', () => {});
     lines(sock, (msg) => {
+      if (!injector && msg?.op === 'usage') {
+        try {
+          if (msg.v !== IPC_VERSION) throw new Error('Expected a v1 usage message.');
+          const agent = validateHandle(String(msg.agent ?? ''));
+          const usage = router.usage(agent);
+          if (!usage) throw new Error(`This router does not serve agent ${agent}.`);
+          send(sock, { op: 'usage', agent, ...usage });
+        } catch (cause) {
+          send(sock, { op: 'error', message: cause instanceof Error ? cause.message : 'usage failed' });
+        }
+        sock.end();
+        return;
+      }
       if (!injector) {
         try {
           if (msg?.op !== 'register' || msg.v !== IPC_VERSION) throw new Error('Expected a v1 register message.');
@@ -240,6 +260,41 @@ export function attachToRouter(
         send(sock, { op: result === 'accepted' ? 'accepted' : 'busy', wake_id: wake.wake_id });
         if (result === 'gone') sock.end();
       }
+    });
+  });
+}
+
+const count = (v: unknown) => (Number.isInteger(v) && (v as number) >= 0 ? (v as number) : null);
+
+/** Asks the running router for one agent's usage this hour. Null when no
+ * router of this user is listening, it doesn't serve the agent, or it doesn't
+ * answer within 2 s (an older router ignores the query). */
+export function routerUsage(agent: string, path = socketPath()): Promise<AgentUsage | null> {
+  if (!routerAvailable(path)) return Promise.resolve(null);
+  const handle = validateHandle(agent);
+  return new Promise((resolve) => {
+    const sock = createConnection(path);
+    const done = (u: AgentUsage | null) => {
+      clearTimeout(timer);
+      sock.destroy();
+      resolve(u);
+    };
+    const timer = setTimeout(() => done(null), 2_000);
+    sock.on('error', () => done(null));
+    sock.on('close', () => done(null));
+    sock.on('connect', () => send(sock, { op: 'usage', v: IPC_VERSION, agent: handle }));
+    lines(sock, (msg) => {
+      if (msg?.op !== 'usage' || msg.agent !== handle) return done(null);
+      const pair = (p: any) => {
+        const used = count(p?.used);
+        const limit = count(p?.limit);
+        return used === null || limit === null ? null : { used, limit };
+      };
+      const wakes = pair(msg.wakes);
+      const direct = msg.direct === null ? null : pair(msg.direct);
+      const held = count(msg.held);
+      if (!wakes || held === null || (msg.direct !== null && !direct)) return done(null);
+      done({ wakes, direct, held });
     });
   });
 }

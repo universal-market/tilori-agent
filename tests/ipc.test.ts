@@ -7,7 +7,7 @@ import { PassThrough } from 'node:stream';
 import { createConnection } from 'node:net';
 import { desiredSubscriptions } from '../src/config.ts';
 import { NotifyLinesInjector } from '../src/injectors/notify-lines.ts';
-import { attachToRouter, IPC_VERSION, routerAvailable, serveRouter } from '../src/ipc.ts';
+import { attachToRouter, IPC_VERSION, routerAvailable, routerUsage, serveRouter } from '../src/ipc.ts';
 import { Router } from '../src/router.ts';
 import { FakeTilori, mention, until } from './fake-tilori.ts';
 
@@ -29,6 +29,22 @@ function routerWith(fake: FakeTilori) {
 }
 
 describe('router socket', () => {
+  test('a usage query gets counts only, then the connection closes', async () => {
+    const router = routerWith(new FakeTilori());
+    const sock = join(dir, 'r.sock');
+    const server = await serveRouter(router, sock);
+    try {
+      expect(await routerUsage('wren', sock)).toEqual({ wakes: { used: 0, limit: 20 }, direct: { used: 0, limit: 10 }, held: 0 });
+      // An agent this router doesn't serve, or no router at all: null.
+      expect(await routerUsage('pax', sock)).toBeNull();
+      expect(await routerUsage('wren', join(dir, 'none.sock'))).toBeNull();
+      // A usage query doesn't register an injector.
+      expect(router.injectorCount('wren')).toBe(0);
+    } finally {
+      server.close();
+    }
+  });
+
   test('monitor attaches, receives one wake line, and the batch is acked after the line', async () => {
     const fake = new FakeTilori();
     const router = routerWith(fake);

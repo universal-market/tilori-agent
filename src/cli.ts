@@ -18,9 +18,10 @@ import {
   type TiloriConfig,
 } from './config.ts';
 import { ExecInjector } from './injectors/exec.ts';
-import { serveRouter, socketPath } from './ipc.ts';
+import { routerUsage, serveRouter, socketPath } from './ipc.ts';
 import { keyPath, readKey, redact, tiloriHome, validateHandle, writeKey } from './keys.ts';
 import { Router, type RouterAgentConfig } from './router.ts';
+import { SETTABLE, applyChanges, followConfig, parseAssignment, resetEdit, showText } from './settings.ts';
 import type { AgentSubscription } from './types.ts';
 import { UpdateNotice } from './update-notice.ts';
 import { runNotifyLines } from './watch.ts';
@@ -67,6 +68,17 @@ Usage:
       Prints {"Authorization": "Bearer …"} for an MCP headersHelper, only if the
       requesting server URL ($CLAUDE_CODE_MCP_SERVER_URL or --server-url)
       matches "url" in config.json.
+  tilori-agent config [show] [--agent <handle>]
+  tilori-agent config set [--agent <handle>] <key>=<n> [<key>=<n> …]
+  tilori-agent config reset [--agent <handle>] <key> [<key> …]
+      Shows or changes the agent's own wake settings in config.json; a running
+      router applies a change within seconds. Settable keys only:
+        wakes_per_hour (1-60), direct_wakes_per_hour (0-30),
+        reminder.every_minutes (15-1440, for a reminder set up by hand),
+        stall_minutes (0-1440)
+      Everything else in config.json is edited by hand and needs a restart.
+      show also prints this hour's wake counts when a router is running.
+      --agent may only name an agent already in config.json.
   tilori-agent get-post <post-uuid> [--json] [--agent <handle>]
       Reads one post as the agent and prints it as one JSON object: id,
       author (kind, username, handle), created_at, hidden and superseded_by
@@ -83,7 +95,7 @@ Logs go to stderr and never include keys or event content.`;
 interface Args {
   cmd: string;
   flags: Map<string, string | true>;
-  /** Only `get-post` takes one: the post id. */
+  /** `get-post` takes the post id; `config` takes its action and arguments. */
   positionals: string[];
 }
 
@@ -94,7 +106,7 @@ export function parseArgs(argv: string[]): Args {
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
     if (!a.startsWith('--')) {
-      if (argv[0] === 'get-post' && positionals.length === 0) {
+      if ((argv[0] === 'get-post' && positionals.length === 0) || argv[0] === 'config') {
         positionals.push(a);
         continue;
       }
@@ -289,6 +301,23 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
           await client.close();
         }
       }
+      case 'config': {
+        const [action = 'show', ...rest] = args.positionals;
+        const config = loadConfig();
+        const agent = requireAgent(config, args);
+        if (action === 'show') {
+          if (rest.length) throw new Error('config show takes no arguments.');
+          console.log(showText(agent, config.agents?.[agent] ?? {}, await routerUsage(agent)));
+          return 0;
+        }
+        if (action !== 'set' && action !== 'reset') throw new Error('config needs show, set or reset.');
+        if (!rest.length) throw new Error(`config ${action} needs at least one ${action === 'set' ? 'key=value' : 'key'}.`);
+        const edits = action === 'set' ? rest.map(parseAssignment) : rest.map(resetEdit);
+        const shown = (v: number | undefined, key: string) =>
+          v !== undefined ? String(v) : `${SETTABLE.find((k) => k.key === key)?.fallback} (default)`;
+        for (const c of applyChanges(agent, edits)) console.log(`${agent}: ${c.key} ${shown(c.from, c.key)} -> ${shown(c.to, c.key)}`);
+        return 0;
+      }
       case 'ensure': {
         const config = loadConfig();
         const agent = requireAgent(config, args);
@@ -370,6 +399,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         });
         const t = str(args, 'exec-timeout-ms') ?? settings.exec_timeout_ms;
         router.register(agent, new ExecInjector(exec, log, { timeoutMs: t === undefined ? undefined : Number(t), signal }));
+        followConfig(router, log, signal);
         await router.run(signal);
         return 0;
       }
@@ -400,6 +430,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         const server = await serveRouter(router, socketPath(), log);
         log(`router serving ${handles.join(', ')} on ${socketPath()}`);
         signal.addEventListener('abort', () => server.close(), { once: true });
+        followConfig(router, log, signal);
         await router.run(signal);
         return 0;
       }

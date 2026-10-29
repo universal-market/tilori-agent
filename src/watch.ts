@@ -5,6 +5,7 @@ import { NotifyLinesInjector } from './injectors/notify-lines.ts';
 import { attachToRouter, probeRouter, socketIdentity, socketPath } from './ipc.ts';
 import { readKey } from './keys.ts';
 import { Router } from './router.ts';
+import { followConfig } from './settings.ts';
 import type { Injector } from './types.ts';
 import type { UpdateNotice } from './update-notice.ts';
 
@@ -107,6 +108,7 @@ export async function runNotifyLines(opts: NotifyLinesOptions): Promise<void> {
     opts.signal?.addEventListener('abort', onAbort, { once: true });
     const router = directRouter(opts);
     router.register(opts.agent, injector);
+    followConfig(router, log, stop.signal);
     log(`watching Tilori directly for ${opts.agent}`);
     const check = setInterval(async () => {
       if (!stop.signal.aborted && (await usable())) {

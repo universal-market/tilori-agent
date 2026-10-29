@@ -3,6 +3,7 @@ import { clock, promptSignal } from './activity.ts';
 import { MAX_POLL_SUBSCRIPTIONS, MultiPollUnsupported, type ProfileNotes, type TiloriAgentClient } from './client.ts';
 import { DEFAULT_DIRECT_WAKES_PER_HOUR, DEFAULT_WAKES_PER_HOUR, type Reminder } from './config.ts';
 import { WakeLimiter } from './ratelimit.ts';
+import type { LiveSettings } from './settings.ts';
 import type { AgentDelivery, AgentSubscription, DeliverResult, EventRef, Injector, SubscriptionSpec, Wake } from './types.ts';
 import { KIND_RANK, buildWake, refKey, toRefs } from './wake.ts';
 
@@ -33,6 +34,15 @@ export interface RouterAgentConfig {
   /** Log once when the session has been blocked on a prompt this long with
    * wakes arriving (validated by stallMinutes; 0 or unset: off). */
   stallMinutes?: number;
+}
+
+/** This hour's wake counts for `tilori-agent config show`: counts only. */
+export interface AgentUsage {
+  wakes: { used: number; limit: number };
+  /** Null when the direct allowance is off. */
+  direct: { used: number; limit: number } | null;
+  /** Events the wake cap is holding right now. */
+  held: number;
 }
 
 export interface RouterOptions {
@@ -253,6 +263,55 @@ export class Router {
       st.retryAt = 0;
       this.#wake(st);
     }
+  }
+
+  /** This hour's usage for one agent, or null if this router doesn't serve it. */
+  usage(handle: string): AgentUsage | null {
+    const st = this.#agents.get(handle);
+    if (!st) return null;
+    const d = st.directLimiter;
+    return {
+      wakes: { used: st.limiter.used, limit: st.limiter.perHour },
+      direct: d ? { used: d.used, limit: d.perHour } : null,
+      held: st.capHeld.size ? st.stats.delayed : 0,
+    };
+  }
+
+  /** Applies reloaded settings (live reload, UNI-480): the caps, the reminder
+   * interval and stall_minutes only. Wakes already spent this hour still
+   * count. A reminder is never added or removed here, only re-timed; a
+   * shorter interval brings the next one forward. Returns what changed, as
+   * "key old -> new", for the log. */
+  reload(handle: string, live: LiveSettings): string[] {
+    const st = this.#agents.get(handle);
+    if (!st) return [];
+    const changed: string[] = [];
+    const note = (key: string, from: number, to: number) => {
+      if (from !== to) changed.push(`${key} ${from} -> ${to}`);
+    };
+    note('wakes_per_hour', st.limiter.perHour, live.wakesPerHour);
+    st.limiter.resize(live.wakesPerHour);
+    note('direct_wakes_per_hour', st.directLimiter?.perHour ?? 0, live.directWakesPerHour);
+    if (live.directWakesPerHour === 0) st.directLimiter = null;
+    else if (st.directLimiter) st.directLimiter.resize(live.directWakesPerHour);
+    else st.directLimiter = new WakeLimiter(live.directWakesPerHour, this.#now);
+    note('stall_minutes', st.cfg.stallMinutes ?? 0, live.stallMinutes);
+    let reminder = st.cfg.reminder;
+    if (reminder && live.reminderEveryMs !== undefined && live.reminderEveryMs !== reminder.everyMs) {
+      note('reminder.every_minutes', reminder.everyMs / 60_000, live.reminderEveryMs / 60_000);
+      reminder = { ...reminder, everyMs: live.reminderEveryMs };
+      st.reminderAt = Math.min(st.reminderAt, Date.now() + live.reminderEveryMs);
+    }
+    st.cfg = {
+      ...st.cfg,
+      wakesPerHour: live.wakesPerHour,
+      directWakesPerHour: live.directWakesPerHour,
+      stallMinutes: live.stallMinutes,
+      reminder,
+    };
+    // A raised cap may let a held batch out now.
+    if (changed.length) this.#wake(st);
+    return changed;
   }
 
   /** Number of live injectors for an agent (for tests and status). */
