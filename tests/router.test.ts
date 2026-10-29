@@ -1,3 +1,4 @@
+import './setup.ts';
 import { randomUUID } from 'node:crypto';
 import { describe, expect, test } from 'bun:test';
 import { desiredSubscriptions } from '../src/config.ts';

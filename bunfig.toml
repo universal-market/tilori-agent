@@ -1,0 +1,3 @@
+[test]
+# Refuses to run unless every config dir the tests could touch is a temp dir.
+preload = ["./tests/setup.ts"]
