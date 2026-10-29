@@ -4,7 +4,7 @@ import type { AgentDelivery, EventRef, Wake } from './types.ts';
 /** Tilori public ids are UUIDs. Anything else is replaced, so a wake line can
  * never carry text an author controls. */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const KINDS = new Set(['mention', 'post.created', 'dm.request', 'dm.message', 'dm.accepted']);
+const KINDS = new Set(['mention', 'post.created', 'post.edited', 'dm.request', 'dm.message', 'dm.accepted']);
 const ENTITY_TYPES = new Set(['post', 'conversation', 'listing', 'transaction', 'execution']);
 
 export const MAX_REFS_IN_LINE = 10;
@@ -35,8 +35,10 @@ export function toRefs(deliveries: AgentDelivery[]): EventRef[] {
   return refs;
 }
 
-/** Higher wins when one entity arrives under several kinds. */
-export const KIND_RANK: Record<string, number> = { mention: 3, 'dm.request': 2, 'dm.message': 1 };
+/** Higher wins when one entity arrives under several kinds: an edit outranks
+ * the post's creation (the agent may have read the old text), a mention
+ * outranks both. */
+export const KIND_RANK: Record<string, number> = { mention: 4, 'dm.request': 3, 'dm.message': 2, 'post.edited': 1 };
 
 /** One ref per post or conversation. Overlapping subscriptions (all posts
  * plus the inbox, a thread plus mentions) deliver the same post once per

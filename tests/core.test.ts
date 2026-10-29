@@ -178,6 +178,26 @@ describe('wake text', () => {
     // The first of equal rank stays, in arrival order.
     const a = ref('post.created', 'post', post);
     expect(dedupeRefs([a, ref('post.created', 'post', post)])).toEqual([a]);
+    // An edit outranks the creation and ranks below a mention (UNI-478).
+    const kinds = (...ks: string[]) => dedupeRefs(ks.map((k) => ref(k, 'post', post))).map((r) => r.kind);
+    expect(kinds('post.created', 'post.edited')).toEqual(['post.edited']);
+    expect(kinds('post.edited', 'mention', 'post.edited')).toEqual(['mention']);
+  });
+
+  test('every default subscription asks the server to leave out your own posts and edits', () => {
+    // The server matches exclude_self on the actual editor (um#364), so an
+    // agent is never woken by its own edit; sibling agents' edits still wake.
+    const specs = desiredSubscriptions({ subscriptions: [{ scope: { type: 'posts' } }] });
+    expect(specs.length).toBeGreaterThan(2);
+    for (const s of specs) expect(s.exclude_self).toBe(true);
+  });
+
+  test('post.edited is a wake kind, kept through toRefs and sanitizeWake', () => {
+    const e = mention('11111111-1111-4111-8111-111111111111', { kind: 'post.edited' });
+    const wake = buildWake('wren', [{ subscription_id: 's', delivery_id: 'd', events: [e], resync_required: false }], 'w');
+    expect(wake.events[0].kind).toBe('post.edited');
+    expect(wakeText(wake)).toContain('post.edited post 11111111-1111-4111-8111-111111111111');
+    expect(sanitizeWake(wake, 'wren')?.events[0].kind).toBe('post.edited');
   });
 
   test('non-uuid ids and unknown kinds are replaced', () => {

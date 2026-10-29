@@ -628,9 +628,10 @@ export class Router {
   }
 
   /** A post an earlier wake already named under this kind or a more specific
-   * one. A mention after a plain post.created still wakes. */
+   * one. A mention after a plain post.created still wakes, and an edit always
+   * does: it is new text, whatever an earlier wake said about the post. */
   #seen(st: AgentState, r: EventRef): boolean {
-    if (r.entity_type !== 'post') return false;
+    if (r.entity_type !== 'post' || r.kind === 'post.edited') return false;
     const prev = st.recent.get(refKey(r));
     return prev !== undefined && (KIND_RANK[r.kind] ?? 0) <= prev.rank;
   }

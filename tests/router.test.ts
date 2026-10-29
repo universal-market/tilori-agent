@@ -5,7 +5,7 @@ import { desiredSubscriptions } from '../src/config.ts';
 import { ExecInjector } from '../src/injectors/exec.ts';
 import { Router } from '../src/router.ts';
 import type { DeliverResult, Injector, SubscriptionSpec, Wake } from '../src/types.ts';
-import { FakeTilori, dm, mention, post, until } from './fake-tilori.ts';
+import { FakeTilori, dm, edited, mention, post, until } from './fake-tilori.ts';
 
 class Recorder implements Injector {
   readonly kind = 'test';
@@ -278,6 +278,79 @@ describe('router', () => {
     fake.push('posts', [post(p)]);
     await until(() => fake.acks.length === 3);
     expect(inj.wakes).toHaveLength(2);
+    ac.abort();
+    await done;
+  });
+
+  test('an edit of a post an earlier wake named wakes again, as post.edited (UNI-478)', async () => {
+    const { fake, router, ac, done } = setup({ posts: true });
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => fake.subs.length === 3);
+    const p = randomUUID();
+    fake.push('posts', [post(p)]);
+    await until(() => inj.wakes.length === 1);
+    fake.push('posts', [edited(p)]);
+    await until(() => inj.wakes.length === 2);
+    expect(inj.wakes[1].events.map((e) => [e.kind, e.entity_id])).toEqual([['post.edited', p]]);
+    expect(inj.wakes[1].already_delivered).toBeUndefined();
+    // Every later edit is new text too: never dropped as already delivered.
+    fake.push('posts', [edited(p)]);
+    await until(() => inj.wakes.length === 3);
+    expect(inj.wakes[2].events.map((e) => e.kind)).toEqual(['post.edited']);
+    ac.abort();
+    await done;
+  });
+
+  test('edits in one batch name the post once; a mention of it wins', async () => {
+    const { fake, router, ac, done } = setup({ posts: true });
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => fake.subs.length === 3);
+    const [p, q] = [randomUUID(), randomUUID()];
+    fake.push('posts', [post(p), edited(p), edited(p)]);
+    await until(() => inj.wakes.length === 1);
+    expect(inj.wakes[0].events.map((e) => [e.kind, e.entity_id])).toEqual([['post.edited', p]]);
+    // An edit that adds a mention arrives as a mention too (the server's
+    // recordMentions); the wake names it once, as the mention.
+    fake.push('posts', [edited(q), mention(q)]);
+    await until(() => inj.wakes.length === 2);
+    expect(inj.wakes[1].events.map((e) => [e.kind, e.entity_id])).toEqual([['mention', q]]);
+    ac.abort();
+    await done;
+  });
+
+  test('after an edit wake, a late copy of the post\'s creation wakes nothing', async () => {
+    const { fake, router, ac, done } = setup({ posts: true });
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => fake.subs.length === 3);
+    const p = randomUUID();
+    fake.push('inbox', [edited(p)]);
+    await until(() => inj.wakes.length === 1);
+    fake.push('posts', [post(p)]);
+    await until(() => fake.acks.length === 2);
+    expect(inj.wakes).toHaveLength(1);
+    ac.abort();
+    await done;
+  });
+
+  test('edit wakes count against wakes_per_hour', async () => {
+    let now = 1_000_000;
+    const { fake, router, ac, done, logs } = setup({ posts: true, wakesPerHour: 1, now: () => now });
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => fake.subs.length === 3);
+    fake.push('posts', [edited()]);
+    await until(() => inj.wakes.length === 1);
+    fake.push('posts', [edited()]);
+    await until(() => logs.some((l) => l.includes('wake cap reached')));
+    expect(inj.wakes).toHaveLength(1);
+    now += 3600_001;
+    router.register('wren', inj); // kicks the sleeping loop
+    await until(() => inj.wakes.length === 2);
+    expect(inj.wakes[1].events.map((e) => e.kind)).toEqual(['post.edited']);
+    expect(inj.wakes[1].held_back).toBe(1);
     ac.abort();
     await done;
   });

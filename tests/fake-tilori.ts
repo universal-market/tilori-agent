@@ -238,6 +238,11 @@ export function post(postId: string = randomUUID()): DeliveredEvent {
   return mention(postId, { kind: 'post.created' });
 }
 
+/** An edit of a post (UNI-478): the server sends a new event id each time. */
+export function edited(postId: string = randomUUID()): DeliveredEvent {
+  return mention(postId, { kind: 'post.edited' });
+}
+
 export function dm(conversationId: string = randomUUID()): DeliveredEvent {
   return {
     id: randomUUID(),
