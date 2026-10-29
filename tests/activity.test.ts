@@ -34,8 +34,15 @@ describe('prompt signal', () => {
 
   test('no files: never flagged, and status says the client can\'t report prompts', () => {
     const s = promptSignal('wren');
-    expect(s).toEqual({ blockedSince: null, reports: false });
+    expect(s).toEqual({ blockedSince: null, reports: false, tracked: true });
     expect(statusLine('wren', s)).toBe("wren: ok (this client can't report prompts)");
+  });
+
+  test('no run dir (no router): status says prompts are not tracked', () => {
+    process.env.TILORI_SOCKET = join(dir, 'missing', 'router.sock');
+    const s = promptSignal('wren');
+    expect(s).toEqual({ blockedSince: null, reports: false, tracked: false });
+    expect(statusLine('wren', s)).toBe('wren: ok (prompts not tracked: no router running)');
   });
 
   test('activity only: ok', () => {
@@ -50,7 +57,7 @@ describe('prompt signal', () => {
     expect(promptSignal('wren').blockedSince).toBe(t);
     expect(statusLine('wren', promptSignal('wren'))).toBe('wren: blocked on a prompt since 02:05 UTC');
     touch('activity-wren', t + 1000);
-    expect(promptSignal('wren')).toEqual({ blockedSince: null, reports: true });
+    expect(promptSignal('wren')).toEqual({ blockedSince: null, reports: true, tracked: true });
   });
 
   test('a denied prompt fires no tool call, so it stays blocked until the next one', () => {
@@ -65,7 +72,7 @@ describe('prompt signal', () => {
     const target = join(dir, 'elsewhere');
     writeFileSync(target, '');
     symlinkSync(target, join(dir, 'blocked-wren'));
-    expect(promptSignal('wren')).toEqual({ blockedSince: null, reports: false });
+    expect(promptSignal('wren')).toEqual({ blockedSince: null, reports: false, tracked: true });
     touch('blocked-..', Date.now());
     expect(promptSignal('..').blockedSince).toBeNull();
     expect(promptSignal('../wren').blockedSince).toBeNull();

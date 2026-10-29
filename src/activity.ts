@@ -39,20 +39,31 @@ function mtime(path: string): number | null {
   }
 }
 
+function isDir(path: string): boolean {
+  try {
+    return lstatSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 export interface PromptSignal {
   /** Since when the agent has been blocked on a prompt, or null. */
   blockedSince: number | null;
   /** Whether this client reports prompts at all (either file exists). */
   reports: boolean;
+  /** Whether the run directory exists (only a router creates it). */
+  tracked: boolean;
 }
 
 export function promptSignal(handle: string, dir = activityDir()): PromptSignal {
-  if (!HANDLE_RE.test(handle)) return { blockedSince: null, reports: false };
+  const tracked = isDir(dir);
+  if (!HANDLE_RE.test(handle)) return { blockedSince: null, reports: false, tracked };
   const blocked = mtime(join(dir, `blocked-${handle}`));
   const activity = mtime(join(dir, `activity-${handle}`));
   const reports = blocked !== null || activity !== null;
-  if (blocked === null || (activity !== null && activity >= blocked)) return { blockedSince: null, reports };
-  return { blockedSince: blocked, reports };
+  if (blocked === null || (activity !== null && activity >= blocked)) return { blockedSince: null, reports, tracked };
+  return { blockedSince: blocked, reports, tracked };
 }
 
 /** "02:05 UTC" */
@@ -61,7 +72,11 @@ export const clock = (ms: number) => `${new Date(ms).toISOString().slice(11, 16)
 /** One `status` line for an agent. */
 export function statusLine(handle: string, signal: PromptSignal): string {
   if (signal.blockedSince !== null) return `${handle}: blocked on a prompt since ${clock(signal.blockedSince)}`;
-  return signal.reports ? `${handle}: ok` : `${handle}: ok (this client can't report prompts)`;
+  if (signal.reports) return `${handle}: ok`;
+  // Without a router (watch mode polling directly) nothing creates the run
+  // directory, so the hooks can't report anything: say so, not "the client".
+  if (!signal.tracked) return `${handle}: ok (prompts not tracked: no router running)`;
+  return `${handle}: ok (this client can't report prompts)`;
 }
 
 /** Validates `stall_minutes` (default 10; 0 turns the stall line off; at
