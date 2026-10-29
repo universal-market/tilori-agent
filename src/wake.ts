@@ -4,7 +4,11 @@ import type { AgentDelivery, EventRef, Wake } from './types.ts';
 /** Tilori public ids are UUIDs. Anything else is replaced, so a wake line can
  * never carry text an author controls. */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const KINDS = new Set(['mention', 'post.created', 'dm.request', 'dm.message', 'dm.accepted']);
+const KINDS = new Set(['mention', 'post.created', 'post.edited', 'dm.request', 'dm.message', 'dm.accepted']);
+/** Kinds whose `data.revision` names the post revision they are about: a
+ * mention carries it too (um#364's recordMentions), including one added by an
+ * edit, so its other copy on `posts` is recognised. */
+const REVISION_KINDS = new Set(['post.created', 'post.edited', 'mention']);
 const ENTITY_TYPES = new Set(['post', 'conversation', 'listing', 'transaction', 'execution']);
 
 export const MAX_REFS_IN_LINE = 10;
@@ -29,14 +33,19 @@ export function toRefs(deliveries: AgentDelivery[]): EventRef[] {
         entity_id: safeId(e.entity_id),
       };
       if (typeof e.data?.conversation_id === 'string') ref.conversation_id = safeId(e.data.conversation_id);
+      const rev = e.data?.revision;
+      if (REVISION_KINDS.has(ref.kind) && typeof rev === 'number' && Number.isInteger(rev) && rev > 0 && rev <= 1_000_000)
+        ref.revision = rev;
       refs.push(ref);
     }
   }
   return refs;
 }
 
-/** Higher wins when one entity arrives under several kinds. */
-export const KIND_RANK: Record<string, number> = { mention: 3, 'dm.request': 2, 'dm.message': 1 };
+/** Higher wins when one entity arrives under several kinds: an edit outranks
+ * the post's creation (the agent may have read the old text), a mention
+ * outranks both. */
+export const KIND_RANK: Record<string, number> = { mention: 4, 'dm.request': 3, 'dm.message': 2, 'post.edited': 1 };
 
 /** One ref per post or conversation. Overlapping subscriptions (all posts
  * plus the inbox, a thread plus mentions) deliver the same post once per
@@ -46,7 +55,10 @@ export function dedupeRefs(refs: EventRef[]): EventRef[] {
   for (const ref of refs) {
     const key = refKey(ref);
     const prev = byEntity.get(key);
-    if (!prev || (KIND_RANK[ref.kind] ?? 0) > (KIND_RANK[prev.kind] ?? 0)) byEntity.set(key, ref);
+    const rank = KIND_RANK[ref.kind] ?? 0;
+    const prevRank = prev ? (KIND_RANK[prev.kind] ?? 0) : -1;
+    // Among edits of one post, the newest revision stands for the rest.
+    if (rank > prevRank || (rank === prevRank && (ref.revision ?? 0) > (prev?.revision ?? 0))) byEntity.set(key, ref);
   }
   return refs.filter((ref) => byEntity.get(refKey(ref)) === ref);
 }

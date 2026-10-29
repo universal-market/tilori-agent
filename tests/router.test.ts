@@ -5,7 +5,7 @@ import { desiredSubscriptions } from '../src/config.ts';
 import { ExecInjector } from '../src/injectors/exec.ts';
 import { Router } from '../src/router.ts';
 import type { DeliverResult, Injector, SubscriptionSpec, Wake } from '../src/types.ts';
-import { FakeTilori, dm, mention, post, until } from './fake-tilori.ts';
+import { FakeTilori, dm, edited, mention, post, until } from './fake-tilori.ts';
 
 class Recorder implements Injector {
   readonly kind = 'test';
@@ -25,6 +25,7 @@ function setup(
     posts?: boolean;
     now?: () => number;
     coalesceMs?: number;
+    editPauseMs?: number;
     subscriptions?: SubscriptionSpec[];
     reminder?: { everyMs: number; prompt: string; onlyWhenIdle: boolean };
   } = {},
@@ -48,6 +49,7 @@ function setup(
     waitMs: 10,
     retryMs: 10,
     coalesceMs: opts.coalesceMs ?? 0,
+    editPauseMs: opts.editPauseMs ?? 0,
     now: opts.now,
   });
   const ac = new AbortController();
@@ -278,6 +280,205 @@ describe('router', () => {
     fake.push('posts', [post(p)]);
     await until(() => fake.acks.length === 3);
     expect(inj.wakes).toHaveLength(2);
+    ac.abort();
+    await done;
+  });
+
+  test('an edit of a post an earlier wake named wakes again, as post.edited (UNI-478)', async () => {
+    const { fake, router, ac, done } = setup({ posts: true });
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => fake.subs.length === 3);
+    const p = randomUUID();
+    fake.push('posts', [post(p)]);
+    await until(() => inj.wakes.length === 1);
+    fake.push('posts', [edited(p)]);
+    await until(() => inj.wakes.length === 2);
+    expect(inj.wakes[1].events.map((e) => [e.kind, e.entity_id])).toEqual([['post.edited', p]]);
+    expect(inj.wakes[1].already_delivered).toBeUndefined();
+    // Every later edit is new text too: never dropped as already delivered.
+    fake.push('posts', [edited(p)]);
+    await until(() => inj.wakes.length === 3);
+    expect(inj.wakes[2].events.map((e) => e.kind)).toEqual(['post.edited']);
+    ac.abort();
+    await done;
+  });
+
+  test('edits in one batch name the post once; a mention of it wins', async () => {
+    const { fake, router, ac, done } = setup({ posts: true });
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => fake.subs.length === 3);
+    const [p, q] = [randomUUID(), randomUUID()];
+    fake.push('posts', [post(p), edited(p), edited(p)]);
+    await until(() => inj.wakes.length === 1);
+    expect(inj.wakes[0].events.map((e) => [e.kind, e.entity_id])).toEqual([['post.edited', p]]);
+    // An edit that adds a mention arrives as a mention too (the server's
+    // recordMentions); the wake names it once, as the mention.
+    fake.push('posts', [edited(q), mention(q)]);
+    await until(() => inj.wakes.length === 2);
+    expect(inj.wakes[1].events.map((e) => [e.kind, e.entity_id])).toEqual([['mention', q]]);
+    ac.abort();
+    await done;
+  });
+
+  test('after an edit wake, a late copy of the post\'s creation wakes nothing', async () => {
+    const { fake, router, ac, done } = setup({ posts: true });
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => fake.subs.length === 3);
+    const p = randomUUID();
+    fake.push('inbox', [edited(p)]);
+    await until(() => inj.wakes.length === 1);
+    fake.push('posts', [post(p)]);
+    await until(() => fake.acks.length === 2);
+    expect(inj.wakes).toHaveLength(1);
+    ac.abort();
+    await done;
+  });
+
+  test('a burst of edits on a broad subscription gives at most two wakes: the first now, the rest together', async () => {
+    const { fake, router, ac, done } = setup({ posts: true, editPauseMs: 400 });
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => fake.subs.length === 3);
+    const p = randomUUID();
+    fake.push('posts', [edited(p)]);
+    await until(() => inj.wakes.length === 1);
+    const polls = fake.polls.length;
+    // Two more edits while the posts subscription rests: they queue.
+    fake.push('posts', [edited(p)]);
+    await Bun.sleep(100);
+    fake.push('posts', [edited(p)]);
+    await Bun.sleep(150);
+    expect(inj.wakes).toHaveLength(1);
+    await until(() => inj.wakes.length === 2);
+    expect(inj.wakes[1].events.map((e) => [e.kind, e.entity_id])).toEqual([['post.edited', p]]);
+    await Bun.sleep(150);
+    expect(inj.wakes).toHaveLength(2);
+    expect(fake.polls.length).toBeGreaterThan(polls); // the inbox kept polling
+    ac.abort();
+    await done;
+  });
+
+  test('an edit of a reply to you, on both the inbox and posts, wakes once (Pax, tilori-agent#42)', async () => {
+    const { fake, router, ac, done } = setup({ posts: true, editPauseMs: 300 });
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => fake.subs.length === 3);
+    const [a, b] = [randomUUID(), randomUUID()];
+    // Edit A of some post rests the posts subscription.
+    fake.push('posts', [edited(a, 2)]);
+    await until(() => inj.wakes.length === 1);
+    // Edit B of a reply to you lands on both streams (um#364's eventPost).
+    fake.push('inbox', [edited(b, 2)]);
+    fake.push('posts', [edited(b, 2)]);
+    await until(() => inj.wakes.length === 2);
+    // After the pause, the posts copy of B is acknowledged without a wake.
+    await until(() => fake.acks.length === 3, 2000);
+    await Bun.sleep(100);
+    expect(inj.wakes).toHaveLength(2);
+    expect(inj.wakes[1].events.map((e) => [e.kind, e.entity_id])).toEqual([['post.edited', b]]);
+    ac.abort();
+    await done;
+  });
+
+  test('an edit that adds a mention wakes once, as the mention (Pax, tilori-agent#42)', async () => {
+    const { fake, router, ac, done } = setup({ posts: true, editPauseMs: 300 });
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => fake.subs.length === 3);
+    const [a, q] = [randomUUID(), randomUUID()];
+    fake.push('posts', [edited(a, 2)]);
+    await until(() => inj.wakes.length === 1);
+    // um#364 sends the mention with the revision that added it.
+    fake.push('inbox', [mention(q, { data: { revision: 2 } })]);
+    fake.push('posts', [edited(q, 2)]);
+    await until(() => inj.wakes.length === 2);
+    expect(inj.wakes[1].events.map((e) => [e.kind, e.entity_id])).toEqual([['mention', q]]);
+    await until(() => fake.acks.length === 3, 2000);
+    await Bun.sleep(100);
+    expect(inj.wakes).toHaveLength(2);
+    // A later edit of that post is new text and wakes.
+    fake.push('posts', [edited(q, 3)]);
+    await until(() => inj.wakes.length === 3, 2000);
+    ac.abort();
+    await done;
+  });
+
+  test('edits on a direct subscription wake once per revision; older copies wake nothing', async () => {
+    const { fake, router, ac, done } = setup({ posts: true, editPauseMs: 300 });
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => fake.subs.length === 3);
+    const p = randomUUID();
+    for (const rev of [2, 3, 4]) {
+      fake.push('inbox', [edited(p, rev)]);
+      fake.push('posts', [edited(p, rev)]);
+      await Bun.sleep(80);
+    }
+    // Past the posts pause, so every copy has been delivered and acknowledged.
+    await Bun.sleep(1000);
+    // One wake per revision at most, never a second wake for one revision.
+    const revs = inj.wakes.flatMap((w) => w.events.map((e) => e.revision));
+    expect(new Set(revs).size).toBe(revs.length);
+    expect(inj.wakes.length).toBeLessThanOrEqual(3);
+    expect(revs).toContain(4);
+    // A late copy of an older revision wakes nothing.
+    const before = inj.wakes.length;
+    const acks = fake.acks.length;
+    fake.push('inbox', [edited(p, 3)]);
+    await until(() => fake.acks.length === acks + 1);
+    expect(inj.wakes).toHaveLength(before);
+    ac.abort();
+    await done;
+  });
+
+  test('a mention during an edit pause wakes at once; the pause is not extended', async () => {
+    const { fake, router, ac, done } = setup({ posts: true, editPauseMs: 600 });
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => fake.subs.length === 3);
+    fake.push('posts', [edited()]);
+    await until(() => inj.wakes.length === 1);
+    const paused = Date.now();
+    const q = randomUUID();
+    fake.push('inbox', [mention(q)]);
+    await until(() => inj.wakes.length === 2, 400);
+    expect(inj.wakes[1].events.map((e) => [e.kind, e.entity_id])).toEqual([['mention', q]]);
+    // An edit on the inbox (a direct subscription) doesn't rest anything,
+    // and wakes at once too.
+    fake.push('inbox', [edited(q)]);
+    await until(() => inj.wakes.length === 3, 400);
+    const r = randomUUID();
+    fake.push('inbox', [mention(r)]);
+    await until(() => inj.wakes.length === 4, 300);
+    expect(inj.wakes[3].events.map((e) => e.entity_id)).toEqual([r]);
+    // The posts pause still ends on time: an edit queued there wakes about
+    // 600 ms after the first wake, not later.
+    fake.push('posts', [edited()]);
+    await until(() => inj.wakes.length === 5, 2000);
+    expect(Date.now() - paused).toBeLessThan(1500);
+    ac.abort();
+    await done;
+  });
+
+  test('edit wakes count against wakes_per_hour', async () => {
+    let now = 1_000_000;
+    const { fake, router, ac, done, logs } = setup({ posts: true, wakesPerHour: 1, now: () => now });
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => fake.subs.length === 3);
+    fake.push('posts', [edited()]);
+    await until(() => inj.wakes.length === 1);
+    fake.push('posts', [edited()]);
+    await until(() => logs.some((l) => l.includes('wake cap reached')));
+    expect(inj.wakes).toHaveLength(1);
+    now += 3600_001;
+    router.register('wren', inj); // kicks the sleeping loop
+    await until(() => inj.wakes.length === 2);
+    expect(inj.wakes[1].events.map((e) => e.kind)).toEqual(['post.edited']);
+    expect(inj.wakes[1].held_back).toBe(1);
     ac.abort();
     await done;
   });

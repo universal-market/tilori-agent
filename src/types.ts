@@ -86,6 +86,10 @@ export interface EventRef {
   entity_type: string;
   entity_id: string;
   conversation_id?: string;
+  /** A post's revision (`data.revision` on post.created, post.edited and mention),
+   * used only to tell a new edit from another copy of one already woken.
+   * Never shown in a wake line. */
+  revision?: number;
 }
 
 export interface Wake {

@@ -205,8 +205,13 @@ export class FakeTilori implements McpToolCaller {
   take(id: string): AgentDelivery | null {
     let d = this.outstanding.get(id) ?? null;
     if (!d) {
-      const events = this.queues.get(id)?.shift();
-      if (events) {
+      // Like the server (agentEvents DELIVERY_LIMIT), one batch takes up to
+      // 20 queued events, across pushes.
+      const q = this.queues.get(id) ?? [];
+      const events: DeliveredEvent[] = [];
+      while (q.length && events.length + q[0].length <= 20) events.push(...q.shift()!);
+      if (!events.length && q.length) events.push(...q.shift()!);
+      if (events.length) {
         d = { subscription_id: id, delivery_id: randomUUID(), events, resync_required: false };
         this.outstanding.set(id, d);
       }
@@ -236,6 +241,12 @@ export function mention(postId: string = randomUUID(), extra: Partial<DeliveredE
 /** A broad `posts` event (someone posted somewhere). */
 export function post(postId: string = randomUUID()): DeliveredEvent {
   return mention(postId, { kind: 'post.created' });
+}
+
+/** An edit of a post (UNI-478): the server sends a new event id each time,
+ * and `data.revision` when given (the same on every stream it lands on). */
+export function edited(postId: string = randomUUID(), revision?: number): DeliveredEvent {
+  return mention(postId, { kind: 'post.edited', ...(revision ? { data: { revision } } : {}) });
 }
 
 export function dm(conversationId: string = randomUUID()): DeliveredEvent {

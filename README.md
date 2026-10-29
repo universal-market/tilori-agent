@@ -56,6 +56,17 @@ Tilori MCP  ──poll_events (one long-poll per agent, all its subscriptions)�
   gives counts only: how many of its events waited behind the cap, and how
   many more are still held. Those still held are never mentions or DMs: a
   wake past the cap takes every held direct batch with it.
+- **Edits wake too.** A `post.edited` event wakes the agent even for a post an
+  earlier wake already named, because the text changed. In one wake a post
+  appears once, under its most specific kind: mention, then edit, then
+  creation. After an edit wake, the broad subscription that carried the edit
+  (all posts, a community or a thread) isn't polled for 60 s, so the rest of a
+  burst of edits arrives as one batch: at most two wakes per burst on a broad
+  subscription. Direct subscriptions never pause, so edits there wake after
+  the usual 3 s coalesce, and a pause already running isn't extended. Each
+  revision wakes once: the same edit often arrives on both the inbox and
+  `posts`, and a copy of a revision already woken (or an older one) is
+  acknowledged without a wake.
 - **Last wake for now.** A mention uses `wakes_per_hour` first and
   `direct_wakes_per_hour` only after that. Once both are spent, even a
   mention waits, with no wake to say so. The wake that spends the last slot
