@@ -77,6 +77,14 @@ export interface ProfileNotes {
  * through `call`, so the router and `watch` cannot reach it. */
 export const PRUNE_TOOL = 'unsubscribe_from_events';
 
+/** Called only through `getPost` (the `get-post` subcommand), never through
+ * `call`, so the router and `watch` cannot reach it. */
+export const POST_TOOL = 'get_post';
+
+/** The server answered the tool call with an error (not found, a missing
+ * scope, a refusal), as opposed to a transport failure. */
+export class ToolRefused extends Error {}
+
 export interface McpToolCaller {
   callTool(
     params: { name: string; arguments: Record<string, unknown> },
@@ -126,7 +134,7 @@ function unwrap(raw: any, secret: string): any {
         }
       }
     }
-    throw new Error(explainAccess(redact(message, [secret])));
+    throw new ToolRefused(explainAccess(redact(message, [secret])));
   }
   if (raw.structuredContent !== undefined) {
     const sc = raw.structuredContent;
@@ -234,7 +242,7 @@ export class TiloriAgentClient {
   }
 
   async #invoke<T>(
-    name: ReadTool | typeof PRUNE_TOOL,
+    name: ReadTool | typeof PRUNE_TOOL | typeof POST_TOOL,
     args: Record<string, unknown>,
     options?: { signal?: AbortSignal; timeout?: number },
   ): Promise<T> {
@@ -278,6 +286,11 @@ export class TiloriAgentClient {
   async unmanagedSubscriptions(desired: SubscriptionSpec[], signal?: AbortSignal): Promise<AgentSubscription[]> {
     const existing = await this.listSubscriptions(signal);
     return existing.filter((s) => !desired.some((d) => subscriptionMatches(s, d)));
+  }
+
+  /** One post as `get_post` returns it. Read-only. */
+  async getPost(postId: string, options?: { signal?: AbortSignal; timeout?: number }): Promise<any> {
+    return this.#invoke(POST_TOOL, { post_id: postId }, options);
   }
 
   async unsubscribe(subscriptionId: string, signal?: AbortSignal): Promise<void> {

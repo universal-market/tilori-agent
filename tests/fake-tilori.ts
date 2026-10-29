@@ -41,6 +41,10 @@ export class FakeTilori implements McpToolCaller {
   profile: unknown = undefined;
   /** get_my_profile waits until the caller aborts it. */
   profileHangs = false;
+  /** Posts get_post can return, by id; any other id is NOT_FOUND. */
+  posts = new Map<string, unknown>();
+  /** get_post waits until the caller aborts it. */
+  postHangs = false;
 
   push(scopeType: string, events: DeliveredEvent[]) {
     const sub = this.subs.find((s) => s.scope.type === scopeType);
@@ -70,6 +74,15 @@ export class FakeTilori implements McpToolCaller {
           });
         if (this.profile === undefined) return err('unexpected tool get_my_profile');
         return ok(this.profile);
+      case 'get_post': {
+        if (this.postHangs)
+          await new Promise((_, reject) => {
+            if (options?.signal?.aborted) return reject(new Error('aborted'));
+            options?.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+          });
+        const post = this.posts.get(String(a.post_id));
+        return post === undefined ? err('Post unavailable') : ok(post);
+      }
       case 'subscribe_to_events': {
         const scope = normalizeScope(a.scope as any);
         if (this.refuse.has(scope.type)) return err(`Missing scope for ${scope.type}`);
