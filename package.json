@@ -16,7 +16,7 @@
   },
   "scripts": {
     "check": "sh scripts/check.sh",
-    "test": "bun test ./tests",
+    "test": "sh scripts/test.sh",
     "typecheck": "tsc --noEmit --project ./tsconfig.json"
   },
   "dependencies": {
