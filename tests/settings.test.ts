@@ -280,7 +280,7 @@ describe('live reload', () => {
       next.agents!.wren.wakes_per_hour = 0;
       writeFileSync(configPath(), text(next), { mode: 0o600 });
       await until(() => logs.some((l) => l.includes('not reloaded')));
-      expect(logs.at(-1)).toBe('config.json not reloaded, keeping current settings: wakes_per_hour must be a positive integer.');
+      expect(logs.at(-1)).toBe('config.json not reloaded, keeping current settings: [wren] wakes_per_hour must be a positive integer.');
       expect(router.usage('wren')!.wakes.limit).toBe(35);
     } finally {
       ac.abort();
@@ -305,7 +305,7 @@ describe('live reload', () => {
       writeFileSync(configPath(), text(next), { mode: 0o600 });
       await until(() => logs.some((l) => l.includes('not reloaded')));
       expect(logs.at(-1)).toBe(
-        'config.json not reloaded, keeping current settings: wakes_per_hour 500 is above 60, the most a running router takes; restart to apply it.',
+        'config.json not reloaded, keeping current settings: [wren] wakes_per_hour 500 is above 60, the most a running router takes; restart to apply it.',
       );
       expect(router.usage('wren')!.wakes.limit).toBe(20);
       next.agents!.wren.wakes_per_hour = 60;

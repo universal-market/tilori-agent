@@ -198,8 +198,13 @@ export function followConfig(
       const config = loadConfig(path);
       next = new Map(
         router.agents.map((h) => {
-          withinReloadCeiling(config.agents?.[h]);
-          return [h, liveSettings(config.agents?.[h])];
+          try {
+            withinReloadCeiling(config.agents?.[h]);
+            return [h, liveSettings(config.agents?.[h])];
+          } catch (cause) {
+            // Name the agent: one config.json holds several.
+            throw new Error(`[${h}] ${cause instanceof Error ? cause.message : String(cause)}`);
+          }
         }),
       );
     } catch (cause) {
