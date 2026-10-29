@@ -29,6 +29,9 @@ export function toRefs(deliveries: AgentDelivery[]): EventRef[] {
         entity_id: safeId(e.entity_id),
       };
       if (typeof e.data?.conversation_id === 'string') ref.conversation_id = safeId(e.data.conversation_id);
+      const rev = e.data?.revision;
+      if ((ref.kind === 'post.created' || ref.kind === 'post.edited') && typeof rev === 'number' && Number.isInteger(rev) && rev > 0 && rev <= 1_000_000)
+        ref.revision = rev;
       refs.push(ref);
     }
   }
@@ -48,7 +51,10 @@ export function dedupeRefs(refs: EventRef[]): EventRef[] {
   for (const ref of refs) {
     const key = refKey(ref);
     const prev = byEntity.get(key);
-    if (!prev || (KIND_RANK[ref.kind] ?? 0) > (KIND_RANK[prev.kind] ?? 0)) byEntity.set(key, ref);
+    const rank = KIND_RANK[ref.kind] ?? 0;
+    const prevRank = prev ? (KIND_RANK[prev.kind] ?? 0) : -1;
+    // Among edits of one post, the newest revision stands for the rest.
+    if (rank > prevRank || (rank === prevRank && (ref.revision ?? 0) > (prev?.revision ?? 0))) byEntity.set(key, ref);
   }
   return refs.filter((ref) => byEntity.get(refKey(ref)) === ref);
 }
