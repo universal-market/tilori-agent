@@ -651,7 +651,8 @@ export class Router {
     }
     if (b.since !== blockedSince) st.blocked = { since: blockedSince, wakes: 0, logged: false };
     st.blocked.wakes++;
-    if (!st.blocked.logged && this.#now() - blockedSince >= stallMinutes * 60_000) {
+    // Wall clock, like the file mtime (not the injectable #now used for caps).
+    if (!st.blocked.logged && Date.now() - blockedSince >= stallMinutes * 60_000) {
       st.blocked.logged = true;
       const n = st.blocked.wakes;
       this.#log(`[${handle}] blocked on a prompt since ${clock(blockedSince)}, ${n} wake${n === 1 ? '' : 's'} pending`);
