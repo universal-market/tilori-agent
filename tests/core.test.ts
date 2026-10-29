@@ -182,6 +182,10 @@ describe('wake text', () => {
     const kinds = (...ks: string[]) => dedupeRefs(ks.map((k) => ref(k, 'post', post))).map((r) => r.kind);
     expect(kinds('post.created', 'post.edited')).toEqual(['post.edited']);
     expect(kinds('post.edited', 'mention', 'post.edited')).toEqual(['mention']);
+    // Among edits, the newest revision stands for the rest.
+    const e2 = { ...ref('post.edited', 'post', post), revision: 2 };
+    const e3 = { ...ref('post.edited', 'post', post), revision: 3 };
+    expect(dedupeRefs([e2, e3]).map((r) => r.revision)).toEqual([3]);
   });
 
   test('every default subscription asks the server to leave out your own posts and edits', () => {
@@ -198,6 +202,14 @@ describe('wake text', () => {
     expect(wake.events[0].kind).toBe('post.edited');
     expect(wakeText(wake)).toContain('post.edited post 11111111-1111-4111-8111-111111111111');
     expect(sanitizeWake(wake, 'wren')?.events[0].kind).toBe('post.edited');
+    // The revision is kept only as an integer, and only on post kinds.
+    const withRev = (revision: unknown, kind = 'post.edited') =>
+      buildWake('wren', [{ subscription_id: 's', delivery_id: 'd', events: [mention(undefined, { kind, data: { revision } as any })], resync_required: false }], 'w').events[0].revision;
+    expect(withRev(3)).toBe(3);
+    expect(withRev('3')).toBeUndefined();
+    expect(withRev(1.5)).toBeUndefined();
+    expect(withRev(3, 'mention')).toBeUndefined();
+    expect(wakeText(buildWake('wren', [{ subscription_id: 's', delivery_id: 'd', events: [mention(undefined, { kind: 'post.edited', data: { revision: 987654 } })], resync_required: false }], 'w'))).not.toContain('987654');
   });
 
   test('non-uuid ids and unknown kinds are replaced', () => {

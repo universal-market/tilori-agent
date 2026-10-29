@@ -337,7 +337,7 @@ describe('router', () => {
     await done;
   });
 
-  test('a burst of edits gives at most two wakes: the first now, the rest together', async () => {
+  test('a burst of edits on a broad subscription gives at most two wakes: the first now, the rest together', async () => {
     const { fake, router, ac, done } = setup({ posts: true, editPauseMs: 400 });
     const inj = new Recorder();
     router.register('wren', inj);
@@ -357,6 +357,56 @@ describe('router', () => {
     await Bun.sleep(150);
     expect(inj.wakes).toHaveLength(2);
     expect(fake.polls.length).toBeGreaterThan(polls); // the inbox kept polling
+    ac.abort();
+    await done;
+  });
+
+  test('an edit of a reply to you, on both the inbox and posts, wakes once (Pax, tilori-agent#42)', async () => {
+    const { fake, router, ac, done } = setup({ posts: true, editPauseMs: 300 });
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => fake.subs.length === 3);
+    const [a, b] = [randomUUID(), randomUUID()];
+    // Edit A of some post rests the posts subscription.
+    fake.push('posts', [edited(a, 2)]);
+    await until(() => inj.wakes.length === 1);
+    // Edit B of a reply to you lands on both streams (um#364's eventPost).
+    fake.push('inbox', [edited(b, 2)]);
+    fake.push('posts', [edited(b, 2)]);
+    await until(() => inj.wakes.length === 2);
+    // After the pause, the posts copy of B is acknowledged without a wake.
+    await until(() => fake.acks.length === 3, 2000);
+    await Bun.sleep(100);
+    expect(inj.wakes).toHaveLength(2);
+    expect(inj.wakes[1].events.map((e) => [e.kind, e.entity_id])).toEqual([['post.edited', b]]);
+    ac.abort();
+    await done;
+  });
+
+  test('edits on a direct subscription wake once per revision; older copies wake nothing', async () => {
+    const { fake, router, ac, done } = setup({ posts: true, editPauseMs: 300 });
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => fake.subs.length === 3);
+    const p = randomUUID();
+    for (const rev of [2, 3, 4]) {
+      fake.push('inbox', [edited(p, rev)]);
+      fake.push('posts', [edited(p, rev)]);
+      await Bun.sleep(80);
+    }
+    // Past the posts pause, so every copy has been delivered and acknowledged.
+    await Bun.sleep(1000);
+    // One wake per revision at most, never a second wake for one revision.
+    const revs = inj.wakes.flatMap((w) => w.events.map((e) => e.revision));
+    expect(new Set(revs).size).toBe(revs.length);
+    expect(inj.wakes.length).toBeLessThanOrEqual(3);
+    expect(revs).toContain(4);
+    // A late copy of an older revision wakes nothing.
+    const before = inj.wakes.length;
+    const acks = fake.acks.length;
+    fake.push('inbox', [edited(p, 3)]);
+    await until(() => fake.acks.length === acks + 1);
+    expect(inj.wakes).toHaveLength(before);
     ac.abort();
     await done;
   });

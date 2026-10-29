@@ -88,7 +88,7 @@ interface AgentState {
    * reply is a new post id, but a conversation or a Market entity gets new
    * events under the same id, which must always wake. Kept across
    * generations: a held batch is re-served after a renewal. */
-  recent: Map<string, { at: number; rank: number }>;
+  recent: Map<string, { at: number; rank: number; revision?: number }>;
   /** Live injectors, oldest first. The newest one receives wakes; when it
    * leaves, the previous one takes over. */
   injectors: Injector[];
@@ -659,12 +659,18 @@ export class Router {
   }
 
   /** A post an earlier wake already named under this kind or a more specific
-   * one. A mention after a plain post.created still wakes, and an edit always
-   * does: it is new text, whatever an earlier wake said about the post. */
+   * one. A mention after a plain post.created still wakes. An edit wakes
+   * unless an earlier wake already carried that revision or a newer one: the
+   * same edit arrives on the public stream and in the parent author's inbox
+   * (um#364's eventPost), and only the first copy wakes. An edit with no
+   * revision always wakes. */
   #seen(st: AgentState, r: EventRef): boolean {
-    if (r.entity_type !== 'post' || r.kind === 'post.edited') return false;
+    if (r.entity_type !== 'post') return false;
     const prev = st.recent.get(refKey(r));
-    return prev !== undefined && (KIND_RANK[r.kind] ?? 0) <= prev.rank;
+    if (prev === undefined) return false;
+    if (r.kind === 'post.edited')
+      return r.revision !== undefined && prev.revision !== undefined && r.revision <= prev.revision;
+    return (KIND_RANK[r.kind] ?? 0) <= prev.rank;
   }
 
   /** Tries to hand held batches to the agent's injector. Returns 0 when done,
@@ -792,9 +798,11 @@ export class Router {
       const at = this.#now();
       for (const r of wake.events) {
         if (r.entity_type !== 'post') continue;
-        const rank = Math.max(KIND_RANK[r.kind] ?? 0, st.recent.get(refKey(r))?.rank ?? 0);
+        const prev = st.recent.get(refKey(r));
+        const rank = Math.max(KIND_RANK[r.kind] ?? 0, prev?.rank ?? 0);
+        const revision = Math.max(r.revision ?? 0, prev?.revision ?? 0) || undefined;
         st.recent.delete(refKey(r));
-        st.recent.set(refKey(r), { at, rank });
+        st.recent.set(refKey(r), { at, rank, ...(revision ? { revision } : {}) });
       }
       while (st.recent.size > MAX_RECENT) st.recent.delete(st.recent.keys().next().value!);
       this.#log(

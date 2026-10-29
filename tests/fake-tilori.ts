@@ -243,9 +243,10 @@ export function post(postId: string = randomUUID()): DeliveredEvent {
   return mention(postId, { kind: 'post.created' });
 }
 
-/** An edit of a post (UNI-478): the server sends a new event id each time. */
-export function edited(postId: string = randomUUID()): DeliveredEvent {
-  return mention(postId, { kind: 'post.edited' });
+/** An edit of a post (UNI-478): the server sends a new event id each time,
+ * and `data.revision` when given (the same on every stream it lands on). */
+export function edited(postId: string = randomUUID(), revision?: number): DeliveredEvent {
+  return mention(postId, { kind: 'post.edited', ...(revision ? { data: { revision } } : {}) });
 }
 
 export function dm(conversationId: string = randomUUID()): DeliveredEvent {
