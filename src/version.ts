@@ -1,2 +1,2 @@
 /** tilori-agent's version. Keep in step with package.json (a test checks). */
-export const VERSION = '0.1.16';
+export const VERSION = '0.1.17';
