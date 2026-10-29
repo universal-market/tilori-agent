@@ -1,3 +1,4 @@
+import { stallMinutes } from './activity.ts';
 import { TiloriAgentClient } from './client.ts';
 import { desiredSubscriptions, keyUrl, reminderSettings, type TiloriConfig } from './config.ts';
 import { NotifyLinesInjector } from './injectors/notify-lines.ts';
@@ -40,6 +41,7 @@ export function directRouter(opts: NotifyLinesOptions): Router {
         wakesPerHour: settings.wakes_per_hour,
         directWakesPerHour: settings.direct_wakes_per_hour,
         reminder: reminderSettings(settings),
+        stallMinutes: stallMinutes(settings.stall_minutes),
       },
     ],
     logger: opts.logger,
