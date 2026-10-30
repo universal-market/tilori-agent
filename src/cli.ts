@@ -24,6 +24,7 @@ import { Router, type RouterAgentConfig } from './router.ts';
 import { SETTABLE, applyChanges, followConfig, parseAssignment, resetEdit, showText } from './settings.ts';
 import type { AgentSubscription } from './types.ts';
 import { UpdateNotice } from './update-notice.ts';
+import { LocalRefusal, UPLOAD_TIMEOUT_MS, fileInfo, parseBytes, upload } from './upload.ts';
 import { runNotifyLines, signalDir } from './watch.ts';
 
 const USAGE = `tilori-agent: wake local coding agents on Tilori events
@@ -87,6 +88,19 @@ Usage:
       exactly as Tilori sent them (absent if it didn't), and body. Read-only. Exits 0 on success, 2 when Tilori refuses
       (not found, hidden from this agent, no read scope), 1 on bad input, a
       transport error or no answer within 10 s.
+  tilori-agent file-info <file>
+      Prints {"byte_size": n, "media_type": "…"} for prepare_attachment_upload.
+      media_type is read from the first bytes (PNG, JPEG, GIF, WebP, PDF), else
+      application/octet-stream. Exits 0, or 2 when the file is refused.
+  tilori-agent upload <attachment_id> <file> --bytes <n> [--agent <handle>]
+      Sends the file's bytes for an attachment that prepare_attachment_upload
+      made, as the agent, in one PUT to "url"'s origin in config.json (never to
+      upload_url), then says the next step. --bytes is the byte_size you
+      prepared with. Refuses symlinks, files over 20 MiB, a size other than
+      --bytes, anything under ~/.config/tilori and a file holding the key.
+      Follows no redirect, never retries, gives up after ${UPLOAD_TIMEOUT_MS / 1000} s, and prints
+      nothing from the server's answer. Exit codes: 0 uploaded, 1 the server
+      refused or didn't answer, 2 refused locally with nothing sent.
 
 Agent selection: --agent, then $TILORI_AGENT, then "default_agent" in config.json.
 Keys are only sent to "url" in config.json, which init sets. Elsewhere --url
@@ -96,18 +110,20 @@ Logs go to stderr and never include keys or event content.`;
 interface Args {
   cmd: string;
   flags: Map<string, string | true>;
-  /** `get-post` takes the post id; `config` takes its action and arguments. */
+  /** `get-post` takes the post id; `config` takes its action and arguments;
+   * `upload` takes the attachment id and file; `file-info` the file. */
   positionals: string[];
 }
 
 export function parseArgs(argv: string[]): Args {
   const flags = new Map<string, string | true>();
   const positionals: string[] = [];
-  const valued = new Set(['agent', 'url', 'exec', 'wait-ms', 'server-url', 'exec-timeout-ms']);
+  const valued = new Set(['agent', 'url', 'exec', 'wait-ms', 'server-url', 'exec-timeout-ms', 'bytes']);
+  const takes: Record<string, number> = { 'get-post': 1, upload: 2, 'file-info': 1 };
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
     if (!a.startsWith('--')) {
-      if ((argv[0] === 'get-post' && positionals.length === 0) || argv[0] === 'config') {
+      if (positionals.length < (takes[argv[0]] ?? 0) || argv[0] === 'config') {
         positionals.push(a);
         continue;
       }
@@ -198,7 +214,8 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     args = parseArgs(argv);
   } catch (e) {
     log((e as Error).message);
-    // get-post keeps 2 for "Tilori refused"; bad input is 1.
+    // get-post keeps 2 for "Tilori refused"; bad input is 1. For upload
+    // and file-info, 2 means refused locally with nothing sent.
     return argv[0] === 'get-post' ? 1 : 2;
   }
   const controller = new AbortController();
@@ -301,6 +318,37 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         } finally {
           await client.close();
         }
+      }
+      case 'file-info': {
+        try {
+          process.stdout.write(JSON.stringify(fileInfo(args.positionals[0] ?? '')) + '\n');
+          return 0;
+        } catch (cause) {
+          log(cause instanceof Error ? cause.message : String(cause));
+          return 2;
+        }
+      }
+      case 'upload': {
+        // The agent can't hold its key, so the authenticated PUT happens
+        // here (UNI-505). Every refusal before the request exits 2.
+        const [id = '', path = ''] = args.positionals;
+        let origin: string;
+        let agent: string;
+        let bytes: number;
+        try {
+          if (!path) throw new LocalRefusal('usage: tilori-agent upload <attachment_id> <file> --bytes <n>');
+          bytes = parseBytes(str(args, 'bytes'));
+          const config = loadConfig();
+          agent = requireAgent(config, args);
+          origin = keyUrl(config, str(args, 'url')).origin;
+        } catch (cause) {
+          log(cause instanceof Error ? cause.message : String(cause));
+          return 2;
+        }
+        const r = await upload({ origin, id, path, bytes, key: () => readKey(agent), signal });
+        if (r.code === 0) process.stdout.write(r.line + '\n');
+        else log(r.line);
+        return r.code;
       }
       case 'config': {
         const [action = 'show', ...rest] = args.positionals;
