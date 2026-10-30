@@ -103,45 +103,45 @@ describe('status line', () => {
     expect(line()).toContain('never watched on this machine: a monitor or router is polling, but no poll has succeeded yet');
   });
 
-  test('watched, no wakes yet; (router) or (direct) at the end', () => {
+  test('watched, no wakes yet; who polls at the end', () => {
     touch('watching-wren', now - 20_000);
-    expect(line()).toBe('wren: watched; no wakes yet (direct)');
-    expect(line({}, true)).toBe('wren: watched; no wakes yet (router)');
+    expect(line()).toBe('wren: watched; no wakes yet; polled directly');
+    expect(line({}, true)).toBe('wren: watched; no wakes yet; polled by the router');
   });
 
   test('acted since the last wake', () => {
     touch('watching-wren', now - 10_000);
     touch('woke-wren', now - 12 * 60_000);
     touch('activity-wren', now - 11 * 60_000);
-    expect(line()).toBe('wren: watched; last wake 12 min ago (00:48 UTC), acted since (direct)');
+    expect(line()).toBe('wren: watched; last wake 12 min ago (00:48 UTC), acted since; polled directly');
   });
 
   test('no action: "yet" below stall_minutes, then how long', () => {
     touch('watching-wren', now - 10_000);
     touch('activity-wren', now - 30 * 60_000);
     touch('woke-wren', now - 60_000);
-    expect(line()).toBe('wren: watched; last wake 1 min ago (00:59 UTC), no action yet (direct)');
+    expect(line()).toBe('wren: watched; last wake 1 min ago (00:59 UTC), no action yet; polled directly');
     touch('woke-wren', now - 12 * 60_000);
-    expect(line()).toBe('wren: watched; last wake 12 min ago (00:48 UTC), no action for 12 min (direct)');
-    expect(line({ stallMinutes: 30 })).toBe('wren: watched; last wake 12 min ago (00:48 UTC), no action yet (direct)');
+    expect(line()).toBe('wren: watched; last wake 12 min ago (00:48 UTC), no action for 12 min; polled directly');
+    expect(line({ stallMinutes: 30 })).toBe('wren: watched; last wake 12 min ago (00:48 UTC), no action yet; polled directly');
   });
 
   test('a client without the hooks: no claim about actions', () => {
     touch('watching-wren', now - 10_000);
     touch('woke-wren', now - 12 * 60_000);
-    expect(line()).toBe('wren: watched; last wake 12 min ago (00:48 UTC) (direct)');
+    expect(line()).toBe('wren: watched; last wake 12 min ago (00:48 UTC); polled directly');
   });
 
-  test('stopped polling: not watched since, with what to do', () => {
+  test('stopped polling: not watched for, with what to do', () => {
     touch('watching-wren', now - 40 * 60_000);
-    expect(line()).toBe(`wren: not watched since 40 min ago (00:20 UTC): ${START}`);
+    expect(line()).toBe(`wren: not watched for 40 min (since 00:20 UTC): ${START}`);
   });
 
   test('still polling but failing: points at the key and network, not a restart', () => {
     touch('watching-wren', now - 40 * 60_000);
     touch('attempting-wren', now - 20_000);
     expect(line()).toBe(
-      "wren: not watched since 40 min ago (00:20 UTC): a monitor or router is running, but its polls are failing; check the agent's key and network (the tilori-agent log says which).",
+      "wren: not watched for 40 min (since 00:20 UTC): a monitor or router is running, but its polls are failing; check the agent's key and network (the tilori-agent log says which).",
     );
   });
 
@@ -150,6 +150,15 @@ describe('status line', () => {
     touch('activity-wren', now - 120_000);
     touch('blocked-wren', now - 60_000);
     expect(line()).toBe('wren: blocked on a prompt since 00:59 UTC');
+  });
+
+  test('long gaps in hours, and the date when it isn\'t today', () => {
+    touch('watching-wren', now - 10_000);
+    touch('activity-wren', now - 10 * 3600_000);
+    touch('woke-wren', now - 9 * 3600_000);
+    expect(line()).toBe('wren: watched; last wake 9 h ago (2026-10-29 16:00 UTC), no action for 9 h; polled directly');
+    touch('watching-wren', now - 25 * 3600_000);
+    expect(line()).toBe(`wren: not watched for 25 h (since 2026-10-29 00:00 UTC): ${START}`);
   });
 
   test('ago: minutes, hours, and the date when it isn\'t today', () => {
@@ -269,6 +278,32 @@ describe('router status files and the direct tag', () => {
     fake.push('inbox', [mention()]);
     await until(() => inj.wakes.length === 1);
     await until(() => watchSignal('wren', dir).woke !== null);
+    ac.abort();
+    await done;
+  });
+
+  test('a poll where every subscription errored is not "watched"', async () => {
+    const fake = new FakeTilori();
+    const logs: string[] = [];
+    const router = new Router({
+      agents: [{ handle: 'wren', client: fake.client(), subscriptions: desiredSubscriptions({}) }],
+      logger: (m) => logs.push(m),
+      waitMs: 10,
+      retryMs: 10,
+      coalesceMs: 0,
+      signalDir: dir,
+    });
+    // Every subscription errors from the first poll on.
+    fake.failingSubs = new (class extends Map<string, string> {
+      override get() {
+        return 'not_found';
+      }
+    })();
+    const ac = new AbortController();
+    const done = router.run(ac.signal);
+    await until(() => logs.some((l) => l.includes('dropping subscription')));
+    expect(watchSignal('wren', dir).watching).toBeNull();
+    expect(watchSignal('wren', dir).attempting).not.toBeNull();
     ac.abort();
     await done;
   });

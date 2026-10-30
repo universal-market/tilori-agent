@@ -122,13 +122,22 @@ export function watchSignal(handle: string, dir = activityDir(), router = false)
   };
 }
 
-/** "12 min ago (00:40 UTC)", with the date when it isn't today (UTC). */
-export function ago(ms: number, now = Date.now()): string {
-  const mins = Math.max(0, Math.floor((now - ms) / 60_000));
-  const rel = mins < 1 ? 'just now' : mins < 120 ? `${mins} min ago` : `${Math.floor(mins / 60)} h ago`;
+/** "12 min", or "9 h" from two hours on. */
+export function span(ms: number): string {
+  const mins = Math.max(0, Math.floor(ms / 60_000));
+  return mins < 120 ? `${mins} min` : `${Math.floor(mins / 60)} h`;
+}
+
+/** "00:40 UTC", with the date when it isn't today (UTC). */
+function at(ms: number, now: number): string {
   const iso = new Date(ms).toISOString();
   const day = iso.slice(0, 10) === new Date(now).toISOString().slice(0, 10) ? '' : `${iso.slice(0, 10)} `;
-  return `${rel} (${day}${iso.slice(11, 16)} UTC)`;
+  return `${day}${iso.slice(11, 16)} UTC`;
+}
+
+/** "12 min ago (00:40 UTC)". */
+export function ago(ms: number, now = Date.now()): string {
+  return `${now - ms < 60_000 ? 'just now' : `${span(now - ms)} ago`} (${at(ms, now)})`;
 }
 
 const START_IT =
@@ -157,17 +166,19 @@ export function statusLine(
   }
   if (now - watch.watching >= WATCHED_MS) {
     const why = failing && watch.attempting! > watch.watching ? FAILING : START_IT;
-    return `${handle}: not watched since ${ago(watch.watching, now)}: ${why}`;
+    return `${handle}: not watched for ${span(now - watch.watching)} (since ${at(watch.watching, now)}): ${why}`;
   }
   let wake = 'no wakes yet';
   if (watch.woke !== null) {
     wake = `last wake ${ago(watch.woke, now)}`;
+    // stall_minutes 0 turns off the router's log line only; status still
+    // needs a point at which "no action yet" becomes "no action for".
     const stallMs = (opts.stallMinutes || DEFAULT_STALL_MINUTES) * 60_000;
     if (watch.activity !== null && watch.activity >= watch.woke) wake += ', acted since';
     else if (watch.reports)
-      wake += now - watch.woke < stallMs ? ', no action yet' : `, no action for ${Math.floor((now - watch.woke) / 60_000)} min`;
+      wake += now - watch.woke < stallMs ? ', no action yet' : `, no action for ${span(now - watch.woke)}`;
   }
-  return `${handle}: watched; ${wake} (${watch.router ? 'router' : 'direct'})`;
+  return `${handle}: watched; ${wake}; ${watch.router ? 'polled by the router' : 'polled directly'}`;
 }
 
 /** Validates `stall_minutes` (default 10; 0 turns the stall line off; at

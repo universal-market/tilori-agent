@@ -490,7 +490,9 @@ export class Router {
           this.#waitMs,
           call.signal,
         );
-        this.#signal(handle, 'watching');
+        // Answered, but nothing can arrive while every polled subscription
+        // errored (they are re-subscribed next): not watched yet.
+        if (res.errors.length < idle.length) this.#signal(handle, 'watching');
         failures = 0;
         let got = false;
         for (const d of res.deliveries) {

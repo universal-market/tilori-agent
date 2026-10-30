@@ -48,8 +48,8 @@ Usage:
       Injectors attach over ${'$'}XDG_RUNTIME_DIR/tilori/router.sock.
   tilori-agent status
       One line per agent with a key: whether a monitor or router is watching
-      it ("watched; last wake 12 min ago (00:40 UTC), acted since (direct)"),
-      or "not watched since …" / "never watched on this machine" with what to
+      it ("watched; last wake 12 min ago (00:40 UTC), acted since; polled directly"),
+      or "not watched for …" / "never watched on this machine" with what to
       do, or "blocked on a prompt since HH:MM UTC" while its session waits on
       a permission or elicitation prompt. Reads only file times in the run
       directory. The router also logs a blocked session once, after
