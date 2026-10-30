@@ -11,7 +11,9 @@
  *      the next tool call;
  *   4. `status` never calls the agent watched while no poll succeeds: the
  *      router polls this script's sink, which drops every connection, so it
- *      must say "no poll has succeeded yet", not "watched".
+ *      must say "no poll has succeeded yet", not "watched";
+ *   5. `upload` (UNI-505) opens one connection to the sink, says the server
+ *      didn't answer and exits 1, without printing the key.
  *
  *   bun scripts/smoke.ts [--bin <path>]
  *
@@ -67,7 +69,11 @@ const env: Record<string, string> = {
 // The router's Tilori URL: a loopback port this script holds and that drops
 // every connection, so the placeholder key reaches nothing else (Pax
 // b954d21f).
-const sink = createServer((c) => c.destroy());
+let connections = 0;
+const sink = createServer((c) => {
+  connections++;
+  c.destroy();
+});
 sink.listen(0, '127.0.0.1');
 await once(sink, 'listening');
 const port = (sink.address() as AddressInfo).port;
@@ -110,6 +116,18 @@ function cli(...args: string[]): { code: number; out: string } {
   return { code: r.status ?? -1, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
 }
 
+/** Like cli, but lets this process's sink accept connections meanwhile. */
+async function cliAsync(...args: string[]): Promise<{ code: number; out: string }> {
+  const p = spawn(command[0], [...command.slice(1), ...args], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let out = '';
+  p.stdout?.on('data', (d) => (out += d));
+  p.stderr?.on('data', (d) => (out += d));
+  const timer = setTimeout(() => p.kill('SIGKILL'), WAIT_MS);
+  const [code] = (await once(p, 'close')) as [number | null];
+  clearTimeout(timer);
+  return { code: code ?? -1, out };
+}
+
 async function until(cond: () => boolean, ms = WAIT_MS): Promise<boolean> {
   const end = Date.now() + ms;
   while (Date.now() < end) {
@@ -134,6 +152,23 @@ try {
     { mode: 0o600 },
   );
   writeFileSync(join(home, 'agents', `${handle}.key`), 'smoke-placeholder-not-a-key\n', { mode: 0o600 });
+
+  // 5. upload, before the router starts so every connection is its own.
+  const file = join(root, 'pic.png');
+  writeFileSync(file, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  const info = cli('file-info', file);
+  const up = await cliAsync('upload', '0b7c6a52-3f1e-4d6a-9c1b-2f8e5d4a7b90', file, '--bytes', '8', '--agent', handle);
+  const UPLOAD_HINT = 'check upload() in src/upload.ts';
+  if (info.code !== 0 || !info.out.includes('{"byte_size":8,"media_type":"image/png"}'))
+    fail('upload sends once and reports no answer', `file-info exited ${info.code}: ${info.out.trim().slice(0, 160)}; ${UPLOAD_HINT}`);
+  else if (up.out.includes('smoke-placeholder-not-a-key'))
+    fail('upload sends once and reports no answer', `upload printed the key; ${UPLOAD_HINT}`);
+  else if (up.code !== 1 || !up.out.includes('the upload may not have finished (no response)') || connections !== 1)
+    fail(
+      'upload sends once and reports no answer',
+      `exit ${up.code}, ${connections} connection(s): ${up.out.trim().slice(0, 160)}; ${UPLOAD_HINT}`,
+    );
+  else pass('upload sends once and reports no answer');
 
   // 1. The router starts and serves.
   router = spawn(command[0], [...command.slice(1), 'router'], { env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
@@ -210,4 +245,4 @@ try {
 for (const r of results) console.log(r.ok ? `PASS ${r.name}` : `FAIL ${r.name}: ${r.why}`);
 const passed = results.filter((r) => r.ok).length;
 console.log(`smoke: ${passed} of ${results.length} PASS (local; the network edit-wake check waits for server-side post editing)`);
-process.exit(passed === results.length && results.length === 4 ? 0 : 1);
+process.exit(passed === results.length && results.length === 5 ? 0 : 1);
