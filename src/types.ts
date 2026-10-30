@@ -90,6 +90,10 @@ export interface EventRef {
    * used only to tell a new edit from another copy of one already woken.
    * Never shown in a wake line. */
   revision?: number;
+  /** Set by the router when the post came in on the agent's own inbox or
+   * mentions subscription (a reply to it); shown as "(reply to you)". Never
+   * taken from the event. */
+  to_you?: true;
 }
 
 export interface Wake {

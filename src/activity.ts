@@ -1,7 +1,7 @@
-import { lstatSync } from 'node:fs';
+import { closeSync, constants, futimesSync, lstatSync, openSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { socketPath } from './ipc.ts';
-import { HANDLE_RE } from './keys.ts';
+import { HANDLE_RE, validateHandle } from './keys.ts';
 
 /**
  * Whether a session is stuck on a prompt (S1). The host plugin's hooks touch
@@ -17,6 +17,14 @@ import { HANDLE_RE } from './keys.ts';
  * `blocked` is newer than `activity`. A denied prompt fires no PostToolUse,
  * so it stays blocked until the next tool call. A client without these hooks
  * (no files) is never flagged.
+ *
+ * Whoever polls Tilori for the agent (the router, or `watch` polling
+ * directly) touches three more, so `status` can say whether anything is
+ * watching it and whether the session acted on its last wake:
+ *
+ *   attempting-<agent>  before each poll
+ *   watching-<agent>    after each poll that got an authenticated answer
+ *   woke-<agent>        after a wake line was accepted (flushed) by the session
  */
 
 export const DEFAULT_STALL_MINUTES = 10;
@@ -24,6 +32,22 @@ export const MAX_STALL_MINUTES = 1440;
 
 export function activityDir(): string {
   return dirname(socketPath());
+}
+
+export type SignalKind = 'attempting' | 'watching' | 'woke';
+
+/** Sets `<kind>-<agent>` in the run directory to now. The file is opened
+ * without following a symlink, created 0600 if missing, and its times set
+ * through the descriptor. Throws on failure; callers treat it as best effort. */
+export function touchSignal(dir: string, kind: SignalKind, handle: string): void {
+  const path = join(dir, `${kind}-${validateHandle(handle)}`);
+  const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | (constants.O_NOFOLLOW ?? 0), 0o600);
+  try {
+    const now = new Date();
+    futimesSync(fd, now, now);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /** A signal file's mtime (ms), or null unless it is a regular file owned by
@@ -69,14 +93,92 @@ export function promptSignal(handle: string, dir = activityDir()): PromptSignal 
 /** "02:05 UTC" */
 export const clock = (ms: number) => `${new Date(ms).toISOString().slice(11, 16)} UTC`;
 
-/** One `status` line for an agent. */
-export function statusLine(handle: string, signal: PromptSignal): string {
+/** How recently a poll must have succeeded for the agent to count as
+ * watched. A long poll waits at most 25 s, then the next one starts. */
+export const WATCHED_MS = 120_000;
+
+export interface WatchSignal {
+  attempting: number | null;
+  watching: number | null;
+  woke: number | null;
+  /** The last tool call (`activity-`), for "acted since". */
+  activity: number | null;
+  /** Whether this client's hooks report tool calls at all. */
+  reports: boolean;
+  /** Whether a router's socket is present (else `watch` polls directly). */
+  router: boolean;
+}
+
+export function watchSignal(handle: string, dir = activityDir(), router = false): WatchSignal {
+  const at = (kind: string) => (HANDLE_RE.test(handle) ? mtime(join(dir, `${kind}-${handle}`)) : null);
+  const activity = at('activity');
+  return {
+    attempting: at('attempting'),
+    watching: at('watching'),
+    woke: at('woke'),
+    activity,
+    reports: activity !== null || at('blocked') !== null,
+    router,
+  };
+}
+
+/** "12 min", or "9 h" from two hours on. */
+export function span(ms: number): string {
+  const mins = Math.max(0, Math.floor(ms / 60_000));
+  return mins < 120 ? `${mins} min` : `${Math.floor(mins / 60)} h`;
+}
+
+/** "00:40 UTC", with the date when it isn't today (UTC). */
+function at(ms: number, now: number): string {
+  const iso = new Date(ms).toISOString();
+  const day = iso.slice(0, 10) === new Date(now).toISOString().slice(0, 10) ? '' : `${iso.slice(0, 10)} `;
+  return `${day}${iso.slice(11, 16)} UTC`;
+}
+
+/** "12 min ago (00:40 UTC)". */
+export function ago(ms: number, now = Date.now()): string {
+  return `${now - ms < 60_000 ? 'just now' : `${span(now - ms)} ago`} (${at(ms, now)})`;
+}
+
+const START_IT =
+  'nothing is pushed to this agent. Start its monitor (in Claude Code, restart the session) or router, or check Tilori yourself with whats_new.';
+const CHECK = "check the agent's key and network (the tilori-agent log says which).";
+const FAILING = `a monitor or router is running, but its polls are failing; ${CHECK}`;
+
+/** One `status` line for an agent: whether anything is watching it, its
+ * last wake and whether the session acted since, or the prompt it is
+ * blocked on. Built from file times only. */
+export function statusLine(
+  handle: string,
+  signal: PromptSignal,
+  watch: WatchSignal,
+  opts: { now?: number; stallMinutes?: number } = {},
+): string {
+  const now = opts.now ?? Date.now();
   if (signal.blockedSince !== null) return `${handle}: blocked on a prompt since ${clock(signal.blockedSince)}`;
-  if (signal.reports) return `${handle}: ok`;
-  // Without a router (watch mode polling directly) nothing creates the run
-  // directory, so the hooks can't report anything: say so, not "the client".
-  if (!signal.tracked) return `${handle}: ok (prompts not tracked: no router running)`;
-  return `${handle}: ok (this client can't report prompts)`;
+  const failing = watch.attempting !== null && now - watch.attempting < WATCHED_MS;
+  if (watch.watching === null) {
+    // A first long poll can take 25 s to answer, so a fresh attempt with no
+    // success yet may just be starting.
+    return failing
+      ? `${handle}: never watched on this machine: a monitor or router is polling, but no poll has succeeded yet; if this lasts more than a minute, ${CHECK}`
+      : `${handle}: never watched on this machine: ${START_IT}`;
+  }
+  if (now - watch.watching >= WATCHED_MS) {
+    const why = failing && watch.attempting! > watch.watching ? FAILING : START_IT;
+    return `${handle}: not watched for ${span(now - watch.watching)} (since ${at(watch.watching, now)}): ${why}`;
+  }
+  let wake = 'no wakes yet';
+  if (watch.woke !== null) {
+    wake = `last wake ${ago(watch.woke, now)}`;
+    // stall_minutes 0 turns off the router's log line only; status still
+    // needs a point at which "no action yet" becomes "no action for".
+    const stallMs = (opts.stallMinutes || DEFAULT_STALL_MINUTES) * 60_000;
+    if (watch.activity !== null && watch.activity >= watch.woke) wake += ', acted since';
+    else if (watch.reports)
+      wake += now - watch.woke < stallMs ? ', no action yet' : `, no action for ${span(now - watch.woke)}`;
+  }
+  return `${handle}: watched; ${wake}; ${watch.router ? 'polled by the router' : 'polled directly'}`;
 }
 
 /** Validates `stall_minutes` (default 10; 0 turns the stall line off; at

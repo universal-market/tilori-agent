@@ -22,9 +22,12 @@ function safeId(value: unknown): string {
 
 /** Reduces delivered events to fixed-vocabulary references. Author-supplied
  * fields (summary, titles, names) are dropped here and never reach a host. */
-export function toRefs(deliveries: AgentDelivery[]): EventRef[] {
+export function toRefs(deliveries: AgentDelivery[], direct?: ReadonlySet<string>): EventRef[] {
   const refs: EventRef[] = [];
   for (const d of deliveries) {
+    // Addressed to the agent only when the batch was polled on one of its
+    // own inbox or mentions subscriptions; nothing in the event can say so.
+    const toYou = direct?.has(d.subscription_id) === true;
     for (const e of d.events) {
       const ref: EventRef = {
         id: safeId(e.id),
@@ -36,6 +39,7 @@ export function toRefs(deliveries: AgentDelivery[]): EventRef[] {
       const rev = e.data?.revision;
       if (REVISION_KINDS.has(ref.kind) && typeof rev === 'number' && Number.isInteger(rev) && rev > 0 && rev <= 1_000_000)
         ref.revision = rev;
+      if (toYou && ref.kind === 'post.created' && ref.entity_type === 'post') ref.to_you = true;
       refs.push(ref);
     }
   }
@@ -60,6 +64,12 @@ export function dedupeRefs(refs: EventRef[]): EventRef[] {
     // Among edits of one post, the newest revision stands for the rest.
     if (rank > prevRank || (rank === prevRank && (ref.revision ?? 0) > (prev?.revision ?? 0))) byEntity.set(key, ref);
   }
+  // The same post on the public stream and in the inbox: whichever copy
+  // stands keeps the inbox copy's "to you".
+  for (const ref of refs) {
+    const kept = byEntity.get(refKey(ref))!;
+    if (ref.to_you && kept.kind === 'post.created') kept.to_you = true;
+  }
   return refs.filter((ref) => byEntity.get(refKey(ref)) === ref);
 }
 
@@ -68,18 +78,18 @@ export function refKey(ref: EventRef): string {
   return `${ref.entity_type}:${ref.conversation_id ?? ref.entity_id}`;
 }
 
-export function buildWake(agent: string, deliveries: AgentDelivery[], wakeId: string): Wake {
+export function buildWake(agent: string, deliveries: AgentDelivery[], wakeId: string, direct?: ReadonlySet<string>): Wake {
   return {
     wake_id: wakeId,
     agent,
-    events: dedupeRefs(toRefs(deliveries)),
+    events: dedupeRefs(toRefs(deliveries, direct)),
     resync_required: deliveries.some((d) => d.resync_required),
   };
 }
 
 function describe(ref: EventRef): string {
   if (ref.entity_type === 'conversation') return `${ref.kind} conversation ${ref.conversation_id ?? ref.entity_id}`;
-  return `${ref.kind} ${ref.entity_type} ${ref.entity_id}`;
+  return `${ref.kind} ${ref.entity_type} ${ref.entity_id}${ref.to_you ? ' (reply to you)' : ''}`;
 }
 
 /**
@@ -181,6 +191,7 @@ export function sanitizeWake(raw: any, agent: string): Wake | null {
       entity_id: safeId(e?.entity_id),
     };
     if (e?.conversation_id !== undefined) ref.conversation_id = safeId(e.conversation_id);
+    if (e?.to_you === true && ref.kind === 'post.created' && ref.entity_type === 'post') ref.to_you = true;
     return ref;
   });
   const wake: Wake = { wake_id: raw.wake_id, agent, events, resync_required: raw.resync_required === true };
