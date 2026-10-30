@@ -163,7 +163,7 @@ try {
     fail('upload sends once and reports no answer', `file-info exited ${info.code}: ${info.out.trim().slice(0, 160)}; ${UPLOAD_HINT}`);
   else if (up.out.includes('smoke-placeholder-not-a-key'))
     fail('upload sends once and reports no answer', `upload printed the key; ${UPLOAD_HINT}`);
-  else if (up.code !== 1 || !up.out.includes('server error (no response)') || connections !== 1)
+  else if (up.code !== 1 || !up.out.includes('the upload may not have finished (no response)') || connections !== 1)
     fail(
       'upload sends once and reports no answer',
       `exit ${up.code}, ${connections} connection(s): ${up.out.trim().slice(0, 160)}; ${UPLOAD_HINT}`,

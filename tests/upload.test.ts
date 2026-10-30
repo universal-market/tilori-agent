@@ -121,7 +121,7 @@ describe('upload: what is sent', () => {
     expect(r).toEqual({
       code: 1,
       out: '',
-      err: 'tilori-agent: refused by the server (403): check that this is your own attachment, prepared with this agent\n',
+      err: "tilori-agent: this id isn't open for upload (403): if you already ran upload for it, call complete_attachment_upload; otherwise prepare again with a new idempotency_key and upload the new id\n",
     });
   });
 
@@ -130,10 +130,10 @@ describe('upload: what is sent', () => {
       401: 'refused by the server (401): check that this is your own attachment, prepared with this agent',
       404: 'no such upload: use the attachment_id that prepare_attachment_upload returned',
       409: 'already uploaded: go on to complete_attachment_upload',
-      410: 'the upload expired; prepare again with a new idempotency_key',
+      410: "this id isn't open for upload (410): if you already ran upload for it, call complete_attachment_upload; otherwise prepare again with a new idempotency_key and upload the new id",
       422: 'size differs from what was prepared; prepare again with the exact byte_size from tilori-agent file-info',
-      500: 'server error (500), nothing was stored: run the same command once more; if it fails again, tell your user',
-      503: 'server error (503), nothing was stored: run the same command once more; if it fails again, tell your user',
+      500: 'the upload may not have finished (500): call complete_attachment_upload; if it says ATTACHMENT_NOT_READY, prepare again with a new idempotency_key and upload the new id',
+      503: 'the upload may not have finished (503): call complete_attachment_upload; if it says ATTACHMENT_NOT_READY, prepare again with a new idempotency_key and upload the new id',
       418: 'unexpected status 418: tell your user',
     };
     for (const [status, line] of Object.entries(lines)) {
@@ -153,7 +153,7 @@ describe('upload: what is sent', () => {
     const r = await cli('upload', ID, file('a.png'), '--bytes', '12');
     expect(r.code).toBe(1);
     expect(r.err).toBe(
-      'tilori-agent: server error (no response), nothing was stored: run the same command once more; if it fails again, tell your user\n',
+      'tilori-agent: the upload may not have finished (no response): call complete_attachment_upload; if it says ATTACHMENT_NOT_READY, prepare again with a new idempotency_key and upload the new id\n',
     );
   });
 
@@ -171,7 +171,7 @@ describe('upload: what is sent', () => {
     release?.();
     expect(r).toEqual({
       code: 1,
-      line: 'server error (no answer in 0.2 s), nothing was stored: run the same command once more; if it fails again, tell your user',
+      line: 'the upload may not have finished (no answer in 0.2 s): call complete_attachment_upload; if it says ATTACHMENT_NOT_READY, prepare again with a new idempotency_key and upload the new id',
     });
   });
 });
@@ -231,6 +231,7 @@ describe('upload: refused locally, nothing sent (exit 2)', () => {
     const p = file('a.png');
     await refused(['upload', 'not-a-uuid', p, '--bytes', '12'], 'attachment_id must be the UUID that prepare_attachment_upload returned');
     await refused(['upload', ID, p, '--bytes', '12.0'], '--bytes must be a whole number of bytes, at most 20 MiB');
+    await refused(['upload', ID, p, '--bytes', String(MAX_UPLOAD_BYTES + 1)], "over 20 MiB; Tilori won't take it");
     await refused(['upload', ID, p], 'upload needs --bytes <n>: use the byte_size from tilori-agent file-info');
     await refused(['upload', ID, '--bytes', '12'], 'usage: tilori-agent upload <attachment_id> <file> --bytes <n>');
   });

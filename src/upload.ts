@@ -107,9 +107,8 @@ export function fileInfo(path: string): { byte_size: number; media_type: string 
 /** Parses `--bytes`: a whole number from 0 to 20 MiB. */
 export function parseBytes(raw: string | undefined): number {
   if (raw === undefined) throw new LocalRefusal('upload needs --bytes <n>: use the byte_size from tilori-agent file-info');
-  if (!/^\d{1,9}$/.test(raw) || Number(raw) > MAX_UPLOAD_BYTES) {
-    throw new LocalRefusal("--bytes must be a whole number of bytes, at most 20 MiB");
-  }
+  if (!/^\d+$/.test(raw)) throw new LocalRefusal('--bytes must be a whole number of bytes, at most 20 MiB');
+  if (raw.length > 9 || Number(raw) > MAX_UPLOAD_BYTES) throw new LocalRefusal("over 20 MiB; Tilori won't take it");
   return Number(raw);
 }
 
@@ -139,21 +138,28 @@ export function statusLine(status: number, id: string, size: number): UploadResu
   }
   const refused = (line: string): UploadResult => ({ code: 1, line });
   if (status >= 300 && status < 400) return refused(`the server answered with a redirect (${status}); not followed, nothing sent there: tell your user`);
-  if (status === 401 || status === 403) {
-    return refused(`refused by the server (${status}): check that this is your own attachment, prepared with this agent`);
+  if (status === 401) return refused('refused by the server (401): check that this is your own attachment, prepared with this agent');
+  // #364 claims an id before reading the bytes, so any second PUT for it is
+  // refused (410 there; 403 kept for the same case). The first may have
+  // landed, so complete_attachment_upload is the way to find out.
+  if (status === 403 || status === 410) {
+    return refused(
+      `this id isn't open for upload (${status}): if you already ran upload for it, call complete_attachment_upload; otherwise prepare again with a new idempotency_key and upload the new id`,
+    );
   }
   if (status === 404) return refused('no such upload: use the attachment_id that prepare_attachment_upload returned');
   if (status === 409) return refused('already uploaded: go on to complete_attachment_upload');
-  if (status === 410) return refused('the upload expired; prepare again with a new idempotency_key');
   if (status === 422) {
     return refused('size differs from what was prepared; prepare again with the exact byte_size from tilori-agent file-info');
   }
-  if (status >= 500) return refused(serverError(String(status)));
+  if (status >= 500) return refused(mayNotHaveFinished(String(status)));
   return refused(`unexpected status ${status}: tell your user`);
 }
 
-const serverError = (what: string) =>
-  `server error (${what}), nothing was stored: run the same command once more; if it fails again, tell your user`;
+/** The bytes may or may not have been stored, and the id is spent either way:
+ * a second upload can't succeed, so the next step is to ask the server. */
+const mayNotHaveFinished = (what: string) =>
+  `the upload may not have finished (${what}): call complete_attachment_upload; if it says ATTACHMENT_NOT_READY, prepare again with a new idempotency_key and upload the new id`;
 
 export interface UploadOptions {
   /** `keyUrl(config).origin`: the only place the key may go. */
@@ -206,8 +212,8 @@ export async function upload(o: UploadOptions): Promise<UploadResult> {
     return done(statusLine(res.status, o.id, file.size));
   } catch (cause) {
     const name = (cause as Error)?.name;
-    if (name === 'TimeoutError') return done({ code: 1, line: serverError(`no answer in ${timeoutMs / 1000} s`) });
-    if (name === 'AbortError') return done({ code: 1, line: 'stopped before the server answered: run the same command once more' });
-    return done({ code: 1, line: serverError('no response') });
+    if (name === 'TimeoutError') return done({ code: 1, line: mayNotHaveFinished(`no answer in ${timeoutMs / 1000} s`) });
+    if (name === 'AbortError') return done({ code: 1, line: mayNotHaveFinished('stopped before the server answered') });
+    return done({ code: 1, line: mayNotHaveFinished('no response') });
   }
 }
