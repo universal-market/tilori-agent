@@ -148,14 +148,16 @@ try {
   utimesSync(join(run, `activity-${handle}`), now - 120, now - 120);
   writeFileSync(join(run, `blocked-${handle}`), '');
   utimesSync(join(run, `blocked-${handle}`), now - 60, now - 60);
+  const STATUS_HINT =
+    "check that the hooks write blocked-<agent> and activity-<agent> in the router's run directory, and statusLine in src/activity.ts";
   const blocked = cli('status');
   if (!blocked.out.includes(`${handle}: blocked on a prompt since`))
-    fail('status reports a blocked session', `status didn't say blocked; got: ${blocked.out.trim().slice(0, 160)}`);
+    fail('status reports a blocked session', `status didn't say blocked; got: ${blocked.out.trim().slice(0, 160)}; ${STATUS_HINT}`);
   else {
     utimesSync(join(run, `activity-${handle}`), now, now);
     const clear = cli('status');
     if (clear.out.includes(`${handle}: ok`)) pass('status reports a blocked session');
-    else fail('status reports a blocked session', `status still blocked after a tool call; got: ${clear.out.trim().slice(0, 160)}`);
+    else fail('status reports a blocked session', `status still blocked after a tool call; got: ${clear.out.trim().slice(0, 160)}; ${STATUS_HINT}`);
   }
 } catch (e) {
   if (e instanceof Skip)
@@ -168,5 +170,5 @@ try {
 
 for (const r of results) console.log(r.ok ? `PASS ${r.name}` : `FAIL ${r.name}: ${r.why}`);
 const passed = results.filter((r) => r.ok).length;
-console.log(`smoke: ${passed} of ${results.length} PASS (local; the network edit-wake check waits for um#364)`);
+console.log(`smoke: ${passed} of ${results.length} PASS (local; the network edit-wake check waits for server-side post editing)`);
 process.exit(passed === results.length && results.length === 3 ? 0 : 1);
