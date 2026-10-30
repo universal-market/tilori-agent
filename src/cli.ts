@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { promptSignal, stallMinutes, statusLine } from './activity.ts';
+import { activityDir, promptSignal, stallMinutes, statusLine, watchSignal } from './activity.ts';
 import { TiloriAgentClient, ToolRefused } from './client.ts';
 import {
   buildMcpUrl,
@@ -18,13 +18,13 @@ import {
   type TiloriConfig,
 } from './config.ts';
 import { ExecInjector } from './injectors/exec.ts';
-import { routerUsage, serveRouter, socketPath } from './ipc.ts';
+import { routerUsage, serveRouter, socketIdentity, socketPath } from './ipc.ts';
 import { keyPath, readKey, redact, tiloriHome, validateHandle, writeKey } from './keys.ts';
 import { Router, type RouterAgentConfig } from './router.ts';
 import { SETTABLE, applyChanges, followConfig, parseAssignment, resetEdit, showText } from './settings.ts';
 import type { AgentSubscription } from './types.ts';
 import { UpdateNotice } from './update-notice.ts';
-import { runNotifyLines } from './watch.ts';
+import { runNotifyLines, signalDir } from './watch.ts';
 
 const USAGE = `tilori-agent: wake local coding agents on Tilori events
 
@@ -47,13 +47,13 @@ Usage:
       One router per person per machine for every agent with a key file.
       Injectors attach over ${'$'}XDG_RUNTIME_DIR/tilori/router.sock.
   tilori-agent status
-      One line per agent with a key: "blocked on a prompt since HH:MM UTC" while
-      its session waits on a permission or elicitation prompt, else "ok", or
-      "ok (this client can't report prompts)" when its plugin sends no such
-      signal, or "ok (prompts not tracked: no router running)". Reads only
-      two file times in the router's run directory. The router also logs a
-      blocked session once, after stall_minutes (default 10, 0 = off) with
-      wakes arriving.
+      One line per agent with a key: whether a monitor or router is watching
+      it ("watched; last wake 12 min ago (00:40 UTC), acted since (direct)"),
+      or "not watched since …" / "never watched on this machine" with what to
+      do, or "blocked on a prompt since HH:MM UTC" while its session waits on
+      a permission or elicitation prompt. Reads only file times in the run
+      directory. The router also logs a blocked session once, after
+      stall_minutes (default 10, 0 = off) with wakes arriving.
   tilori-agent ensure [--agent <handle>] [--prune [--yes]]
       Creates or renews the agent's subscriptions and prints them, plus any
       "unmanaged" ones config does not ask for (nothing polls those).
@@ -396,6 +396,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
             },
           ],
           logger: log,
+          signalDir: signalDir(log),
           waitMs,
         });
         const t = str(args, 'exec-timeout-ms') ?? settings.exec_timeout_ms;
@@ -421,7 +422,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
             stallMinutes: stallMinutes(s.stall_minutes),
           };
         });
-        const router = new Router({ agents, logger: log });
+        const router = new Router({ agents, logger: log, signalDir: activityDir() });
         for (const handle of handles) {
           const s = config.agents?.[handle];
           if (s?.injector === 'exec' && s.exec) {
@@ -461,7 +462,22 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         return 0;
       }
       case 'status': {
-        for (const handle of agentsWithKeys()) console.log(statusLine(handle, promptSignal(handle)));
+        let agents: TiloriConfig['agents'] = {};
+        try {
+          agents = loadConfig().agents ?? {};
+        } catch {
+          // No readable config: status still reports, with the default stall time.
+        }
+        const router = socketIdentity() !== null;
+        for (const handle of agentsWithKeys()) {
+          let stall: number | undefined;
+          try {
+            stall = stallMinutes(agents?.[handle]?.stall_minutes);
+          } catch {
+            stall = undefined;
+          }
+          console.log(statusLine(handle, promptSignal(handle), watchSignal(handle, undefined, router), { stallMinutes: stall }));
+        }
         return 0;
       }
       case 'key-path': {

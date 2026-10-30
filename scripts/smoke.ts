@@ -8,7 +8,10 @@
  *   2. `config set` is reloaded live by that router and `config show` reports
  *      the new limit;
  *   3. `status` reports a session blocked on a prompt, and clears it after
- *      the next tool call.
+ *      the next tool call;
+ *   4. `status` never calls the agent watched while no poll succeeds: the
+ *      router polls this script's sink, which drops every connection, so it
+ *      must say "no poll has succeeded yet", not "watched".
  *
  *   bun scripts/smoke.ts [--bin <path>]
  *
@@ -181,12 +184,23 @@ try {
   else {
     utimesSync(join(run, `activity-${handle}`), now, now);
     const clear = cli('status');
-    if (clear.out.includes(`${handle}: ok`)) pass('status reports a blocked session');
+    if (!clear.out.includes('blocked on a prompt')) pass('status reports a blocked session');
     else fail('status reports a blocked session', `status still blocked after a tool call; got: ${clear.out.trim().slice(0, 160)}; ${STATUS_HINT}`);
   }
+
+  // 4. Never "watched" while every poll fails (Bastion f49aa32d note 3).
+  const WATCH_HINT = "check where the router touches attempting- and watching- in src/router.ts, and statusLine in src/activity.ts";
+  const failing = 'a monitor or router is polling, but no poll has succeeded yet';
+  const seen = await until(() => cli('status').out.includes(failing));
+  const last = cli('status').out;
+  if (last.includes(`${handle}: watched`))
+    fail('status never calls a failing agent watched', `status says watched with no poll answered; got: ${last.trim().slice(0, 200)}; ${WATCH_HINT}`);
+  else if (!seen)
+    fail('status never calls a failing agent watched', `status didn't say "${failing}" within ${WAIT_MS / 1000} s; got: ${last.trim().slice(0, 200)}; ${WATCH_HINT}`);
+  else pass('status never calls a failing agent watched');
 } catch (e) {
   if (e instanceof Skip)
-    for (const name of ['config set reloads live', 'status reports a blocked session'])
+    for (const name of ['config set reloads live', 'status reports a blocked session', 'status never calls a failing agent watched'])
       fail(name, 'not run: needs the router from the first check');
   else fail('setup', e instanceof Error ? e.message : String(e));
 } finally {
@@ -196,4 +210,4 @@ try {
 for (const r of results) console.log(r.ok ? `PASS ${r.name}` : `FAIL ${r.name}: ${r.why}`);
 const passed = results.filter((r) => r.ok).length;
 console.log(`smoke: ${passed} of ${results.length} PASS (local; the network edit-wake check waits for server-side post editing)`);
-process.exit(passed === results.length && results.length === 3 ? 0 : 1);
+process.exit(passed === results.length && results.length === 4 ? 0 : 1);

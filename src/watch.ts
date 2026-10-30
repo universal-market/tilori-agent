@@ -1,9 +1,9 @@
-import { stallMinutes } from './activity.ts';
+import { activityDir, stallMinutes } from './activity.ts';
 import { TiloriAgentClient } from './client.ts';
 import { desiredSubscriptions, keyUrl, reminderSettings, type TiloriConfig } from './config.ts';
 import { NotifyLinesInjector } from './injectors/notify-lines.ts';
 import { attachToRouter, probeRouter, socketIdentity, socketPath } from './ipc.ts';
-import { readKey } from './keys.ts';
+import { ensurePrivateDir, readKey } from './keys.ts';
 import { Router } from './router.ts';
 import { followConfig } from './settings.ts';
 import type { Injector } from './types.ts';
@@ -21,6 +21,21 @@ export interface NotifyLinesOptions {
   routerCheckMs?: number;
   /** Says once when a newer plugin is installed than this session runs. */
   update?: UpdateNotice;
+}
+
+/** The run directory for `status`'s files when polling directly: created
+ * 0700 if missing, and refused (no files written) unless it is a real
+ * directory owned by this user with no group or other bits. The router uses
+ * the same check, so either may create it first. */
+export function signalDir(log: (m: string) => void = () => {}): string | undefined {
+  const dir = activityDir();
+  try {
+    ensurePrivateDir(dir);
+    return dir;
+  } catch (cause) {
+    log(`not writing status files: ${cause instanceof Error ? cause.message : String(cause)}`);
+    return undefined;
+  }
 }
 
 /** Builds a one-agent router that talks to Tilori directly with the agent's key. */
@@ -47,6 +62,7 @@ export function directRouter(opts: NotifyLinesOptions): Router {
     ],
     logger: opts.logger,
     waitMs: opts.waitMs,
+    signalDir: signalDir(opts.logger),
   });
 }
 

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { clock, promptSignal } from './activity.ts';
+import { clock, promptSignal, touchSignal, type SignalKind } from './activity.ts';
 import { MAX_POLL_SUBSCRIPTIONS, MultiPollUnsupported, type ProfileNotes, type TiloriAgentClient } from './client.ts';
 import { DEFAULT_DIRECT_WAKES_PER_HOUR, DEFAULT_WAKES_PER_HOUR, type Reminder } from './config.ts';
 import { WakeLimiter } from './ratelimit.ts';
@@ -61,6 +61,9 @@ export interface RouterOptions {
   coalesceMs?: number;
   /** How long a broad subscription rests after an edit wake (default 60 s). */
   editPauseMs?: number;
+  /** The run directory for `status`'s files (attempting-, watching-, woke-),
+   * or unset to write none (tests, or no private run directory). */
+  signalDir?: string;
   now?: () => number;
 }
 
@@ -195,6 +198,8 @@ export class Router {
   readonly #coalesceMs: number;
   readonly #editPauseMs: number;
   readonly #now: () => number;
+  readonly #signalDir: string | undefined;
+  readonly #signalFailed = new Set<string>();
 
   constructor(options: RouterOptions) {
     this.#log = options.logger ?? (() => {});
@@ -204,6 +209,7 @@ export class Router {
     this.#coalesceMs = options.coalesceMs ?? 3_000;
     this.#editPauseMs = options.editPauseMs ?? EDIT_PAUSE_MS;
     this.#now = options.now ?? Date.now;
+    this.#signalDir = options.signalDir;
     for (const cfg of options.agents) {
       if (this.#agents.has(cfg.handle)) throw new Error(`Agent ${cfg.handle} listed twice.`);
       this.#agents.set(cfg.handle, {
@@ -360,6 +366,9 @@ export class Router {
       for (const [key, at] of st.resubscribed) if (now - at > this.#renewEveryMs) st.resubscribed.delete(key);
       for (const [key, at] of st.dropped) if (now - at > this.#renewEveryMs) st.dropped.delete(key);
       try {
+        // Setting up counts as an attempt: a router that can't reach Tilori
+        // at all must show as polling-but-failing, not as nothing running.
+        this.#signal(handle, 'attempting');
         subs = await client.ensureSubscriptions(st.cfg.subscriptions, {
           signal,
           // Subscriptions that just failed a poll are subscribed again.
@@ -475,11 +484,13 @@ export class Router {
         if (resting.length) pauseTimer = setTimeout(() => st.onPolled?.(), Math.min(...resting));
       }
       try {
+        this.#signal(handle, 'attempting');
         const res = await client.pollMany(
           idle.map((s) => s.id),
           this.#waitMs,
           call.signal,
         );
+        this.#signal(handle, 'watching');
         failures = 0;
         let got = false;
         for (const d of res.deliveries) {
@@ -603,7 +614,9 @@ export class Router {
       }
       try {
         const started = Date.now();
+        this.#signal(handle, 'attempting');
         const { delivery: d, retryAfterMs } = await client.pollOne(sub.id, this.#waitMs, signal);
+        this.#signal(handle, 'watching');
         failures = 0;
         if (d && (d.events.length > 0 || d.resync_required)) {
           // Only the first held batch starts the hold (see #pollAgent).
@@ -698,10 +711,26 @@ export class Router {
       this.#log(`[${handle}] reminder skipped: injector ${injector.kind} busy`);
       return;
     }
+    this.#signal(handle, 'woke');
     st.limiter.record();
     st.stats.wakes++;
     st.stats.reminders++;
     this.#log(`[${handle}] woke ${injector.kind} with a reminder`);
+  }
+
+  /** Touches one of `status`'s files, best effort: a failure is logged once
+   * per file and never stops polling or a wake. */
+  #signal(handle: string, kind: SignalKind): void {
+    if (this.#signalDir === undefined) return;
+    try {
+      touchSignal(this.#signalDir, kind, handle);
+      this.#signalFailed.delete(`${kind}-${handle}`);
+    } catch (cause) {
+      const key = `${kind}-${handle}`;
+      if (this.#signalFailed.has(key)) return;
+      this.#signalFailed.add(key);
+      this.#log(`[${handle}] could not update ${kind}- in the run directory: ${errText(cause)}`);
+    }
   }
 
   /** After an accepted wake: if the session's host reports it blocked on a
@@ -841,7 +870,7 @@ export class Router {
         send = direct;
         limiter = st.directLimiter!;
       }
-      const wake = buildWake(handle, send, randomUUID());
+      const wake = buildWake(handle, send, randomUUID(), st.directSubs);
       // Counted from batches, not wake.events, which may be deduplicated.
       const events = (ds: AgentDelivery[]) => ds.reduce((n, d) => n + d.events.length, 0);
       // Leave out posts an earlier wake already named; count the events
@@ -875,6 +904,7 @@ export class Router {
       }
       st.busy = 0;
       st.retryAt = 0;
+      this.#signal(handle, 'woke');
       limiter.record();
       if (st.cfg.reminder?.onlyWhenIdle) st.reminderAt = Date.now() + st.cfg.reminder.everyMs;
       st.stats.wakes++;
