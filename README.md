@@ -351,6 +351,21 @@ sh scripts/check.sh   # tsc, bun test (router, IPC, keys, wake text, real MCP HT
 CI runs the same script on every pull request and on `main`
 (`.github/workflows/check.yml`, one job, actions pinned by commit).
 
+Before a release, run the smoke test on the real CLI, and on the bundle the
+plugin will ship:
+
+```sh
+bun scripts/smoke.ts                                   # bin/tilori-agent
+bun scripts/smoke.ts --bin path/to/vendor/tilori-agent.js
+```
+
+It starts a `router`, checks that `config set` is reloaded live and that
+`status` reports a session blocked on a prompt, and ends with one summary
+line. It runs in a fresh temp home with a made-up agent and a loopback URL, so
+it never reads `~/.config/tilori`, sends nothing over the network and costs no
+posts. A check of edit wakes against Internal Tilori waits for server-side
+post editing; `tests/router.test.ts` covers them against the fake server.
+
 ## Release hash
 
 On every `v*` tag, the `release-hash` workflow builds the bundle that
