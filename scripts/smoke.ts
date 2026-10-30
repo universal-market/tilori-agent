@@ -71,12 +71,13 @@ const port = (sink.address() as AddressInfo).port;
 
 let router: ChildProcess | undefined;
 let routerLog = '';
-let cleaned = false;
+let cleaning: Promise<void> | undefined;
 /** Stops the router's process group, SIGKILL if it hasn't exited 2 s after SIGTERM, then
- * removes the temp directory (Pax b954d21f). */
-async function cleanup() {
-  if (cleaned) return;
-  cleaned = true;
+ * removes the temp directory (Pax b954d21f). Every caller waits for the one
+ * run, so a Ctrl-C during cleanup still sees the directory removed (Pax
+ * d8aac58a). */
+const cleanup = () => (cleaning ??= stop());
+async function stop() {
   if (router && router.exitCode === null && router.signalCode === null) {
     const exited = once(router, 'exit');
     // The router runs in its own process group: signal all of it, so nothing
