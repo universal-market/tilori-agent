@@ -15,7 +15,7 @@
  * Nothing here reads or writes the real ~/.config/tilori: every process gets
  * a fresh 0700 temp HOME, TILORI_HOME and TILORI_SOCKET, a minimal config for
  * a made-up agent, and a placeholder key that only ever goes to a loopback
- * port nothing listens on. No network, no Tilori post budget. The temp
+ * port this script holds and that drops every connection. No network, no Tilori post budget. The temp
  * directory and the router are removed on PASS, FAIL, timeout and Ctrl-C.
  *
  * The edit-wake check against Internal Tilori waits for server-side post
@@ -23,7 +23,9 @@
  */
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import { once } from 'node:events';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { createServer, type AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
@@ -59,18 +61,42 @@ const env: Record<string, string> = {
   TILORI_SOCKET: sock,
 };
 
+// The router's Tilori URL: a loopback port this script holds and that drops
+// every connection, so the placeholder key reaches nothing else (Pax
+// b954d21f).
+const sink = createServer((c) => c.destroy());
+sink.listen(0, '127.0.0.1');
+await once(sink, 'listening');
+const port = (sink.address() as AddressInfo).port;
+
 let router: ChildProcess | undefined;
 let routerLog = '';
 let cleaned = false;
-function cleanup() {
+/** Stops the router's process group, SIGKILL if it hasn't exited 2 s after SIGTERM, then
+ * removes the temp directory (Pax b954d21f). */
+async function cleanup() {
   if (cleaned) return;
   cleaned = true;
-  router?.kill('SIGTERM');
+  if (router && router.exitCode === null && router.signalCode === null) {
+    const exited = once(router, 'exit');
+    // The router runs in its own process group: signal all of it, so nothing
+    // it started outlives the run.
+    const group = (sig: NodeJS.Signals) => {
+      try {
+        process.kill(-router!.pid!, sig);
+      } catch {}
+    };
+    group('SIGTERM');
+    const timer = setTimeout(() => group('SIGKILL'), 2000);
+    await exited;
+    clearTimeout(timer);
+  }
+  sink.close();
   rmSync(root, { recursive: true, force: true });
 }
 for (const sig of ['SIGINT', 'SIGTERM'] as const)
-  process.on(sig, () => {
-    cleanup();
+  process.on(sig, async () => {
+    await cleanup();
     console.log(`smoke: interrupted (${sig}); temp files removed`);
     process.exit(130);
   });
@@ -98,17 +124,15 @@ const fail = (name: string, why: string) => results.push({ name, ok: false, why 
 try {
   mkdirSync(join(home, 'agents'), { recursive: true, mode: 0o700 });
   chmodSync(home, 0o700);
-  // Port 9 (discard) on loopback: the router's connection attempts fail
-  // locally, so the placeholder key never leaves the machine.
   writeFileSync(
     join(home, 'config.json'),
-    JSON.stringify({ url: 'http://127.0.0.1:9/mcp/tilori/v1', agents: { [handle]: {} } }, null, 2) + '\n',
+    JSON.stringify({ url: `http://127.0.0.1:${port}/mcp/tilori/v1`, agents: { [handle]: {} } }, null, 2) + '\n',
     { mode: 0o600 },
   );
   writeFileSync(join(home, 'agents', `${handle}.key`), 'smoke-placeholder-not-a-key\n', { mode: 0o600 });
 
   // 1. The router starts and serves.
-  router = spawn(command[0], [...command.slice(1), 'router'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  router = spawn(command[0], [...command.slice(1), 'router'], { env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
   router.stdout?.on('data', (d) => (routerLog += d));
   router.stderr?.on('data', (d) => (routerLog += d));
   const serving = await until(() => routerLog.includes(`router serving ${handle}`) && existsSync(sock));
@@ -165,7 +189,7 @@ try {
       fail(name, 'not run: needs the router from the first check');
   else fail('setup', e instanceof Error ? e.message : String(e));
 } finally {
-  cleanup();
+  await cleanup();
 }
 
 for (const r of results) console.log(r.ok ? `PASS ${r.name}` : `FAIL ${r.name}: ${r.why}`);
