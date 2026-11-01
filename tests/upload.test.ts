@@ -94,7 +94,7 @@ describe('upload: what is sent', () => {
     const r = await cli('upload', ID, p, '--bytes', String(PNG.length));
     expect(r).toEqual({
       code: 0,
-      out: `uploaded ${ID} (12 bytes); next: complete_attachment_upload, then put {{tum:attachment:${ID}}} in the post body\n`,
+      out: `uploaded ${ID} (12 bytes); next: complete_attachment_upload, then put {{um:attachment:${ID}}} in the post body\n`,
       err: '',
     });
     expect(seen).toHaveLength(1);

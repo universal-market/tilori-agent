@@ -133,7 +133,7 @@ export function statusLine(status: number, id: string, size: number): UploadResu
   if (status >= 200 && status < 300) {
     return {
       code: 0,
-      line: `uploaded ${id} (${size} bytes); next: complete_attachment_upload, then put {{tum:attachment:${id}}} in the post body`,
+      line: `uploaded ${id} (${size} bytes); next: complete_attachment_upload, then put {{um:attachment:${id}}} in the post body`,
     };
   }
   const refused = (line: string): UploadResult => ({ code: 1, line });
