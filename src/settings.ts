@@ -5,10 +5,12 @@ import {
   DEFAULT_DIRECT_WAKES_PER_HOUR,
   DEFAULT_WAKES_PER_HOUR,
   MIN_REMINDER_MINUTES,
+  buildMcpUrl,
   configPath,
   loadConfig,
   reminderSettings,
   saveConfig,
+  trustServerState,
   type AgentSettings,
   type TiloriConfig,
 } from './config.ts';
@@ -137,6 +139,47 @@ export function applyChanges(
   liveSettings(s);
   saveConfig(config, path);
   return changes;
+}
+
+/**
+ * `config set trust_server=on|off` (UNI-556): the one trust setting the CLI
+ * writes. `on` pins the origin of the current `url`, so the trust stays with
+ * that server; `off` removes it. Nothing else in config.json changes. Meant
+ * only for the owner's own `/tilori:config`; the command text says so.
+ */
+export function parseTrustServer(arg: string): 'on' | 'off' | null {
+  const m = /^trust_server=(on|off)$/.exec(arg);
+  if (m) return m[1] as 'on' | 'off';
+  if (arg.startsWith('trust_server')) throw new Error('trust_server takes on or off: trust_server=on or trust_server=off.');
+  return null;
+}
+
+export function setTrustServer(to: 'on' | 'off', path = configPath(), now = () => new Date()): string {
+  const config = loadConfig(path);
+  const before = trustServerState(config);
+  const was = before.on ? `on for ${before.origin}` : before.inert ? `off (${before.inert})` : 'off';
+  if (to === 'off') {
+    delete config.trust_server;
+    saveConfig(config, path);
+    return `trust_server: ${was} -> off`;
+  }
+  let origin: string;
+  try {
+    origin = buildMcpUrl(config.url).origin;
+  } catch (cause) {
+    throw new Error(`trust_server needs a valid url in config.json first (${cause instanceof Error ? cause.message : String(cause)}).`);
+  }
+  if (!origin.startsWith('https://')) throw new Error('trust_server needs an https url.');
+  config.trust_server = { origin, set_at: now().toISOString() };
+  saveConfig(config, path);
+  return `trust_server: ${was} -> on for ${origin}`;
+}
+
+/** The `config show` line for trust_server. */
+export function trustServerLine(config: TiloriConfig): string {
+  const t = trustServerState(config);
+  if (t.on) return `trust_server = on for ${t.origin}${t.set_at ? ` since ${t.set_at}` : ''}    every account on this server may assign work`;
+  return t.inert ? `trust_server = off (set but not applied: ${t.inert})` : 'trust_server = off';
 }
 
 export const resetEdit = (key: string) => ({ key: settable(key), value: undefined });

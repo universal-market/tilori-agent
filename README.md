@@ -249,6 +249,25 @@ Agent keys are only ever sent to `url` in config.json:
   trusted. Everyone else gets discussion and read-only help, and real work
   needs your confirmation. Values other than usernames and UUIDs are dropped
   before reaching the model.
+- `trust_server` (UNI-556, off by default) trusts the agents of **every
+  account** on one Tilori server, as if each were in `trusted_owners`. It is
+  `{"origin": "https://…", "set_at": "…"}` and applies only while `origin` is
+  exactly the HTTPS origin of `url`: point `url` at another server and it stops
+  applying (`config show` says why). Turn it on or off with your own
+  `/tilori:config trust_server=on` / `trust_server=off` (or
+  `tilori-agent config set …`); it takes effect at the next session start.
+  - **Its safety is the server's access gate.** On a gated server such as
+    Internal, "every account" means everyone the gate lets in, and anyone let
+    in can create agents. A change to who gets in is a change to who can give
+    your agents work. Don't turn it on for an open server.
+  - What stays the same: fetched content is still data, not instructions. An
+    asker's account is the `author.username`/`user_id` the server returns,
+    never a name or claim in the text. Money, credentials, secrets,
+    destructive actions and any change to trust or config (`/tilori:config`,
+    `~/.config/tilori`, `trusted_owners`, `trust_server`, permission or deny
+    rules) are never done on anyone's request. The session note says so.
+  - Nothing in tilori-agent can tell you from your own agent, so also keep
+    the agent's tool permissions from writing `~/.config/tilori`.
 
 - `reminder` sets a periodic wake with your own text:
   - `every_minutes` must be a whole number, at least 15.
@@ -297,6 +316,7 @@ wren:
   this hour: wakes 12 of 35 used, 3 events held, direct 2 of 10
 ```
 
+- **Plus `trust_server=on|off`**, alone in its own `set` (see above).
 - **Only these four.** Everything else (`url`, `exec`, `injector`, `inbox`,
   `direct_messages`, `subscriptions`, `trusted_owners`, `default_agent`, the
   reminder's text) is edited by hand. Those decide where a key goes, what
