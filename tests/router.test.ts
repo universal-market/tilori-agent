@@ -25,6 +25,7 @@ function setup(
     posts?: boolean;
     now?: () => number;
     coalesceMs?: number;
+    plainHoldMs?: number;
     editPauseMs?: number;
     subscriptions?: SubscriptionSpec[];
     reminder?: { everyMs: number; prompt: string; onlyWhenIdle: boolean };
@@ -49,6 +50,7 @@ function setup(
     waitMs: 10,
     retryMs: 10,
     coalesceMs: opts.coalesceMs ?? 0,
+    plainHoldMs: opts.plainHoldMs ?? 0,
     editPauseMs: opts.editPauseMs ?? 0,
     now: opts.now,
   });
@@ -1248,5 +1250,116 @@ describe('router', () => {
       expect(inj.wakes[0].reminder).toBe('Look for work.');
       expect(inj.wakes[0].posts_left).toBe(5);
     });
+  });
+});
+
+// UNI-573: plain new posts from a broad subscription wait for an inbox copy
+// of the same post, so a mention never loses its wake to its plain copy.
+describe('plain-post hold', () => {
+  const subscriptions = desiredSubscriptions({ direct_messages: false, subscriptions: [{ scope: { type: 'posts' } }] });
+
+  test('an inbox copy inside the hold makes one mention wake', async () => {
+    const { fake, router, ac, done } = setup({ plainHoldMs: 600, subscriptions });
+    await until(() => fake.subs.length === 2);
+    const inj = new Recorder();
+    router.register('wren', inj);
+    const m = mention();
+    fake.push('posts', [{ ...m, id: randomUUID(), kind: 'post.created' }]);
+    await Bun.sleep(150);
+    expect(inj.wakes).toHaveLength(0);
+    fake.push('inbox', [m]);
+    await until(() => fake.acks.length === 2);
+    expect(inj.wakes).toHaveLength(1);
+    expect(inj.wakes[0].events).toEqual([expect.objectContaining({ kind: 'mention', entity_id: m.entity_id })]);
+    ac.abort();
+    await done;
+  });
+
+  test('a plain post with no inbox copy goes out alone at its deadline, not before', async () => {
+    const { fake, router, ac, done } = setup({ plainHoldMs: 400, subscriptions });
+    await until(() => fake.subs.length === 2);
+    const inj = new Recorder();
+    router.register('wren', inj);
+    const t0 = Date.now();
+    fake.push('posts', [post()]);
+    await until(() => inj.wakes.length === 1, 3000);
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(350);
+    expect(inj.wakes[0].events[0].kind).toBe('post.created');
+    ac.abort();
+    await done;
+  });
+
+  test('a direct batch alone is not held', async () => {
+    const { fake, router, ac, done } = setup({ plainHoldMs: 5000, subscriptions });
+    await until(() => fake.subs.length === 2);
+    const inj = new Recorder();
+    router.register('wren', inj);
+    const t0 = Date.now();
+    fake.push('inbox', [mention()]);
+    await until(() => inj.wakes.length === 1, 3000);
+    expect(Date.now() - t0).toBeLessThan(2000);
+    ac.abort();
+    await done;
+  });
+
+  test('a flood of plain posts does not push the first one past its deadline', async () => {
+    const { fake, router, ac, done } = setup({ plainHoldMs: 500, subscriptions });
+    await until(() => fake.subs.length === 2);
+    const inj = new Recorder();
+    router.register('wren', inj);
+    const t0 = Date.now();
+    let flooding = true;
+    const flood = (async () => {
+      while (flooding) {
+        fake.push('posts', [post()]);
+        await Bun.sleep(50);
+      }
+    })();
+    await until(() => inj.wakes.length >= 1, 3000);
+    const at = Date.now() - t0;
+    flooding = false;
+    await flood;
+    expect(at).toBeGreaterThanOrEqual(450);
+    expect(at).toBeLessThan(1500);
+    ac.abort();
+    await done;
+  });
+
+  test('stopping during the hold acks nothing, and a restart re-serves the post', async () => {
+    const fake = new FakeTilori();
+    const mk = () =>
+      new Router({
+        agents: [{ handle: 'wren', client: fake.client(), subscriptions }],
+        waitMs: 10,
+        retryMs: 10,
+        coalesceMs: 0,
+        plainHoldMs: 5000,
+      });
+    const ac = new AbortController();
+    const done = mk().run(ac.signal);
+    await until(() => fake.subs.length === 2);
+    const p = post();
+    fake.push('posts', [p]);
+    await until(() => fake.polls.length > 2);
+    await Bun.sleep(100);
+    ac.abort();
+    await done;
+    expect(fake.acks).toEqual([]);
+
+    const ac2 = new AbortController();
+    const router2 = new Router({
+      agents: [{ handle: 'wren', client: fake.client(), subscriptions }],
+      waitMs: 10,
+      retryMs: 10,
+      coalesceMs: 0,
+      plainHoldMs: 200,
+    });
+    const done2 = router2.run(ac2.signal);
+    const inj = new Recorder();
+    router2.register('wren', inj);
+    await until(() => fake.acks.length === 1, 3000);
+    expect(inj.wakes[0].events[0]).toMatchObject({ kind: 'post.created', entity_id: p.entity_id });
+    ac2.abort();
+    await done2;
   });
 });

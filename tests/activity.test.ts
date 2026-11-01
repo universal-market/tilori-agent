@@ -205,6 +205,7 @@ function routerWith(stall: number) {
     waitMs: 10,
     retryMs: 10,
     coalesceMs: 0,
+    plainHoldMs: 0,
   });
   const inj = new Recorder();
   router.register('wren', inj);
@@ -261,6 +262,7 @@ describe('router status files and the direct tag', () => {
       waitMs: 10,
       retryMs: 10,
       coalesceMs: 0,
+      plainHoldMs: 0,
       signalDir,
     });
     const inj = new Recorder();
@@ -291,6 +293,7 @@ describe('router status files and the direct tag', () => {
       waitMs: 10,
       retryMs: 10,
       coalesceMs: 0,
+      plainHoldMs: 0,
       signalDir: dir,
     });
     // Every subscription errors from the first poll on.

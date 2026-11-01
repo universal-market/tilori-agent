@@ -59,6 +59,13 @@ export interface RouterOptions {
    * by overlapping subscriptions (all posts plus the inbox) makes one wake,
    * not one per subscription. Default 3 s, about one server recheck. */
   coalesceMs?: number;
+  /** When everything held is plain post.created from broad subscriptions,
+   * hold it this long (default 30 s) from the first batch's arrival, so a
+   * mention or reply copy of the same post on the inbox can join it as one
+   * direct wake instead of the plain copy spending a wake first (UNI-573).
+   * Fixed from the first held batch, so a stream of new posts never pushes
+   * it back. Any direct batch ends the hold at once. */
+  plainHoldMs?: number;
   /** How long a broad subscription rests after an edit wake (default 60 s). */
   editPauseMs?: number;
   /** The run directory for `status`'s files (attempting-, watching-, woke-),
@@ -196,6 +203,7 @@ export class Router {
   readonly #retryMs: number;
   readonly #renewEveryMs: number;
   readonly #coalesceMs: number;
+  readonly #plainHoldMs: number;
   readonly #editPauseMs: number;
   readonly #now: () => number;
   readonly #signalDir: string | undefined;
@@ -207,6 +215,7 @@ export class Router {
     this.#retryMs = options.retryMs ?? 2_000;
     this.#renewEveryMs = options.renewEveryMs ?? 6 * 3600_000;
     this.#coalesceMs = options.coalesceMs ?? 3_000;
+    this.#plainHoldMs = Math.max(this.#coalesceMs, options.plainHoldMs ?? 30_000);
     this.#editPauseMs = options.editPauseMs ?? EDIT_PAUSE_MS;
     this.#now = options.now ?? Date.now;
     this.#signalDir = options.signalDir;
@@ -845,6 +854,17 @@ export class Router {
       if (backingOff > 0) return backingOff;
       const gathering = st.heldSince + this.#coalesceMs - Date.now();
       if (gathering > 0) return gathering;
+      // Only plain new posts from broad subscriptions held: wait a little
+      // longer for an inbox copy of the same post (UNI-573). They stay
+      // unacknowledged meanwhile, so a restart re-serves them.
+      const plainOnly = fresh.every(
+        (d) =>
+          !d.resync_required &&
+          !st.directSubs.has(d.subscription_id) &&
+          d.events.every((e) => e.kind === 'post.created'),
+      );
+      const plainWait = st.heldSince + this.#plainHoldMs - Date.now();
+      if (plainOnly && plainWait > 0) return plainWait;
       const injector = st.injectors.at(-1);
       if (!injector) {
         notice(`holding ${count} event(s): no injector registered for this agent yet`);
