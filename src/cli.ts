@@ -7,6 +7,7 @@ import {
   buildMcpUrl,
   configPath,
   coordinationPolicy,
+  trustServerState,
   policyText,
   desiredSubscriptions,
   reminderSettings,
@@ -21,7 +22,17 @@ import { ExecInjector } from './injectors/exec.ts';
 import { routerUsage, serveRouter, socketIdentity, socketPath } from './ipc.ts';
 import { keyPath, readKey, redact, tiloriHome, validateHandle, writeKey } from './keys.ts';
 import { Router, type RouterAgentConfig } from './router.ts';
-import { SETTABLE, applyChanges, followConfig, parseAssignment, resetEdit, showText } from './settings.ts';
+import {
+  SETTABLE,
+  applyChanges,
+  followConfig,
+  parseAssignment,
+  parseTrustServer,
+  resetEdit,
+  setTrustServer,
+  showText,
+  trustServerLine,
+} from './settings.ts';
 import type { AgentSubscription } from './types.ts';
 import { UpdateNotice } from './update-notice.ts';
 import { LocalRefusal, UPLOAD_TIMEOUT_MS, fileInfo, parseBytes, upload } from './upload.ts';
@@ -78,6 +89,11 @@ Usage:
         wakes_per_hour (1-60), direct_wakes_per_hour (0-30),
         reminder.every_minutes (15-1440, for a reminder set up by hand),
         stall_minutes (0-1440)
+  tilori-agent config set trust_server=on|off
+      Owner only, through /tilori:config: on lets the agents of every account
+      on the server in "url" give this machine's agents real work, pinned to
+      that server's origin (it stops applying if "url" changes); off removes it.
+      The new session note applies from the next session start.
       Everything else in config.json is edited by hand and needs a restart.
       show also prints this hour's wake counts when a router is running.
       --agent may only name an agent already in config.json.
@@ -357,10 +373,21 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         if (action === 'show') {
           if (rest.length) throw new Error('config show takes no arguments.');
           console.log(showText(agent, config.agents?.[agent] ?? {}, await routerUsage(agent)));
+          console.log(trustServerLine(config));
           return 0;
         }
         if (action !== 'set' && action !== 'reset') throw new Error('config needs show, set or reset.');
         if (!rest.length) throw new Error(`config ${action} needs at least one ${action === 'set' ? 'key=value' : 'key'}.`);
+        if (action === 'reset' && rest.some((k) => k.startsWith('trust_server'))) {
+          throw new Error('Use config set trust_server=off to turn trust_server off.');
+        }
+        // A machine-wide trust change goes alone, so it can't ride along unseen.
+        const trust = action === 'set' ? rest.map(parseTrustServer) : [];
+        if (trust.some((t) => t !== null)) {
+          if (rest.length !== 1) throw new Error('config set trust_server=… takes no other keys.');
+          console.log(setTrustServer(trust[0]!));
+          return 0;
+        }
         const edits = action === 'set' ? rest.map(parseAssignment) : rest.map(resetEdit);
         const shown = (v: number | undefined, key: string) =>
           v !== undefined ? String(v) : `${SETTABLE.find((k) => k.key === key)?.fallback} (default)`;
@@ -501,6 +528,8 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
           agent = null;
         }
         if (!agent) return 0;
+        const trust = trustServerState(config);
+        if (trust.inert) log(`trust_server is set but not applied: ${trust.inert}.`);
         const text = policyText(coordinationPolicy(config, agent));
         if (args.flags.has('hook')) {
           process.stdout.write(
