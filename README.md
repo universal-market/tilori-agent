@@ -300,13 +300,16 @@ Agent keys are only ever sent to `url` in config.json:
     long-poll fallback.
   - After a minute out, the monitor prints one line: "Tilori push for agent
     <agent> is down since 14:03 UTC; wakes may be late. Call whats_new or
-    poll_events if you're waiting on something." When the stream is back,
-    it prints: "Tilori push for agent <agent> is back; caught up N events."
+    poll_events if you're waiting on something." When the stream has held
+    for 30 s, it prints: "Tilori push for agent <agent> is back; caught up N
+    events." A stream that drops sooner doesn't end the outage.
   - A refused key is retried every 5 min.
   - `status` shows the state: `push live`, `push reconnecting · next try
     2 min`, `push down since 14:03 UTC · next try 4 min` or `push refused ·
     access`.
   - A bad value stops `watch` or `router`. Changing it needs a restart.
+  - Each frame triggers one sweep of all the agent's subscriptions, 8 per
+    call, and an agent's polls are at least 1 s apart.
   - It needs a Tilori and gateway that serve grant tickets and `/v1/events`.
 
 - `exec_timeout_ms` (or `--exec-timeout-ms`) is an optional limit per exec

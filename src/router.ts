@@ -17,6 +17,10 @@ import { KIND_RANK, buildWake, refKey, toRefs } from './wake.ts';
 /** How long a delivered post or conversation is remembered. Longer than the
  * wake cap can hold a batch (one hour), so a held copy of something that went
  * out past the cap is still recognised when the cap lifts. */
+/** Push mode: the least time between two polls of one agent, whatever
+ * else asks for one, so a bug in the sweep logic is a slow poll, never a
+ * spin against the account's rate budget (Bastion). */
+export const PUSH_POLL_GAP_MS = 1_000;
 const RECENT_MS = 2 * 3600_000;
 /** Below this many posts left today, wakes say how many (UNI-393). */
 const POSTS_LOW = 100;
@@ -179,10 +183,14 @@ interface AgentState {
     stream: PushStream;
     seq: number;
     kick: { promise: Promise<void>; fire: () => void };
-    /** A "back" line is owed after the next sweep. */
+    /** A "back" line is owed once the stream holds (`stable`), with the
+    * events the reconnect sweeps caught meanwhile. */
     back: boolean;
+    caught: number;
     /** When the stream was last seen alive (heartbeat or frame). */
     aliveAt: number;
+    /** When this agent last started a push poll (the 1 s floor). */
+    polledAt: number;
   };
 }
 
@@ -275,7 +283,7 @@ export class Router {
         push: null,
       });
       const st = this.#agents.get(cfg.handle)!;
-      if (cfg.push) st.push = { stream: this.#pushStream(st, cfg.push), seq: 0, kick: makeKick(), back: false, aliveAt: 0 };
+      if (cfg.push) st.push = { stream: this.#pushStream(st, cfg.push), seq: 0, kick: makeKick(), back: false, caught: 0, aliveAt: 0, polledAt: 0 };
     }
   }
 
@@ -293,9 +301,18 @@ export class Router {
     return new PushStream(options, {
       frame: () => nudge(),
       connected: (back) => {
-        if (back) st.push!.back = true;
+        if (back && !st.push!.back) {
+          st.push!.back = true;
+          st.push!.caught = 0;
+        }
         this.#log(`[${handle}] push stream open${back ? ' again' : ''}`);
         nudge();
+      },
+      stable: () => {
+        const p = st.push!;
+        if (!p.back) return;
+        p.back = false;
+        this.#pushLine(st, { state: 'back', caught: p.caught });
       },
       down: (since) => this.#pushLine(st, { state: 'down', since }),
       alive: () => {
@@ -569,6 +586,17 @@ export class Router {
         seen = -1;
         continue;
       }
+      if (st.push) {
+        // A hard floor between one agent's push polls, whatever `seen` says,
+        // so a bug here is a slow poll, never a spin (Bastion). Frames that
+        // land meanwhile are covered by the one poll after it.
+        const gap = st.push.polledAt + PUSH_POLL_GAP_MS - Date.now();
+        if (gap > 0) {
+          await sleep(gap, signal);
+          continue;
+        }
+        st.push.polledAt = Date.now();
+      }
       // Frames that land while this poll runs move `seq` again. Until the
       // poll succeeds, the next round polls again (a failed poll is retried
       // after its backoff, not left for the next frame).
@@ -613,7 +641,7 @@ export class Router {
       try {
         this.#signal(handle, 'attempting');
         const res = st.push
-          ? await this.#pollNow(st, idle.slice(0, MAX_POLL_SUBSCRIPTIONS), call.signal)
+          ? await this.#pollNow(st, idle, call.signal)
           : await client.pollMany(
               idle.map((s) => s.id),
               this.#waitMs,
@@ -636,14 +664,11 @@ export class Router {
         }
         if (got) this.#wake(st);
         if (st.push) {
-          // More than one batch's worth (or more subscriptions than one
-          // poll takes) is read by polling again; otherwise wait for a frame.
-          seen = got || idle.length > MAX_POLL_SUBSCRIPTIONS ? -1 : covered;
-          if (st.push.back) {
-            st.push.back = false;
-            const caught = res.deliveries.reduce((n, d) => n + d.events.length, 0);
-            this.#pushLine(st, { state: 'back', caught });
-          }
+          // A sweep covers every idle subscription (#pollNow chunks them), so
+          // only a batch (maybe more behind it) polls again; otherwise wait
+          // for a frame.
+          seen = got ? -1 : covered;
+          if (st.push.back) st.push.caught += res.deliveries.reduce((n, d) => n + d.events.length, 0);
         }
         let resubscribe = false;
         for (const e of res.errors) {
@@ -714,18 +739,31 @@ export class Router {
     }
   }
 
-  /** Push mode's zero-wait poll of up to MAX_POLL_SUBSCRIPTIONS ids: one
-   * multiplexed call, or one call per id on a server without
-   * `subscription_ids`. Never a long poll. */
+  /** Push mode's zero-wait sweep of every idle subscription: multiplexed
+   * calls of up to MAX_POLL_SUBSCRIPTIONS ids, or one call per id on a
+   * server without `subscription_ids`. Never a long poll. */
   async #pollNow(st: AgentState, subs: AgentSubscription[], signal: AbortSignal): Promise<MultiPollResult> {
     const { client } = st.cfg;
     if (st.singleUntil <= Date.now()) {
       try {
-        return await client.pollMany(
-          subs.map((s) => s.id),
-          0,
-          signal,
-        );
+        // Every idle subscription, MAX_POLL_SUBSCRIPTIONS ids per call, so
+        // one sweep reads them all and a sweep never repeats itself.
+        const out: MultiPollResult = { deliveries: [], errors: [] };
+        for (let i = 0; i < subs.length; i += MAX_POLL_SUBSCRIPTIONS) {
+          const r = await client.pollMany(
+            subs.slice(i, i + MAX_POLL_SUBSCRIPTIONS).map((s) => s.id),
+            0,
+            signal,
+          );
+          out.deliveries.push(...r.deliveries);
+          out.errors.push(...r.errors);
+          if (r.retryAfterMs) {
+            // Rate limited: the rest waits for the retry.
+            out.retryAfterMs = Math.max(out.retryAfterMs ?? 0, r.retryAfterMs);
+            break;
+          }
+        }
+        return out;
       } catch (cause) {
         if (!(cause instanceof MultiPollUnsupported)) throw cause;
         st.singleUntil = Date.now() + this.#renewEveryMs;

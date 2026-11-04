@@ -52,8 +52,12 @@ export interface PushHooks {
   /** A frame named this subscription: poll it now. */
   frame(subscriptionId: string): void;
   /** The stream is open: sweep every subscription once. `back` is set when
-   * it was down (a "back" line follows the sweep). */
+   * a "down" line was said and no "back" line yet (one is owed once the
+   * stream holds, see `stable`). */
   connected(back: boolean): void;
+  /** The stream has lived MIN_LIVED_MS: push holds again. An owed "back"
+   * line is said now, never for a stream that drops sooner (Juniper). */
+  stable(): void;
   /** Push has been out long enough to say so (once per outage). */
   down(since: number): void;
   /** The heartbeat or a frame arrived: the stream is still watched. */
@@ -133,6 +137,9 @@ export class PushStream {
   /** When push was last lost (0 while live or before the first open). */
   #lostAt = 0;
   #saidDown = false;
+  /** When the current stream opened, and whether it has lived MIN_LIVED_MS. */
+  #openedAt = 0;
+  #steadied = true;
   #failures = 0;
 
   constructor(
@@ -250,10 +257,12 @@ export class PushStream {
     }
     const opened = this.#o.now();
     const back = this.#saidDown;
-    // #failures is cleared only once the stream has lived MIN_LIVED_MS, so
-    // streams that open and end at once keep backing off.
-    this.#lostAt = 0;
-    this.#saidDown = false;
+    // The failure count, the outage start and "down" are cleared only once
+    // the stream has lived MIN_LIVED_MS (#steady), so streams that open and
+    // end at once keep backing off, and an outage spans them: one "down"
+    // line, and "back" only when push holds.
+    this.#openedAt = opened;
+    this.#steadied = false;
     this.#set('live');
     this.hooks.connected(back);
     this.hooks.alive();
@@ -266,7 +275,7 @@ export class PushStream {
     }
     if (signal.aborted) return { kind: 'planned' };
     const lived = this.#o.now() - opened;
-    if (lived >= MIN_LIVED_MS) this.#failures = 0;
+    this.#steady();
     if (broke) return { kind: 'failed', why: 'stream broke' };
     if (lived < MIN_LIVED_MS) return { kind: 'failed', why: `stream ended after ${Math.round(lived / 1000)} s`, retryMs };
     // A drain sends a short retry hint; a stream that lived its lifetime
@@ -334,6 +343,7 @@ export class PushStream {
           }
           if (line.startsWith(':')) {
             this.hooks.alive();
+            this.#steady();
             continue;
           }
           const colon = line.indexOf(':');
@@ -351,6 +361,17 @@ export class PushStream {
     }
   }
 
+  /** Once per stream, when it has lived MIN_LIVED_MS (checked on each
+   * heartbeat, frame and at its end): the outage is over. */
+  #steady() {
+    if (this.#steadied || this.#o.now() - this.#openedAt < MIN_LIVED_MS) return;
+    this.#steadied = true;
+    this.#failures = 0;
+    this.#lostAt = 0;
+    this.#saidDown = false;
+    this.hooks.stable();
+  }
+
   /** A frame's only use is its subscription id; everything else is ignored. */
   #frame(data: string) {
     let id: unknown;
@@ -361,6 +382,7 @@ export class PushStream {
     }
     if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(id)) return;
     this.hooks.alive();
+    this.#steady();
     this.hooks.frame(id);
   }
 }

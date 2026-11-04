@@ -3,6 +3,8 @@ import { describe, expect, test } from 'bun:test';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { MAX_POLL_SUBSCRIPTIONS } from '../src/client.ts';
+import { PUSH_POLL_GAP_MS } from '../src/router.ts';
 import { pushChip, readPushSignal, statusLine, writePushSignal } from '../src/activity.ts';
 import { desiredSubscriptions } from '../src/config.ts';
 import { pushEnabled } from '../src/config.ts';
@@ -72,6 +74,7 @@ function recorder() {
   const r = {
     frames: [] as string[],
     connected: [] as boolean[],
+    stable: 0,
     down: [] as number[],
     alive: 0,
     statuses: [] as PushStatus[],
@@ -80,6 +83,7 @@ function recorder() {
   const hooks: PushHooks = {
     frame: (id) => r.frames.push(id),
     connected: (back) => r.connected.push(back),
+    stable: () => void r.stable++,
     down: (since) => r.down.push(since),
     alive: () => r.alive++,
     status: (s) => r.statuses.push(s),
@@ -306,9 +310,14 @@ describe('push stream', () => {
     await until(() => r.connected.length === 6);
     ac.abort();
     await done;
-    // The 80 s wait is slept as 60 s (then "down") plus 20 s.
-    expect(t.sleeps).toEqual([5_000, 10_000, 20_000, 40_000, 60_000, 20_000]);
+    // The outage spans the brief opens: 35 s are lost after three waits, so
+    // the 40 s wait is slept as 25 s (then "down", 60 s after the first
+    // loss) plus 15 s.
+    expect(t.sleeps).toEqual([5_000, 10_000, 20_000, 25_000, 15_000, 80_000]);
     expect(r.down).toHaveLength(1);
+    // "down" is said once, and no stream ever holds, so nothing says "back".
+    expect(r.stable).toBe(0);
+    expect(r.connected.slice(-1)).toEqual([true]);
     expect(calls.filter((c) => c.url.endsWith('/stream-ticket'))).toHaveLength(6);
   });
 
@@ -402,7 +411,7 @@ class Recorder implements Injector {
 }
 
 describe('router in push mode', () => {
-  function setupPush() {
+  function setupPush(extra = 0) {
     const fake = new FakeTilori();
     const bodies: Array<ReturnType<typeof sseBody>> = [];
     const opens: Array<() => Response> = [];
@@ -418,7 +427,12 @@ describe('router in push mode', () => {
         {
           handle: 'wren',
           client: fake.client(),
-          subscriptions: desiredSubscriptions({ direct_messages: false }),
+          subscriptions: desiredSubscriptions({
+            direct_messages: false,
+            subscriptions: Array.from({ length: extra }, (_, i) => ({
+              scope: { type: 'post' as const, post_id: `00000000-0000-4000-8000-${String(i).padStart(12, '0')}` },
+            })),
+          }),
           push: { endpoint: ENDPOINT, apiKey: KEY, fetch: f, random: () => 0.5 },
         },
       ],
@@ -432,6 +446,34 @@ describe('router in push mode', () => {
     const ac = new AbortController();
     return { fake, router, inj, ac, calls, bodies, openNext, start: () => router.run(ac.signal) };
   }
+
+  test('with more subscriptions than one poll takes, a sweep reads them all once, and polls stay bounded', async () => {
+    const s = setupPush(10); // inbox + 10 = 11 subscriptions, over MAX_POLL_SUBSCRIPTIONS
+    const b = s.openNext();
+    const done = s.start();
+    await until(() => s.fake.subs.length === 11 && s.fake.polls.length >= 2);
+    await new Promise((r) => setTimeout(r, 1_500));
+    const ids = s.fake.subs.map((x) => x.id);
+    const polled = new Set(s.fake.polls.flatMap((p) => p.ids));
+    // Every subscription, the last one included, is read by the first sweep.
+    expect(ids.every((id) => polled.has(id))).toBe(true);
+    // One sweep, two calls (8 + 3), then nothing until a frame.
+    expect(s.fake.polls.length).toBe(2);
+    expect(s.fake.polls.every((p) => p.ids.length <= MAX_POLL_SUBSCRIPTIONS)).toBe(true);
+    // A burst of 20 frames is coalesced: sweeps (2 calls each) at least
+    // PUSH_POLL_GAP_MS apart, so at most two in the next 1.5 s, not 20.
+    for (let i = 0; i < 20; i++)
+      b.send(`event: events\ndata: ${JSON.stringify({ subscriptionId: ids[10], deliveryId: 'd' + i, events: [] })}\n\n`);
+    await new Promise((r) => setTimeout(r, 1_500));
+    s.ac.abort();
+    await done;
+    expect(s.fake.polls.length).toBeGreaterThanOrEqual(4);
+    expect(s.fake.polls.length).toBeLessThanOrEqual(6);
+    // Sweeps start PUSH_POLL_GAP_MS apart (each sweep's second call follows its first at once).
+    const starts = s.fake.pollTimes.filter((_, i) => i % 2 === 0);
+    for (let i = 1; i < starts.length; i++)
+      expect(starts[i] - starts[i - 1]).toBeGreaterThanOrEqual(PUSH_POLL_GAP_MS - 20);
+  });
 
   test('polls only with wait 0: a sweep on connect, then once per frame', async () => {
     const s = setupPush();
@@ -499,8 +541,13 @@ describe('router in push mode', () => {
     await new Promise((r) => setTimeout(r, 100));
     expect(fake.waits).toHaveLength(sweeps); // down: nothing polls
     gate();
-    await until(() => inj.wakes.some((w) => w.push?.state === 'back'));
     await until(() => inj.wakes.some((w) => w.events.length === 2));
+    // Open and swept, but "back" waits until the stream has held 30 s.
+    await new Promise((r) => setTimeout(r, 100));
+    expect(inj.wakes.some((w) => w.push?.state === 'back')).toBe(false);
+    t.advance(MIN_LIVED_MS);
+    b.send(': ping\n\n');
+    await until(() => inj.wakes.some((w) => w.push?.state === 'back'));
     ac.abort();
     await done;
     const back = inj.wakes.find((w) => w.push?.state === 'back')!;
