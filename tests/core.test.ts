@@ -15,6 +15,7 @@ import {
   reminderSettings,
   resolveAgent,
   subscriptionMatches,
+  unfilteredPostsWarning,
 } from '../src/config.ts';
 import { ExecInjector } from '../src/injectors/exec.ts';
 import { NotifyLinesInjector } from '../src/injectors/notify-lines.ts';
@@ -136,6 +137,31 @@ describe('config', () => {
       ),
     ).toBe(true);
     expect(desiredSubscriptions({ direct_messages: false }).map((s) => s.scope.type)).toEqual(['inbox']);
+  });
+
+  test('UNI-562: an unfiltered posts subscription gets one warning with an exact filter line', () => {
+    expect(unfilteredPostsWarning('wren', desiredSubscriptions())).toBeNull();
+    const broad = desiredSubscriptions({ subscriptions: [{ scope: { type: 'posts' } }] });
+    const line = unfilteredPostsWarning('wren', broad);
+    expect(line).toContain('wren: a "posts" subscription has no filter');
+    expect(line).toContain('agents.wren.subscriptions');
+    expect(line).toContain('"filter": {"communities": ["<community id>"], "exclude_agent_authored": true}');
+    // The warning never changes what the agent subscribes to.
+    expect(broad.map((s) => s.scope.type)).toEqual(['inbox', 'direct_messages', 'posts']);
+    expect(broad[2].filter).toBeUndefined();
+  });
+
+  test('UNI-562: filtered posts, match alone and other scopes', () => {
+    const w = (filter: Record<string, unknown> | undefined, type = 'posts') =>
+      unfilteredPostsWarning('wren', desiredSubscriptions({ subscriptions: [{ scope: { type } as never, ...(filter ? { filter } : {}) }] }));
+    expect(w({ communities: ['c1'] })).toBeNull();
+    expect(w({ terms: ['convex'] })).toBeNull();
+    expect(w({ authors: ['a1'] })).toBeNull();
+    expect(w({ exclude_agent_authored: true })).toBeNull();
+    // `match` with no terms narrows nothing; blank terms are dropped.
+    expect(w({ match: 'all' })).not.toBeNull();
+    expect(w({ terms: ['  '] })).not.toBeNull();
+    expect(w(undefined, 'mentions')).toBeNull();
   });
 });
 

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { clock, promptSignal, touchSignal, type SignalKind } from './activity.ts';
 import { MAX_POLL_SUBSCRIPTIONS, MultiPollUnsupported, type ProfileNotes, type TiloriAgentClient } from './client.ts';
-import { DEFAULT_DIRECT_WAKES_PER_HOUR, DEFAULT_WAKES_PER_HOUR, type Reminder } from './config.ts';
+import { DEFAULT_DIRECT_WAKES_PER_HOUR, DEFAULT_WAKES_PER_HOUR, type Reminder, unfilteredPostsWarning } from './config.ts';
 import { WakeLimiter } from './ratelimit.ts';
 import type { LiveSettings } from './settings.ts';
 import type { AgentDelivery, AgentSubscription, DeliverResult, EventRef, Injector, SubscriptionSpec, Wake } from './types.ts';
@@ -221,6 +221,8 @@ export class Router {
     this.#signalDir = options.signalDir;
     for (const cfg of options.agents) {
       if (this.#agents.has(cfg.handle)) throw new Error(`Agent ${cfg.handle} listed twice.`);
+      const broad = unfilteredPostsWarning(cfg.handle, cfg.subscriptions);
+      if (broad) this.#log(broad);
       this.#agents.set(cfg.handle, {
         cfg,
         limiter: new WakeLimiter(cfg.wakesPerHour ?? DEFAULT_WAKES_PER_HOUR, this.#now),

@@ -10,6 +10,7 @@ import {
   trustServerState,
   policyText,
   desiredSubscriptions,
+  unfilteredPostsWarning,
   reminderSettings,
   loadConfig,
   resolveAgent,
@@ -563,6 +564,13 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
             stall = undefined;
           }
           console.log(statusLine(handle, promptSignal(handle), watchSignal(handle, undefined, router), { stallMinutes: stall }));
+          let broad: string | null = null;
+          try {
+            broad = unfilteredPostsWarning(handle, desiredSubscriptions(agents?.[handle]));
+          } catch {
+            // A malformed subscriptions entry: the router reports it at start.
+          }
+          if (broad) console.log(`  warning: ${broad}`);
         }
         return 0;
       }
