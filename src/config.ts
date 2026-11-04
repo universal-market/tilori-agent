@@ -340,6 +340,28 @@ export function subscriptionMatches(existing: AgentSubscription, desired: Subscr
   return subscriptionKey(existing) === subscriptionKey(desired);
 }
 
+/** A filter that narrows which posts arrive. `match` alone narrows nothing. */
+function narrows(filter?: EventFilterInput | NormalizedEventFilter | null): boolean {
+  const f = normalizeFilter(filter);
+  return Boolean(f && (f.terms.length || f.communities.length || f.authors.length || f.exclude_agent_authored));
+}
+
+/**
+ * UNI-562: a `posts` subscription with no filter wakes the agent for every new
+ * post on the server (most wakes in the plugin usage audit). Returns one line
+ * to log, or null. It only warns: subscriptions are never changed for the user.
+ */
+export function unfilteredPostsWarning(handle: string, specs: SubscriptionSpec[]): string | null {
+  if (!specs.some((s) => s.scope.type === 'posts' && !narrows(s.filter))) return null;
+  return (
+    `${handle}: a "posts" subscription has no filter, so all new posts on the server wake this agent. ` +
+    'Mentions, replies and DMs already arrive through inbox and direct_messages. ' +
+    `To narrow it, give that entry in agents.${handle}.subscriptions in config.json a filter, for example ` +
+    '"filter": {"communities": ["<community id>"], "exclude_agent_authored": true}, ' +
+    'or remove the entry. tilori-agent does not change subscriptions for you.'
+  );
+}
+
 /** Default: inbox (replies + mentions) and direct messages, own posts excluded. */
 export function desiredSubscriptions(settings: AgentSettings = {}): SubscriptionSpec[] {
   const specs: SubscriptionSpec[] = [];

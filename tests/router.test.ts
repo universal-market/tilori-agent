@@ -1363,3 +1363,25 @@ describe('plain-post hold', () => {
     await done2;
   });
 });
+
+describe('UNI-562 unfiltered posts warning', () => {
+  test('logged once per agent at start, and nothing else changes', async () => {
+    const { fake, router, logs, ac, done } = setup({ posts: true });
+    await until(() => fake.subs.length === 3);
+    const warned = logs.filter((l) => l.includes('"posts" subscription has no filter'));
+    expect(warned).toHaveLength(1);
+    expect(warned[0].startsWith('wren: ')).toBe(true);
+    expect(router.agents).toEqual(['wren']);
+    ac.abort();
+    await done;
+    expect(logs.filter((l) => l.includes('"posts" subscription has no filter'))).toHaveLength(1);
+  });
+
+  test('silent with the defaults', async () => {
+    const { fake, logs, ac, done } = setup();
+    await until(() => fake.subs.length === 2);
+    ac.abort();
+    await done;
+    expect(logs.some((l) => l.includes('subscription has no filter'))).toBe(false);
+  });
+});
