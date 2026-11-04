@@ -20,6 +20,8 @@ export class FakeTilori implements McpToolCaller {
   legacy = false;
   /** poll_events argument shapes seen, for assertions. */
   polls: Array<{ ids: string[]; multi: boolean }> = [];
+  /** Each poll_events call's wait_ms, in order. */
+  waits: number[] = [];
   /** Per-subscription refusals reported in a multiplexed poll's `errors`. */
   failingSubs = new Map<string, string>();
   /** Like failingSubs, but cleared when the subscription is renewed. */
@@ -109,6 +111,7 @@ export class FakeTilori implements McpToolCaller {
         return ok({ subscription: sub });
       }
       case 'poll_events': {
+        this.waits.push(Number(a.wait_ms ?? 0));
         if (this.failNextPolls > 0) {
           this.failNextPolls--;
           throw new Error('network down Bearer abcdefghijklmnop');

@@ -284,6 +284,34 @@ Agent keys are only ever sent to `url` in config.json:
   prompt, with wakes arriving, before the router logs it once. `0` turns it
   off; the maximum is 1440. See "Blocked on a prompt" above.
 
+- `push` (`"on"` or `"off"`, default `"off"`) selects Tilori push via the
+  gateway. With `"on"`, the agent's key mints a single-use stream ticket from
+  Tilori (`POST <url>/stream-ticket`), and the ticket opens a plain event
+  stream at the `events_url` Tilori names. The gateway gets only the ticket,
+  in the `Tilori-Stream-Ticket` header, and never the key. Frames carry ids
+  and kinds only. Each frame triggers a `poll_events` with `wait_ms: 0`, so
+  wake caps, holds, wake lines and acknowledgements work as before, and
+  nothing long-polls.
+  - The stream reopens by itself every 25–30 min, after 1–3 s, without a line
+    or a state change. A stream that ends within 30 s counts as a drop, so a
+    gateway that keeps closing at once is backed off rather than looped.
+  - If it drops, it's retried with jittered backoff from 5 s to 5 min, and
+    each reconnect is followed by one zero-wait sweep. There is no automatic
+    long-poll fallback.
+  - After a minute out, the monitor prints one line: "Tilori push for agent
+    <agent> is down since 14:03 UTC; wakes may be late. Call whats_new or
+    poll_events if you're waiting on something." When the stream has held
+    for 30 s, it prints: "Tilori push for agent <agent> is back; caught up N
+    events." A stream that drops sooner doesn't end the outage.
+  - A refused key is retried every 5 min.
+  - `status` shows the state: `push live`, `push reconnecting · next try
+    2 min`, `push down since 14:03 UTC · next try 4 min` or `push refused ·
+    access`.
+  - A bad value stops `watch` or `router`. Changing it needs a restart.
+  - Each frame triggers one sweep of all the agent's subscriptions, 8 per
+    call, and an agent's polls are at least 1 s apart.
+  - It needs a Tilori and gateway that serve grant tickets and `/v1/events`.
+
 - `exec_timeout_ms` (or `--exec-timeout-ms`) is an optional limit per exec
   run. It is off by default; if you set it, make it generous. When it passes,
   the run's process group gets SIGTERM, then SIGKILL 5 s later. The wake

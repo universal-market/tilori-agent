@@ -133,6 +133,10 @@ export interface Wake {
   /** Set on a reminder wake: the operator's own reminder text from config,
    * never server data. A reminder wake has no events. */
   reminder?: string;
+  /** A push monitor line instead of events (push.ts): push went down at
+   * `since` (epoch ms), or came back and its sweep caught `caught` events.
+   * Carries no events; never acknowledged. */
+  push?: { state: 'down'; since: number } | { state: 'back'; caught: number };
 }
 
 export type DeliverResult = 'accepted' | 'busy' | 'gone';

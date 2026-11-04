@@ -1,7 +1,8 @@
-import { closeSync, constants, futimesSync, lstatSync, openSync } from 'node:fs';
+import { closeSync, constants, futimesSync, lstatSync, openSync, readFileSync, writeSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { socketPath } from './ipc.ts';
 import { HANDLE_RE, validateHandle } from './keys.ts';
+import type { PushState, PushStatus } from './push.ts';
 
 /**
  * Whether a session is stuck on a prompt (S1). The host plugin's hooks touch
@@ -25,6 +26,10 @@ import { HANDLE_RE, validateHandle } from './keys.ts';
  *   attempting-<agent>  before each poll
  *   watching-<agent>    after each poll that got an authenticated answer
  *   woke-<agent>        after a wake line was accepted (flushed) by the session
+ *
+ * With push on (push.ts) the router also writes one small JSON file:
+ *
+ *   push-<agent>        {"state", "since", "next"?}: the push stream's state
  */
 
 export const DEFAULT_STALL_MINUTES = 10;
@@ -47,6 +52,70 @@ export function touchSignal(dir: string, kind: SignalKind, handle: string): void
     futimesSync(fd, now, now);
   } finally {
     closeSync(fd);
+  }
+}
+
+/** Writes `push-<agent>`: the push stream's state, for `status`. Opened like
+ * a signal (no symlink, 0600) and truncated; throws on failure (best effort). */
+export function writePushSignal(dir: string, handle: string, s: PushStatus): void {
+  const path = join(dir, `push-${validateHandle(handle)}`);
+  const fd = openSync(
+    path,
+    constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | (constants.O_NOFOLLOW ?? 0),
+    0o600,
+  );
+  try {
+    writeSync(fd, JSON.stringify({ state: s.state, since: s.since, ...(s.next !== undefined ? { next: s.next } : {}) }));
+  } finally {
+    closeSync(fd);
+  }
+}
+
+const PUSH_STATES = new Set<PushState>(['connecting', 'live', 'reconnecting', 'down', 'refused']);
+
+/** `push-<agent>` as written by a router, or null: missing, not this user's
+ * regular file, too big, or not a valid state. */
+export function readPushSignal(handle: string, dir = activityDir()): (PushStatus & { at: number }) | null {
+  if (!HANDLE_RE.test(handle)) return null;
+  const path = join(dir, `push-${handle}`);
+  try {
+    const st = lstatSync(path);
+    if (!st.isFile() || st.size > 512) return null;
+    if (typeof process.getuid === 'function' && st.uid !== process.getuid()) return null;
+    const raw = JSON.parse(readFileSync(path, 'utf8'));
+    if (!PUSH_STATES.has(raw?.state) || !Number.isInteger(raw.since)) return null;
+    return {
+      state: raw.state,
+      since: raw.since,
+      ...(Number.isInteger(raw.next) ? { next: raw.next } : {}),
+      at: st.mtimeMs,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** The router rewrites `push-` at every attempt, at least every 5 min
+ * while push is out; older than this, no router is running it. */
+export const PUSH_FRESH_MS = 7 * 60_000;
+
+/** Juniper's push chip: "push live", "push reconnecting · next try 2 min",
+ * "push down since 14:03 UTC · next try 4 min", "push refused · access".
+ * Null when push is off or no running router keeps the file fresh. */
+export function pushChip(s: (PushStatus & { at: number }) | null, now = Date.now()): string | null {
+  if (!s || now - s.at >= PUSH_FRESH_MS) return null;
+  const next = s.next !== undefined ? ` · next try ${s.next <= now ? 'now' : span(Math.max(60_000, s.next - now))}` : '';
+  switch (s.state) {
+    case 'live':
+      return 'push live';
+    case 'connecting':
+      return 'push connecting';
+    case 'reconnecting':
+      return `push reconnecting${next}`;
+    case 'down':
+      return `push down since ${clock(s.since)}${next}`;
+    case 'refused':
+      return 'push refused · access';
   }
 }
 
@@ -152,10 +221,17 @@ export function statusLine(
   handle: string,
   signal: PromptSignal,
   watch: WatchSignal,
-  opts: { now?: number; stallMinutes?: number } = {},
+  opts: { now?: number; stallMinutes?: number; push?: (PushStatus & { at: number }) | null } = {},
 ): string {
   const now = opts.now ?? Date.now();
   if (signal.blockedSince !== null) return `${handle}: blocked on a prompt since ${clock(signal.blockedSince)}`;
+  const chip = pushChip(opts.push ?? null, now);
+  // Push mode polls only on push, so a push that is out explains an
+  // unwatched agent better than "nothing is running".
+  if (chip && opts.push!.state !== 'live')
+    return opts.push!.state === 'refused'
+      ? `${handle}: ${chip}: Tilori refused the agent's key for push; ${CHECK}`
+      : `${handle}: ${chip}; wakes may be late until it's back. Nothing polls meanwhile: call whats_new or poll_events yourself if you're waiting on something.`;
   const failing = watch.attempting !== null && now - watch.attempting < WATCHED_MS;
   if (watch.watching === null) {
     // A first long poll can take 25 s to answer, so a fresh attempt with no
@@ -178,7 +254,8 @@ export function statusLine(
     else if (watch.reports)
       wake += now - watch.woke < stallMs ? ', no action yet' : `, no action for ${span(now - watch.woke)}`;
   }
-  return `${handle}: watched; ${wake}; ${watch.router ? 'polled by the router' : 'polled directly'}`;
+  const how = chip ? chip : watch.router ? 'polled by the router' : 'polled directly';
+  return `${handle}: watched; ${wake}; ${how}`;
 }
 
 /** Validates `stall_minutes` (default 10; 0 turns the stall line off; at

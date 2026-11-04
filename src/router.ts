@@ -1,7 +1,14 @@
 import { randomUUID } from 'node:crypto';
-import { clock, promptSignal, touchSignal, type SignalKind } from './activity.ts';
-import { MAX_POLL_SUBSCRIPTIONS, MultiPollUnsupported, type ProfileNotes, type TiloriAgentClient } from './client.ts';
+import { clock, promptSignal, touchSignal, writePushSignal, type SignalKind } from './activity.ts';
+import {
+  MAX_POLL_SUBSCRIPTIONS,
+  MultiPollUnsupported,
+  type MultiPollResult,
+  type ProfileNotes,
+  type TiloriAgentClient,
+} from './client.ts';
 import { DEFAULT_DIRECT_WAKES_PER_HOUR, DEFAULT_WAKES_PER_HOUR, type Reminder, unfilteredPostsWarning } from './config.ts';
+import { PushStream, type PushOptions, type PushStatus } from './push.ts';
 import { WakeLimiter } from './ratelimit.ts';
 import type { LiveSettings } from './settings.ts';
 import type { AgentDelivery, AgentSubscription, DeliverResult, EventRef, Injector, SubscriptionSpec, Wake } from './types.ts';
@@ -10,6 +17,10 @@ import { KIND_RANK, buildWake, refKey, toRefs } from './wake.ts';
 /** How long a delivered post or conversation is remembered. Longer than the
  * wake cap can hold a batch (one hour), so a held copy of something that went
  * out past the cap is still recognised when the cap lifts. */
+/** Push mode: the least time between two polls of one agent, whatever
+ * else asks for one, so a bug in the sweep logic is a slow poll, never a
+ * spin against the account's rate budget (Bastion). */
+export const PUSH_POLL_GAP_MS = 1_000;
 const RECENT_MS = 2 * 3600_000;
 /** Below this many posts left today, wakes say how many (UNI-393). */
 const POSTS_LOW = 100;
@@ -34,6 +45,10 @@ export interface RouterAgentConfig {
   /** Log once when the session has been blocked on a prompt this long with
    * wakes arriving (validated by stallMinutes; 0 or unset: off). */
   stallMinutes?: number;
+  /** Tilori push via the gateway (push.ts): when set, events arrive on a
+   * gateway stream and each frame triggers a zero-wait poll; there are no
+   * long polls. Unset: long polls, as before. */
+  push?: PushOptions;
 }
 
 /** This hour's wake counts for `tilori-agent config show`: counts only. */
@@ -162,6 +177,21 @@ interface AgentState {
   /** The prompt the session is blocked on (by its signal's mtime), the wakes
    * accepted since, and whether the stall line was logged for it. */
   blocked: { since: number; wakes: number; logged: boolean };
+  /** Push mode only (cfg.push): `seq` counts frames and reconnects, so a
+   * poller that saw `seq` knows to poll again once it moves. */
+  push: null | {
+    stream: PushStream;
+    seq: number;
+    kick: { promise: Promise<void>; fire: () => void };
+    /** A "back" line is owed once the stream holds (`stable`), with the
+    * events the reconnect sweeps caught meanwhile. */
+    back: boolean;
+    caught: number;
+    /** When the stream was last seen alive (heartbeat or frame). */
+    aliveAt: number;
+    /** When this agent last started a push poll (the 1 s floor). */
+    polledAt: number;
+  };
 }
 
 /** Scopes whose events are addressed to the agent itself. */
@@ -250,8 +280,85 @@ export class Router {
         stats: { wakes: 0, events: 0, delayed: 0, reminders: 0 },
         profile: { at: -Infinity, value: { postsLeft: null, toolsHash: null } },
         blocked: { since: 0, wakes: 0, logged: false },
+        push: null,
       });
+      const st = this.#agents.get(cfg.handle)!;
+      if (cfg.push) st.push = { stream: this.#pushStream(st, cfg.push), seq: 0, kick: makeKick(), back: false, caught: 0, aliveAt: 0, polledAt: 0 };
     }
+  }
+
+  /** The push stream for an agent, wired to its poll loop, status file and
+   * monitor lines. */
+  #pushStream(st: AgentState, options: PushOptions): PushStream {
+    const handle = st.cfg.handle;
+    const nudge = () => {
+      const p = st.push!;
+      p.seq++;
+      const k = p.kick;
+      p.kick = makeKick();
+      k.fire();
+    };
+    return new PushStream(options, {
+      frame: () => nudge(),
+      connected: (back) => {
+        if (back && !st.push!.back) {
+          st.push!.back = true;
+          st.push!.caught = 0;
+        }
+        this.#log(`[${handle}] push stream open${back ? ' again' : ''}`);
+        nudge();
+      },
+      stable: () => {
+        const p = st.push!;
+        if (!p.back) return;
+        p.back = false;
+        this.#pushLine(st, { state: 'back', caught: p.caught });
+      },
+      down: (since) => this.#pushLine(st, { state: 'down', since }),
+      alive: () => {
+        // Push mode polls only on a frame, so the stream being alive is
+        // what "watched" means; at most one file touch per 30 s.
+        const now = Date.now();
+        if (now - st.push!.aliveAt < 30_000) return;
+        st.push!.aliveAt = now;
+        this.#signal(handle, 'watching');
+        // Keeps `push-` fresh for `status` while nothing changes.
+        this.#pushStatus(handle, st.push!.stream.status);
+      },
+      status: (s) => this.#pushStatus(handle, s),
+      log: (m) => this.#log(`[${handle}] ${m}`),
+    });
+  }
+
+  /** Writes `push-<agent>` for `status` (best effort). */
+  #pushStatus(handle: string, s: PushStatus) {
+    if (this.#signalDir === undefined) return;
+    try {
+      writePushSignal(this.#signalDir, handle, s);
+    } catch (cause) {
+      const key = `push-${handle}`;
+      if (this.#signalFailed.has(key)) return;
+      this.#signalFailed.add(key);
+      this.#log(`[${handle}] could not update push- in the run directory: ${errText(cause)}`);
+    }
+  }
+
+  /** A push monitor line ("down", or "back" after the reconnect sweep): to
+   * the newest injector, outside the wake caps, never acknowledged. */
+  #pushLine(st: AgentState, push: NonNullable<Wake['push']>) {
+    const injector = st.injectors.at(-1);
+    const wake: Wake = { wake_id: randomUUID(), agent: st.cfg.handle, events: [], resync_required: false, push };
+    if (!injector) return;
+    void Promise.resolve()
+      .then(() => injector.deliver(wake))
+      .catch(() => {});
+  }
+
+  /** Push mode: waits until a frame or a reconnect moved `seq` past `seen`,
+   * or the generation ends. */
+  async #waitPush(st: AgentState, seen: number, signal: AbortSignal): Promise<void> {
+    const p = st.push!;
+    while (p.seq === seen && !signal.aborted) await sleep(this.#renewEveryMs, signal, p.kick.promise);
   }
 
   get agents(): string[] {
@@ -356,7 +463,17 @@ export class Router {
     await Promise.all(
       [...this.#agents.values()].map(async (st) => {
         try {
-          await this.#runAgent(st, signal);
+          const stop = new AbortController();
+          const end = () => stop.abort();
+          signal?.addEventListener('abort', end, { once: true });
+          try {
+            await Promise.all([
+              this.#runAgent(st, signal).finally(end),
+              st.push ? st.push.stream.run(stop.signal) : Promise.resolve(),
+            ]);
+          } finally {
+            signal?.removeEventListener('abort', end);
+          }
         } finally {
           // End the MCP session; a cancelled long poll leaves it open.
           await st.cfg.client.close();
@@ -441,9 +558,13 @@ export class Router {
     const { client, handle } = st.cfg;
     const signal = gen.signal;
     let failures = 0;
+    // Push mode: the `seq` the last poll covered (-1: poll now; a new
+    // generation sweeps once).
+    let seen = -1;
+    const wait = st.push ? 0 : this.#waitMs;
     while (!signal.aborted) {
       const usable = subs.filter((s) => !st.dropped.has(specKey(s)));
-      if (st.singleUntil > Date.now() || usable.length > MAX_POLL_SUBSCRIPTIONS) {
+      if (!st.push && (st.singleUntil > Date.now() || usable.length > MAX_POLL_SUBSCRIPTIONS)) {
         await Promise.all(usable.map((sub) => this.#pollSubscription(st, sub, pending, gen)));
         return;
       }
@@ -458,6 +579,29 @@ export class Router {
         await sleep(Math.min(this.#retryMs, ...resting), signal, st.polled.promise);
         continue;
       }
+      if (st.push && st.push.seq === seen) {
+        // Nothing new since the last poll: wait for a frame or a reconnect.
+        // While push is down nothing polls (no long-poll fallback).
+        await this.#waitPush(st, seen, signal);
+        seen = -1;
+        continue;
+      }
+      if (st.push) {
+        // A hard floor between one agent's push polls, whatever `seen` says,
+        // so a bug here is a slow poll, never a spin (Bastion). Frames that
+        // land meanwhile are covered by the one poll after it.
+        const gap = st.push.polledAt + PUSH_POLL_GAP_MS - Date.now();
+        if (gap > 0) {
+          await sleep(gap, signal);
+          continue;
+        }
+        st.push.polledAt = Date.now();
+      }
+      // Frames that land while this poll runs move `seq` again. Until the
+      // poll succeeds, the next round polls again (a failed poll is retried
+      // after its backoff, not left for the next frame).
+      const covered = st.push?.seq ?? 0;
+      seen = -1;
       // Two abandoned calls (a restart, then a generation that ended
       // mid-call) may still hold waiters; a new call now would be a third.
       const open = this.#openAbandoned(st);
@@ -482,7 +626,7 @@ export class Router {
         const restart = () => {
           if (call.signal.aborted) return;
           restarted = true;
-          st.abandoned.push(startedAt + this.#waitMs + 1_000);
+          st.abandoned.push(startedAt + wait + 1_000);
           call.abort();
         };
         st.onPolled = () => {
@@ -496,11 +640,13 @@ export class Router {
       }
       try {
         this.#signal(handle, 'attempting');
-        const res = await client.pollMany(
-          idle.map((s) => s.id),
-          this.#waitMs,
-          call.signal,
-        );
+        const res = st.push
+          ? await this.#pollNow(st, idle, call.signal)
+          : await client.pollMany(
+              idle.map((s) => s.id),
+              this.#waitMs,
+              call.signal,
+            );
         // Answered, but nothing can arrive while every polled subscription
         // errored (they are re-subscribed next): not watched yet.
         if (res.errors.length < idle.length) this.#signal(handle, 'watching');
@@ -517,6 +663,13 @@ export class Router {
           }
         }
         if (got) this.#wake(st);
+        if (st.push) {
+          // A sweep covers every idle subscription (#pollNow chunks them), so
+          // only a batch (maybe more behind it) polls again; otherwise wait
+          // for a frame.
+          seen = got ? -1 : covered;
+          if (st.push.back) st.push.caught += res.deliveries.reduce((n, d) => n + d.events.length, 0);
+        }
         let resubscribe = false;
         for (const e of res.errors) {
           const sub = idle.find((s) => s.id === e.subscription_id)!;
@@ -549,7 +702,7 @@ export class Router {
           // Give the handoff a moment to acknowledge, so the next long poll
           // can include these subscriptions again.
           await sleep(this.#retryMs, signal, st.polled.promise);
-        } else if (!res.errors.length && this.#waitMs >= 5_000 && Date.now() - startedAt < 1_000) {
+        } else if (!res.errors.length && wait >= 5_000 && Date.now() - startedAt < 1_000) {
           // An older server degraded the long poll to an immediate one without
           // saying how long to wait; don't spin.
           await sleep(3_000, signal);
@@ -558,7 +711,7 @@ export class Router {
         if (signal.aborted) {
           // The generation ended mid-call (renewal or stop): the call keeps
           // its server waiter until its deadline.
-          if (!restarted) st.abandoned.push(startedAt + this.#waitMs + 1_000);
+          if (!restarted) st.abandoned.push(startedAt + wait + 1_000);
           return;
         }
         if (restarted) continue;
@@ -584,6 +737,46 @@ export class Router {
         signal.removeEventListener('abort', stopCall);
       }
     }
+  }
+
+  /** Push mode's zero-wait sweep of every idle subscription: multiplexed
+   * calls of up to MAX_POLL_SUBSCRIPTIONS ids, or one call per id on a
+   * server without `subscription_ids`. Never a long poll. */
+  async #pollNow(st: AgentState, subs: AgentSubscription[], signal: AbortSignal): Promise<MultiPollResult> {
+    const { client } = st.cfg;
+    if (st.singleUntil <= Date.now()) {
+      try {
+        // Every idle subscription, MAX_POLL_SUBSCRIPTIONS ids per call, so
+        // one sweep reads them all and a sweep never repeats itself.
+        const out: MultiPollResult = { deliveries: [], errors: [] };
+        for (let i = 0; i < subs.length; i += MAX_POLL_SUBSCRIPTIONS) {
+          const r = await client.pollMany(
+            subs.slice(i, i + MAX_POLL_SUBSCRIPTIONS).map((s) => s.id),
+            0,
+            signal,
+          );
+          out.deliveries.push(...r.deliveries);
+          out.errors.push(...r.errors);
+          if (r.retryAfterMs) {
+            // Rate limited: the rest waits for the retry.
+            out.retryAfterMs = Math.max(out.retryAfterMs ?? 0, r.retryAfterMs);
+            break;
+          }
+        }
+        return out;
+      } catch (cause) {
+        if (!(cause instanceof MultiPollUnsupported)) throw cause;
+        st.singleUntil = Date.now() + this.#renewEveryMs;
+        this.#log(`[${st.cfg.handle}] server does not accept subscription_ids; polling each subscription separately`);
+      }
+    }
+    const out: MultiPollResult = { deliveries: [], errors: [] };
+    for (const sub of subs) {
+      const r = await client.pollOne(sub.id, 0, signal);
+      if (r.delivery) out.deliveries.push(r.delivery);
+      if (r.retryAfterMs) out.retryAfterMs = Math.max(out.retryAfterMs ?? 0, r.retryAfterMs);
+    }
+    return out;
   }
 
   /** How long a subscription still rests after an edit wake (0 when not). */
