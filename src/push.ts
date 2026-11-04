@@ -28,6 +28,13 @@ export const DOWN_AFTER_MS = 60_000;
 export const PLANNED_MS = 20 * 60_000;
 /** Refused (key or access): retry slowly, in case access is restored. */
 export const REFUSED_RETRY_MS = 5 * 60_000;
+/** A planned reopen waits at least this long, plus up to PLANNED_JITTER_MS,
+ * so a gateway that says `retry: 0` can't make every agent mint at once. */
+export const PLANNED_MIN_MS = 1_000;
+export const PLANNED_JITTER_MS = 2_000;
+/** A stream that ends sooner than this is a failure, whatever it said, so a
+ * gateway that opens and closes at once backs off instead of looping. */
+export const MIN_LIVED_MS = 30_000;
 /** One SSE event larger than this ends the stream (frames are ids only). */
 const MAX_EVENT_BYTES = 256 * 1024;
 
@@ -168,9 +175,11 @@ export class PushStream {
       const now = this.#o.now();
       let wait: number;
       if (ended.kind === 'planned') {
-        // The gateway's planned reopen (or a drain): straight back, no line.
-        this.#failures = 0;
-        wait = Math.min(ended.retryMs ?? 0, 10_000);
+        // The gateway's planned reopen (or a drain): back soon, no line. The
+        // floor and jitter spread every agent's mint over a few seconds.
+        wait =
+          Math.max(PLANNED_MIN_MS, Math.min(ended.retryMs ?? 0, 10_000)) +
+          Math.round(PLANNED_JITTER_MS * this.#o.random());
       } else {
         if (!this.#lostAt) this.#lostAt = now;
         if (ended.kind === 'refused') {
@@ -241,23 +250,28 @@ export class PushStream {
     }
     const opened = this.#o.now();
     const back = this.#saidDown;
-    this.#failures = 0;
+    // #failures is cleared only once the stream has lived MIN_LIVED_MS, so
+    // streams that open and end at once keep backing off.
     this.#lostAt = 0;
     this.#saidDown = false;
     this.#set('live');
     this.hooks.connected(back);
     this.hooks.alive();
     let retryMs: number | undefined;
+    let broke = false;
     try {
       retryMs = await this.#read(res, signal);
     } catch {
-      if (signal.aborted) return { kind: 'planned' };
-      return { kind: 'failed', why: 'stream broke' };
+      broke = true;
     }
     if (signal.aborted) return { kind: 'planned' };
+    const lived = this.#o.now() - opened;
+    if (lived >= MIN_LIVED_MS) this.#failures = 0;
+    if (broke) return { kind: 'failed', why: 'stream broke' };
+    if (lived < MIN_LIVED_MS) return { kind: 'failed', why: `stream ended after ${Math.round(lived / 1000)} s`, retryMs };
     // A drain sends a short retry hint; a stream that lived its lifetime
     // closes on its own. Both reconnect at once, with no state change.
-    if (this.#o.now() - opened >= PLANNED_MS || (retryMs !== undefined && retryMs <= 10_000))
+    if (lived >= PLANNED_MS || (retryMs !== undefined && retryMs <= 10_000))
       return { kind: 'planned', retryMs };
     return { kind: 'failed', why: 'stream closed early' };
   }

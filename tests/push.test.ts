@@ -8,6 +8,9 @@ import { desiredSubscriptions } from '../src/config.ts';
 import { pushEnabled } from '../src/config.ts';
 import {
   DOWN_AFTER_MS,
+  MIN_LIVED_MS,
+  PLANNED_JITTER_MS,
+  PLANNED_MIN_MS,
   PLANNED_MS,
   PushStream,
   REFUSED_RETRY_MS,
@@ -239,10 +242,12 @@ describe('push stream', () => {
     expect(r.connected).toEqual([false, false]);
     expect(r.down).toHaveLength(0);
     expect(r.statuses.map((s) => s.state)).not.toContain('reconnecting');
-    expect(t.sleeps.every((ms) => ms === 0)).toBe(true);
+    expect(t.sleeps).toHaveLength(1);
+    expect(t.sleeps[0]).toBeGreaterThanOrEqual(PLANNED_MIN_MS);
+    expect(t.sleeps[0]).toBeLessThanOrEqual(PLANNED_MIN_MS + PLANNED_JITTER_MS);
   });
 
-  test('a drain retry hint reconnects at once; an early close is a failure', async () => {
+  test('a drain retry hint reconnects soon; an early close is a failure', async () => {
     const t = fakeTime();
     const b1 = sseBody();
     const b2 = sseBody();
@@ -252,16 +257,59 @@ describe('push stream', () => {
     const ac = new AbortController();
     const done = new PushStream({ endpoint: ENDPOINT, apiKey: KEY, fetch: f, now: t.now, sleep: t.sleep, random: () => 0.5 }, hooks).run(ac.signal);
     await until(() => r.connected.length === 1);
+    t.advance(MIN_LIVED_MS);
     b1.send('retry: 3000\n\n');
     b1.end();
     await until(() => r.connected.length === 2);
-    expect(t.sleeps).toEqual([3000]);
+    expect(t.sleeps).toEqual([3000 + PLANNED_JITTER_MS / 2]);
+    t.advance(MIN_LIVED_MS);
     b2.end(); // early, no hint
     await until(() => r.connected.length === 3);
     ac.abort();
     await done;
-    expect(t.sleeps).toEqual([3000, RETRY_MIN_MS]);
+    expect(t.sleeps).toEqual([3000 + PLANNED_JITTER_MS / 2, RETRY_MIN_MS]);
     expect(r.statuses.map((s) => s.state)).toContain('reconnecting');
+  });
+
+  test('retry: 0 waits at least 1 s plus jitter', async () => {
+    for (const [rand, want] of [[0, PLANNED_MIN_MS], [1, PLANNED_MIN_MS + PLANNED_JITTER_MS]] as const) {
+      const t = fakeTime();
+      const b1 = sseBody();
+      const b2 = sseBody();
+      const { f } = fakeFetch({ opens: [stream(b1), stream(b2)] });
+      const { r, hooks } = recorder();
+      const ac = new AbortController();
+      const done = new PushStream({ endpoint: ENDPOINT, apiKey: KEY, fetch: f, now: t.now, sleep: t.sleep, random: () => rand }, hooks).run(ac.signal);
+      await until(() => r.connected.length === 1);
+      t.advance(MIN_LIVED_MS);
+      b1.send('retry: 0\n\n');
+      b1.end();
+      await until(() => r.connected.length === 2);
+      ac.abort();
+      await done;
+      expect(t.sleeps).toEqual([want]);
+    }
+  });
+
+  test('a gateway that sends retry: 0 and closes at once is backed off, not looped', async () => {
+    const t = fakeTime();
+    const bodies = Array.from({ length: 6 }, () => sseBody());
+    const { f, calls } = fakeFetch({ opens: bodies.map((b) => stream(b)) });
+    const { r, hooks } = recorder();
+    const ac = new AbortController();
+    const done = new PushStream({ endpoint: ENDPOINT, apiKey: KEY, fetch: f, now: t.now, sleep: t.sleep, random: () => 0.5 }, hooks).run(ac.signal);
+    for (let i = 0; i < 5; i++) {
+      await until(() => r.connected.length === i + 1);
+      bodies[i].send('retry: 0\n\n');
+      bodies[i].end();
+    }
+    await until(() => r.connected.length === 6);
+    ac.abort();
+    await done;
+    // The 80 s wait is slept as 60 s (then "down") plus 20 s.
+    expect(t.sleeps).toEqual([5_000, 10_000, 20_000, 40_000, 60_000, 20_000]);
+    expect(r.down).toHaveLength(1);
+    expect(calls.filter((c) => c.url.endsWith('/stream-ticket'))).toHaveLength(6);
   });
 
   test('back after "down": the reconnect says so', async () => {

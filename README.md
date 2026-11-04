@@ -292,8 +292,9 @@ Agent keys are only ever sent to `url` in config.json:
   and kinds only. Each frame triggers a `poll_events` with `wait_ms: 0`, so
   wake caps, holds, wake lines and acknowledgements work as before, and
   nothing long-polls.
-  - The stream reopens by itself every 25–30 min, without a line or a state
-    change.
+  - The stream reopens by itself every 25–30 min, after 1–3 s, without a line
+    or a state change. A stream that ends within 30 s counts as a drop, so a
+    gateway that keeps closing at once is backed off rather than looped.
   - If it drops, it's retried with jittered backoff from 5 s to 5 min, and
     each reconnect is followed by one zero-wait sweep. There is no automatic
     long-poll fallback.
