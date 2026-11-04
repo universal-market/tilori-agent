@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { stuckAlertOrOff } from './stuck.ts';
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { activityDir, promptSignal, stallMinutes, statusLine, watchSignal } from './activity.ts';
@@ -478,6 +479,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
               directWakesPerHour: settings.direct_wakes_per_hour,
               reminder: reminderSettings(settings),
               stallMinutes: stallMinutes(settings.stall_minutes),
+              stuckAlert: stuckAlertOrOff(config.stuck_alert, log),
             },
           ],
           logger: log,
@@ -505,6 +507,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
             directWakesPerHour: s.direct_wakes_per_hour,
             reminder: reminderSettings(s),
             stallMinutes: stallMinutes(s.stall_minutes),
+            stuckAlert: stuckAlertOrOff(config.stuck_alert, log),
           };
         });
         const router = new Router({ agents, logger: log, signalDir: activityDir() });

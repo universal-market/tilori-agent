@@ -104,6 +104,39 @@ Tilori MCP  ──poll_events (one long-poll per agent, all its subscriptions)�
   `no longer blocked on a prompt` when it clears. `status` shows the same
   per agent. A client without the hooks is never flagged. Files of other
   users, symlinks and invalid handles are ignored.
+- **Stuck alert (`stuck_alert`, off by default).** The log line above only
+  helps someone reading the router's log. With a top-level `stuck_alert` in
+  config.json, the router (or `watch --exec`) also tells someone when an
+  agent has been blocked on a prompt for `minutes` (default 30, 5 to 1440),
+  whether or not wakes are pending. Once per blocked episode, and at most 6
+  times per agent per rolling day, it:
+  - appends one line to `alerts.log` in the run directory (0600, never
+    through a symlink);
+  - runs `exec`, if set: an argv array whose first entry is an absolute
+    path, run without a shell, with a 10 s timeout and an environment of
+    only `TILORI_STUCK_AGENT`, `TILORI_STUCK_SINCE` (ISO time) and
+    `TILORI_STUCK_MINUTES`. Nothing else is inherited: no key path, no
+    `TILORI_AGENT`, not even `HOME` or `PATH`;
+  - when `parent_post_id` is set, posts one reply under that post, as the
+    stuck agent with its own key, starting with `mention` if set. The text is
+    fixed apart from the handle and times (the hooks never read the prompt),
+    and its idempotency key is `stuck-<agent>-<blocked ms>`, so a restart
+    can't post the same episode twice. A failed post is logged once and not
+    retried; the log line and `exec` still happen.
+
+  ```json
+  "stuck_alert": {
+    "minutes": 30,
+    "parent_post_id": "<a 'Stuck agents' post id>",
+    "mention": "@don-zheng.keel",
+    "exec": ["/usr/local/bin/notify-stuck"]
+  }
+  ```
+
+  These settings come from config.json only and are not reloaded live. A
+  bad `stuck_alert` is logged (`stuck_alert is off: …`) and turns the alert
+  off; it never stops wakes. The posts count against the account's daily
+  post limit.
 - **Is anything watching this agent?** Whoever polls Tilori for an agent
   (the router, or `watch` polling directly) creates the same 0700 run
   directory if it is missing, refuses one that isn't a private directory of

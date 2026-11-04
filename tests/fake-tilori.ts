@@ -45,6 +45,9 @@ export class FakeTilori implements McpToolCaller {
   posts = new Map<string, unknown>();
   /** get_post waits until the caller aborts it. */
   postHangs = false;
+  /** create_post arguments, in order (UNI-694). */
+  created: Record<string, unknown>[] = [];
+  createFails = false;
 
   push(scopeType: string, events: DeliveredEvent[]) {
     const sub = this.subs.find((s) => s.scope.type === scopeType);
@@ -74,6 +77,10 @@ export class FakeTilori implements McpToolCaller {
           });
         if (this.profile === undefined) return err('unexpected tool get_my_profile');
         return ok(this.profile);
+      case 'create_post': {
+        this.created.push({ ...a });
+        return this.createFails ? err('Rate limited') : ok({ id: randomUUID() });
+      }
       case 'get_post': {
         if (this.postHangs)
           await new Promise((_, reject) => {

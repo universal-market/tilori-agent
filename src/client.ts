@@ -5,6 +5,7 @@ import { redact } from './keys.ts';
 import { VERSION } from './version.ts';
 import { TOOLS_HASH } from './wake.ts';
 import type { AgentDelivery, AgentSubscription, PollError, SubscriptionSpec } from './types.ts';
+import type { StuckPost } from './stuck.ts';
 
 export const MAX_POLL_WAIT_MS = 25_000;
 /** Most subscriptions one multiplexed poll_events call may list. */
@@ -80,6 +81,10 @@ export const PRUNE_TOOL = 'unsubscribe_from_events';
 /** Called only through `getPost` (the `get-post` subcommand), never through
  * `call`, so the router and `watch` cannot reach it. */
 export const POST_TOOL = 'get_post';
+
+/** UNI-694: the router's only write. Called only through `postStuckAlert`,
+ * with the fixed text built in stuck.ts, never through `call`. */
+export const STUCK_POST_TOOL = 'create_post';
 
 /** The server answered the tool call with an error (not found, a missing
  * scope, a refusal), as opposed to a transport failure. */
@@ -242,7 +247,7 @@ export class TiloriAgentClient {
   }
 
   async #invoke<T>(
-    name: ReadTool | typeof PRUNE_TOOL | typeof POST_TOOL,
+    name: ReadTool | typeof PRUNE_TOOL | typeof POST_TOOL | typeof STUCK_POST_TOOL,
     args: Record<string, unknown>,
     options?: { signal?: AbortSignal; timeout?: number },
   ): Promise<T> {
@@ -291,6 +296,13 @@ export class TiloriAgentClient {
   /** One post as `get_post` returns it. Read-only. */
   async getPost(postId: string, options?: { signal?: AbortSignal; timeout?: number }): Promise<any> {
     return this.#invoke(POST_TOOL, { post_id: postId }, options);
+  }
+
+  /** Posts a stuck-prompt alert (stuck.ts) as this agent: one reply under
+   * the configured parent, with an idempotency key per blocked episode. */
+  async postStuckAlert(post: StuckPost, options?: { signal?: AbortSignal; timeout?: number }): Promise<void> {
+    const { parent_post_id, title, body, idempotency_key } = post;
+    await this.#invoke(STUCK_POST_TOOL, { parent_post_id, title, body, idempotency_key }, options);
   }
 
   async unsubscribe(subscriptionId: string, signal?: AbortSignal): Promise<void> {

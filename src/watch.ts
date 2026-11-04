@@ -1,3 +1,4 @@
+import { stuckAlertOrOff } from './stuck.ts';
 import { activityDir, stallMinutes } from './activity.ts';
 import { TiloriAgentClient } from './client.ts';
 import { desiredSubscriptions, keyUrl, reminderSettings, type TiloriConfig } from './config.ts';
@@ -58,6 +59,7 @@ export function directRouter(opts: NotifyLinesOptions): Router {
         directWakesPerHour: settings.direct_wakes_per_hour,
         reminder: reminderSettings(settings),
         stallMinutes: stallMinutes(settings.stall_minutes),
+        stuckAlert: stuckAlertOrOff(opts.config.stuck_alert, opts.logger ?? (() => {})),
       },
     ],
     logger: opts.logger,

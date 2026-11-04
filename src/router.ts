@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { clock, promptSignal, touchSignal, type SignalKind } from './activity.ts';
+import { activityDir, clock, promptSignal, touchSignal, type SignalKind } from './activity.ts';
 import { MAX_POLL_SUBSCRIPTIONS, MultiPollUnsupported, type ProfileNotes, type TiloriAgentClient } from './client.ts';
 import { DEFAULT_DIRECT_WAKES_PER_HOUR, DEFAULT_WAKES_PER_HOUR, type Reminder, unfilteredPostsWarning } from './config.ts';
 import { WakeLimiter } from './ratelimit.ts';
+import { StuckWatch, type StuckAlert } from './stuck.ts';
 import type { LiveSettings } from './settings.ts';
 import type { AgentDelivery, AgentSubscription, DeliverResult, EventRef, Injector, SubscriptionSpec, Wake } from './types.ts';
 import { KIND_RANK, buildWake, refKey, toRefs } from './wake.ts';
@@ -34,6 +35,8 @@ export interface RouterAgentConfig {
   /** Log once when the session has been blocked on a prompt this long with
    * wakes arriving (validated by stallMinutes; 0 or unset: off). */
   stallMinutes?: number;
+  /** UNI-694: alert when blocked on a prompt this long (stuck.ts); unset: off. */
+  stuckAlert?: StuckAlert | null;
 }
 
 /** This hour's wake counts for `tilori-agent config show`: counts only. */
@@ -47,6 +50,11 @@ export interface AgentUsage {
 
 export interface RouterOptions {
   agents: RouterAgentConfig[];
+  /** How often to check for agents stuck on a prompt (default 60 s). */
+  stuckCheckMs?: number;
+  /** Where prompt-signal writes and alerts.log goes (default: signalDir,
+   * else the run directory). For tests. */
+  stuckDir?: string;
   logger?: (message: string) => void;
   /** Long-poll wait per poll_events call (default 20 s, max 25 s). */
   waitMs?: number;
@@ -207,6 +215,8 @@ export class Router {
   readonly #editPauseMs: number;
   readonly #now: () => number;
   readonly #signalDir: string | undefined;
+  readonly #stuckCheckMs: number;
+  readonly #stuckDir: string | undefined;
   readonly #signalFailed = new Set<string>();
 
   constructor(options: RouterOptions) {
@@ -219,6 +229,8 @@ export class Router {
     this.#editPauseMs = options.editPauseMs ?? EDIT_PAUSE_MS;
     this.#now = options.now ?? Date.now;
     this.#signalDir = options.signalDir;
+    this.#stuckCheckMs = options.stuckCheckMs ?? 60_000;
+    this.#stuckDir = options.stuckDir;
     for (const cfg of options.agents) {
       if (this.#agents.has(cfg.handle)) throw new Error(`Agent ${cfg.handle} listed twice.`);
       const broad = unfilteredPostsWarning(cfg.handle, cfg.subscriptions);
@@ -353,6 +365,46 @@ export class Router {
   }
 
   async run(signal?: AbortSignal): Promise<void> {
+    const stopStuck = this.#watchStuck(signal);
+    try {
+      await this.#runAll(signal);
+    } finally {
+      stopStuck();
+    }
+  }
+
+  /** UNI-694: checks agents with `stuckAlert` on a timer, separate from
+   * wakes, so an agent blocked with nothing arriving is still noticed.
+   * Returns a stop function. */
+  #watchStuck(signal?: AbortSignal): () => void {
+    const dir = this.#stuckDir ?? this.#signalDir ?? activityDir();
+    const watches: StuckWatch[] = [];
+    for (const st of this.#agents.values()) {
+      const alert = st.cfg.stuckAlert;
+      if (!alert) continue;
+      const { handle, client } = st.cfg;
+      watches.push(
+        new StuckWatch({
+          handle,
+          alert,
+          dir,
+          post: (p) => client.postStuckAlert(p, { signal, timeout: 30_000 }),
+          log: this.#log,
+          now: this.#now,
+        }),
+      );
+      this.#log(`[${handle}] stuck alert after ${alert.minutes} min${alert.parentPostId ? ', on Tilori' : ''}${alert.exec ? ', with exec' : ''}`);
+    }
+    if (!watches.length) return () => {};
+    const tick = () => {
+      for (const w of watches) void w.check().catch((cause) => this.#log(`stuck check failed: ${String(cause)}`));
+    };
+    const timer = setInterval(tick, this.#stuckCheckMs);
+    timer.unref?.();
+    return () => clearInterval(timer);
+  }
+
+  async #runAll(signal?: AbortSignal): Promise<void> {
     await Promise.all(
       [...this.#agents.values()].map(async (st) => {
         try {

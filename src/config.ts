@@ -1,3 +1,4 @@
+import type { StuckAlertSettings } from './stuck.ts';
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { assertPrivate, ensurePrivateDir, tiloriHome, validateHandle } from './keys.ts';
@@ -108,6 +109,9 @@ export interface TiloriConfig {
    * origin of `url`, over HTTPS; set by the owner with
    * `/tilori:config trust_server=on`. */
   trust_server?: { origin: string; set_at?: string };
+  /** UNI-694: alert when an agent is stuck on a prompt (stuck.ts). Off
+   * unless set; hand-edited only. */
+  stuck_alert?: StuckAlertSettings;
   /** @deprecated Optional default community (root post id). Agents pick or
    * create a community by topic; this is only a fallback when none fits. */
   coordination_community?: string;
