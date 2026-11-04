@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { activityDir, promptSignal, stallMinutes, statusLine, watchSignal } from './activity.ts';
+import { activityDir, promptSignal, readPushSignal, stallMinutes, statusLine, watchSignal } from './activity.ts';
 import { TiloriAgentClient, ToolRefused } from './client.ts';
 import {
   buildMcpUrl,
@@ -15,6 +15,7 @@ import {
   loadConfig,
   resolveAgent,
   keyUrl,
+  pushEnabled,
   sameEndpoint,
   saveConfig,
   type TiloriConfig,
@@ -467,7 +468,9 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         const exec = str(args, 'exec');
         if (!exec) throw new Error('watch needs --notify-lines or --exec "<command>".');
         const settings = config.agents?.[agent] ?? {};
-        const client = new TiloriAgentClient({ url: keyUrl(config, str(args, 'url')), apiKey: readKey(agent), logger: log });
+        const url = keyUrl(config, str(args, 'url'));
+        const apiKey = readKey(agent);
+        const client = new TiloriAgentClient({ url, apiKey, logger: log });
         const router = new Router({
           agents: [
             {
@@ -478,6 +481,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
               directWakesPerHour: settings.direct_wakes_per_hour,
               reminder: reminderSettings(settings),
               stallMinutes: stallMinutes(settings.stall_minutes),
+              ...(pushEnabled(settings) ? { push: { endpoint: url, apiKey } } : {}),
             },
           ],
           logger: log,
@@ -497,9 +501,11 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         if (!handles.length) throw new Error(`No agent keys in ${join(tiloriHome(), 'agents')}. Run tilori-agent init first.`);
         const agents: RouterAgentConfig[] = handles.map((handle) => {
           const s = config.agents?.[handle] ?? {};
+          const apiKey = readKey(handle);
           return {
             handle,
-            client: new TiloriAgentClient({ url, apiKey: readKey(handle), logger: log }),
+            client: new TiloriAgentClient({ url, apiKey, logger: log }),
+            ...(pushEnabled(s) ? { push: { endpoint: url, apiKey } } : {}),
             subscriptions: desiredSubscriptions(s),
             wakesPerHour: s.wakes_per_hour,
             directWakesPerHour: s.direct_wakes_per_hour,
@@ -563,7 +569,12 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
           } catch {
             stall = undefined;
           }
-          console.log(statusLine(handle, promptSignal(handle), watchSignal(handle, undefined, router), { stallMinutes: stall }));
+          console.log(
+            statusLine(handle, promptSignal(handle), watchSignal(handle, undefined, router), {
+              stallMinutes: stall,
+              push: readPushSignal(handle),
+            }),
+          );
           let broad: string | null = null;
           try {
             broad = unfilteredPostsWarning(handle, desiredSubscriptions(agents?.[handle]));

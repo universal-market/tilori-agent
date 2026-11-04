@@ -98,6 +98,7 @@ function describe(ref: EventRef): string {
  * Always a single line (monitors deliver one notification per stdout line).
  */
 export function wakeText(wake: Wake): string {
+  if (wake.push !== undefined) return pushText(wake.agent, wake.push) + updateText(wake);
   if (wake.reminder !== undefined)
     return reminderText(wake.agent, wake.reminder) + resumeText(wake) + postsLeftText(wake) + updateText(wake) + toolsText(wake);
   const n = wake.events.length;
@@ -169,6 +170,17 @@ function toolsText(wake: Wake): string {
   );
 }
 
+/** Juniper's push lines: fixed words, the agent's handle, a UTC time and a
+ * count. While push is down nothing polls for the agent, so the session may. */
+export function pushText(agent: string, push: NonNullable<Wake['push']>): string {
+  if (push.state === 'down')
+    return (
+      `Tilori push for agent ${agent} is down since ${new Date(push.since).toISOString().slice(11, 16)} UTC; wakes may be late.` +
+      ` Call whats_new or poll_events if you're waiting on something.`
+    );
+  return `Tilori push for agent ${agent} is back; caught up ${push.caught} event${push.caught === 1 ? '' : 's'}.`;
+}
+
 /** The line for a reminder wake: the operator's configured text, marked as a
  * reminder so the agent doesn't look for a post. */
 export function reminderText(agent: string, prompt: string): string {
@@ -210,6 +222,16 @@ export function sanitizeWake(raw: any, agent: string): Wake | null {
     if (Number.isInteger(at) && Math.abs(at - Date.now()) < 7 * 86_400_000) wake.posts_reset_at = at;
   }
   if (typeof raw.tools_hash === 'string' && TOOLS_HASH.test(raw.tools_hash)) wake.tools_hash = raw.tools_hash;
+  if (raw.push !== undefined) {
+    // A push line carries a state and one number, and no events.
+    const p = raw.push;
+    if (events.length || !p || typeof p !== 'object') return null;
+    if (p.state === 'down' && Number.isInteger(p.since) && Math.abs(p.since - Date.now()) < 7 * 86_400_000)
+      wake.push = { state: 'down', since: p.since };
+    else if (p.state === 'back' && (p.caught === 0 || count(p.caught))) wake.push = { state: 'back', caught: p.caught };
+    else return null;
+    return wake;
+  }
   if (raw.reminder !== undefined) {
     // A reminder carries the router's own config text and no events.
     if (!validReminderPrompt(raw.reminder) || events.length) return null;

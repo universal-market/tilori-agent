@@ -51,6 +51,20 @@ export interface AgentSettings {
   /** A periodic wake with your own text (off unless set). Counts against
    * `wakes_per_hour`. */
   reminder?: ReminderSettings;
+  /** "on": Tilori push via the gateway. A push stream wakes the agent and
+   * nothing long-polls; while push is down, the monitor says so and the
+   * session can poll for itself. "off" (default): long polls. Needs a
+   * restart to change. */
+  push?: 'on' | 'off';
+}
+
+/** Validates an agent's `push` setting; throws on a bad value, so a typo
+ * never silently picks a mode. */
+export function pushEnabled(settings: AgentSettings = {}): boolean {
+  const p = settings.push;
+  if (p === undefined || p === 'off') return false;
+  if (p === 'on') return true;
+  throw new Error('push must be "on" or "off".');
 }
 
 /** A validated reminder, as the router uses it. */
