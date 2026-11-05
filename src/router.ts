@@ -7,7 +7,7 @@ import {
   type ProfileNotes,
   type TiloriAgentClient,
 } from './client.ts';
-import { DEFAULT_DIRECT_WAKES_PER_HOUR, DEFAULT_WAKES_PER_HOUR, type Reminder, unfilteredPostsWarning } from './config.ts';
+import { DEFAULT_PAUSE_SECONDS, DEFAULT_DIRECT_WAKES_PER_HOUR, DEFAULT_WAKES_PER_HOUR, type Reminder, unfilteredPostsWarning } from './config.ts';
 import { PushStream, type PushOptions, type PushStatus } from './push.ts';
 import { WakeLimiter } from './ratelimit.ts';
 import type { LiveSettings } from './settings.ts';
@@ -28,10 +28,11 @@ const POSTS_LOW = 100;
 const POSTS_LEFT_MS = 60_000;
 /** Bound on that memory, so a firehose can't grow it without limit. */
 const MAX_RECENT = 5_000;
-/** After a wake carrying an edit from a broad subscription, that subscription
- * is not polled for this long, so the rest of an edit burst queues on the
- * server and arrives as one batch: at most two wakes per burst (UNI-478). */
-const EDIT_PAUSE_MS = 60_000;
+/** Efficient wakes §2: after a batch from a direct subscription (inbox,
+ * mentions, DMs) is handed off, that subscription is not polled for this
+ * long, so a follow-up (a correction, the next reply) queues on the server
+ * and arrives with whatever else came in as one batch. */
+const DIRECT_PAUSE_MS = 10_000;
 
 export interface RouterAgentConfig {
   handle: string;
@@ -40,6 +41,9 @@ export interface RouterAgentConfig {
   wakesPerHour?: number;
   /** Cap for direct wakes (mentions, DMs, inbox), separate from wakesPerHour. */
   directWakesPerHour?: number;
+  /** Seconds a broad subscription rests after each hand-off (validated by
+   * pauseSeconds; local config only). Unset: the router's `broadPauseMs`. */
+  pauseSeconds?: number;
   /** A periodic wake with the operator's own text (validated by reminderSettings). */
   reminder?: Reminder;
   /** Log once when the session has been blocked on a prompt this long with
@@ -81,8 +85,12 @@ export interface RouterOptions {
    * Fixed from the first held batch, so a stream of new posts never pushes
    * it back. Any direct batch ends the hold at once. */
   plainHoldMs?: number;
-  /** How long a broad subscription rests after an edit wake (default 60 s). */
-  editPauseMs?: number;
+  /** How long a direct subscription rests after a hand-off (default 10 s). */
+  directPauseMs?: number;
+  /** How long a broad subscription rests after a hand-off, for an agent
+   * without `pauseSeconds` (default 60 s). Generalises UNI-478's edit pause:
+   * a burst queues on the server and arrives as one batch. */
+  broadPauseMs?: number;
   /** The run directory for `status`'s files (attempting-, watching-, woke-),
    * or unset to write none (tests, or no private run directory). */
   signalDir?: string;
@@ -165,7 +173,7 @@ interface AgentState {
   handedOff: Set<string>;
   /** When the oldest batch now held arrived (0 when none is held). */
   heldSince: number;
-  /** Broad subscriptions resting after an edit wake, until when (Date.now()). */
+  /** Subscriptions resting after a hand-off, until when (Date.now()). */
   paused: Map<string, number>;
   heldNotice: string;
   /** When the next reminder is due (unused without a reminder). An event
@@ -234,7 +242,8 @@ export class Router {
   readonly #renewEveryMs: number;
   readonly #coalesceMs: number;
   readonly #plainHoldMs: number;
-  readonly #editPauseMs: number;
+  readonly #directPauseMs: number;
+  readonly #broadPauseMs: number;
   readonly #now: () => number;
   readonly #signalDir: string | undefined;
   readonly #signalFailed = new Set<string>();
@@ -246,7 +255,8 @@ export class Router {
     this.#renewEveryMs = options.renewEveryMs ?? 6 * 3600_000;
     this.#coalesceMs = options.coalesceMs ?? 3_000;
     this.#plainHoldMs = Math.max(this.#coalesceMs, options.plainHoldMs ?? 30_000);
-    this.#editPauseMs = options.editPauseMs ?? EDIT_PAUSE_MS;
+    this.#directPauseMs = options.directPauseMs ?? DIRECT_PAUSE_MS;
+    this.#broadPauseMs = options.broadPauseMs ?? DEFAULT_PAUSE_SECONDS * 1000;
     this.#now = options.now ?? Date.now;
     this.#signalDir = options.signalDir;
     for (const cfg of options.agents) {
@@ -356,9 +366,12 @@ export class Router {
 
   /** Push mode: waits until a frame or a reconnect moved `seq` past `seen`,
    * or the generation ends. */
-  async #waitPush(st: AgentState, seen: number, signal: AbortSignal): Promise<void> {
+  /** Waits for a frame or a reconnect, or until `untilMs` from now. */
+  async #waitPush(st: AgentState, seen: number, signal: AbortSignal, untilMs = Infinity): Promise<void> {
     const p = st.push!;
-    while (p.seq === seen && !signal.aborted) await sleep(this.#renewEveryMs, signal, p.kick.promise);
+    const end = Date.now() + untilMs;
+    while (p.seq === seen && !signal.aborted && Date.now() < end)
+      await sleep(Math.min(this.#renewEveryMs, end - Date.now()), signal, p.kick.promise);
   }
 
   get agents(): string[] {
@@ -405,8 +418,9 @@ export class Router {
     };
   }
 
-  /** Applies reloaded settings (live reload, UNI-480): the caps, the reminder
-   * interval and stall_minutes only. Wakes already spent this hour still
+  /** Applies reloaded settings (live reload, UNI-480): the caps,
+   * pause_seconds (from the next hand-off), the reminder interval and
+   * stall_minutes only. Wakes already spent this hour still
    * count. A reminder is never added or removed here, only re-timed; a
    * shorter interval brings the next one forward. Returns what changed, as
    * "key old -> new", for the log. */
@@ -429,6 +443,7 @@ export class Router {
       st.directOff = null;
       st.directLimiter.resize(live.directWakesPerHour);
     }
+    note('pause_seconds', st.cfg.pauseSeconds ?? this.#broadPauseMs / 1000, live.pauseSeconds);
     note('stall_minutes', st.cfg.stallMinutes ?? 0, live.stallMinutes);
     let reminder = st.cfg.reminder;
     if (reminder && live.reminderEveryMs !== undefined && live.reminderEveryMs !== reminder.everyMs) {
@@ -440,6 +455,7 @@ export class Router {
       ...st.cfg,
       wakesPerHour: live.wakesPerHour,
       directWakesPerHour: live.directWakesPerHour,
+      pauseSeconds: live.pauseSeconds,
       stallMinutes: live.stallMinutes,
       reminder,
     };
@@ -574,15 +590,17 @@ export class Router {
         return;
       }
       const idle = usable.filter((s) => !pending.has(s.id) && this.#restingMs(st, s.id) <= 0);
+      const resting = usable.map((s) => this.#restingMs(st, s.id)).filter((ms) => ms > 0);
       if (!idle.length) {
-        const resting = usable.map((s) => this.#restingMs(st, s.id)).filter((ms) => ms > 0);
         await sleep(Math.min(this.#retryMs, ...resting), signal, st.polled.promise);
         continue;
       }
       if (st.push && st.push.seq === seen) {
         // Nothing new since the last poll: wait for a frame or a reconnect.
-        // While push is down nothing polls (no long-poll fallback).
-        await this.#waitPush(st, seen, signal);
+        // While push is down nothing polls (no long-poll fallback). A
+        // subscription resting after a hand-off missed the sweeps during its
+        // pause, so its end sweeps once more.
+        await this.#waitPush(st, seen, signal, resting.length ? Math.min(...resting) : Infinity);
         seen = -1;
         continue;
       }
@@ -779,7 +797,7 @@ export class Router {
     return out;
   }
 
-  /** How long a subscription still rests after an edit wake (0 when not). */
+  /** How long a subscription still rests after a hand-off (0 when not). */
   #restingMs(st: AgentState, id: string): number {
     const until = st.paused.get(id);
     if (until === undefined) return 0;
@@ -1132,15 +1150,19 @@ export class Router {
       for (const d of send) {
         st.handedOff.add(d.delivery_id);
         st.capHeld.delete(d.delivery_id);
-        // An edit from a broad subscription rests it, so later edits of the
-        // burst arrive together. Direct subscriptions never rest, and a
-        // running pause is not extended: at most one pause length at a time.
-        if (
-          !st.directSubs.has(d.subscription_id) &&
-          this.#restingMs(st, d.subscription_id) <= 0 &&
-          d.events.some((e) => e.kind === 'post.edited')
-        )
-          st.paused.set(d.subscription_id, Date.now() + this.#editPauseMs);
+        // Each hand-off rests its subscription, so what arrives next queues
+        // on the server and comes back as one batch: at most one wake per
+        // window per subscription. The pause starts at the hand-off, so a
+        // busy thread can't delay a wake, and a running pause is not
+        // extended.
+        if (this.#restingMs(st, d.subscription_id) <= 0) {
+          const ms = st.directSubs.has(d.subscription_id)
+            ? this.#directPauseMs
+            : st.cfg.pauseSeconds === undefined
+              ? this.#broadPauseMs
+              : st.cfg.pauseSeconds * 1000;
+          if (ms > 0) st.paused.set(d.subscription_id, Date.now() + ms);
+        }
       }
       // Remembered only once accepted, so a busy or gone attempt never
       // hides a ref from the next wake.

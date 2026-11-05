@@ -411,7 +411,7 @@ class Recorder implements Injector {
 }
 
 describe('router in push mode', () => {
-  function setupPush(extra = 0) {
+  function setupPush(extra = 0, directPauseMs = 0) {
     const fake = new FakeTilori();
     const bodies: Array<ReturnType<typeof sseBody>> = [];
     const opens: Array<() => Response> = [];
@@ -440,11 +440,36 @@ describe('router in push mode', () => {
       retryMs: 10,
       coalesceMs: 0,
       plainHoldMs: 0,
+      directPauseMs,
     });
     const inj = new Recorder();
     router.register('wren', inj);
     const ac = new AbortController();
     return { fake, router, inj, ac, calls, bodies, openNext, start: () => router.run(ac.signal) };
+  }
+
+  for (const extra of [0, 1]) {
+    test(`events that arrive during a pause wake when it ends, with no further frame (${extra ? 'another subscription idle' : 'only one subscription'})`, async () => {
+      const s = setupPush(extra, 1_500);
+      const b = s.openNext();
+      const done = s.start();
+      await until(() => s.fake.subs.length === 1 + extra && s.fake.waits.length >= 1);
+      const inbox = s.fake.subs.find((x) => x.scope.type === 'inbox')!.id;
+      const frame = (id: string) => b.send(`event: events\ndata: ${JSON.stringify({ subscriptionId: inbox, deliveryId: id, events: [] })}\n\n`);
+      s.fake.push('inbox', [mention()]);
+      frame('d1');
+      await until(() => s.inj.wakes.length === 1, 3000);
+      const t0 = Date.now();
+      // Inbox now rests; this mention's frame is swept without it.
+      s.fake.push('inbox', [mention()]);
+      frame('d2');
+      await new Promise((r) => setTimeout(r, 600));
+      expect(s.inj.wakes).toHaveLength(1);
+      await until(() => s.inj.wakes.length === 2, 4000);
+      expect(Date.now() - t0).toBeGreaterThanOrEqual(1_400);
+      s.ac.abort();
+      await done;
+    }, 10_000);
   }
 
   test('with more subscriptions than one poll takes, a sweep reads them all once, and polls stay bounded', async () => {

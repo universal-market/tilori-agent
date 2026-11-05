@@ -9,6 +9,7 @@ import {
   coordinationPolicy,
   trustServerState,
   policyText,
+  pauseSeconds,
   desiredSubscriptions,
   unfilteredPostsWarning,
   reminderSettings,
@@ -88,7 +89,7 @@ Usage:
   tilori-agent config reset [--agent <handle>] <key> [<key> …]
       Shows or changes the agent's own wake settings in config.json; a running
       router applies a change within seconds. Settable keys only:
-        wakes_per_hour (1-60), direct_wakes_per_hour (0-30),
+        wakes_per_hour (1-60), direct_wakes_per_hour (0-30), pause_seconds (0-300),
         reminder.every_minutes (15-1440, for a reminder set up by hand),
         stall_minutes (0-1440)
   tilori-agent config set trust_server=on|off
@@ -479,6 +480,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
               subscriptions: desiredSubscriptions(settings),
               wakesPerHour: settings.wakes_per_hour,
               directWakesPerHour: settings.direct_wakes_per_hour,
+              pauseSeconds: pauseSeconds(settings.pause_seconds),
               reminder: reminderSettings(settings),
               stallMinutes: stallMinutes(settings.stall_minutes),
               ...(pushEnabled(settings) ? { push: { endpoint: url, apiKey } } : {}),
@@ -509,6 +511,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
             subscriptions: desiredSubscriptions(s),
             wakesPerHour: s.wakes_per_hour,
             directWakesPerHour: s.direct_wakes_per_hour,
+            pauseSeconds: pauseSeconds(s.pause_seconds),
             reminder: reminderSettings(s),
             stallMinutes: stallMinutes(s.stall_minutes),
           };
