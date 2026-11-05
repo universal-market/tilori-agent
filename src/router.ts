@@ -592,9 +592,6 @@ export class Router {
       const idle = usable.filter((s) => !pending.has(s.id) && this.#restingMs(st, s.id) <= 0);
       const resting = usable.map((s) => this.#restingMs(st, s.id)).filter((ms) => ms > 0);
       if (!idle.length) {
-        // Push: a frame that came while a subscription rested was swept
-        // without it, so sweep once when its pause ends.
-        if (st.push && resting.length) seen = -1;
         await sleep(Math.min(this.#retryMs, ...resting), signal, st.polled.promise);
         continue;
       }
