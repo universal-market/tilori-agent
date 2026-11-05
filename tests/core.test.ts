@@ -337,7 +337,11 @@ describe('wake text', () => {
     ];
     for (const [reason, label] of cases) {
       const e = { ...p(), ...(reason === undefined ? {} : { reason }) };
-      const text = wakeText(inboxBatch([e]));
+      const w = inboxBatch([e]);
+      const text = wakeText(w);
+      // The ref carries only a known label, never whatever the lookup found.
+      expect([undefined, 'started', 'claimed']).toContain(w.events[0].thread);
+      if (!label) expect(w.events[0].thread ?? w.events[0].to_you).toBeUndefined();
       // The ref is always shown; the label only for an exact reason.
       if (label) expect(text).toContain(`post.created post ${e.entity_id} (${label})`);
       else expect(text).toContain(`(post.created post ${e.entity_id}).`);
@@ -356,6 +360,8 @@ describe('wake text', () => {
     expect(label([copy('thread_claimed'), copy('thread_started')])).toBe('in your thread');
     expect(label([copy('thread_started'), copy('thread_claimed')])).toBe('in your thread');
     expect(label([copy('thread_claimed'), copy()])).toBe('reply to you');
+    // A reply carries no thread label alongside, so IPC and hosts see one.
+    expect(inboxBatch([copy('thread_started'), copy()]).events.map((e) => [e.to_you, e.thread])).toEqual([[true, undefined]]);
     expect(label([copy(), copy('thread_started')])).toBe('reply to you');
     // A mention of the same post outranks them all, as its kind.
     expect(wakeText(inboxBatch([copy('thread_started'), mention(id)]))).toContain(`(mention post ${id}).`);
