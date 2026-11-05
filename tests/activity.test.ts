@@ -285,6 +285,35 @@ describe('router status files and the direct tag', () => {
     await done;
   });
 
+  test('a long pause on broad-only subscriptions keeps status "watched" (Iris)', async () => {
+    const fake = new FakeTilori();
+    const router = new Router({
+      agents: [{ handle: 'wren', client: fake.client(), subscriptions: desiredSubscriptions({ inbox: false, direct_messages: false, subscriptions: [{ scope: { type: 'posts' } }] }) }],
+      waitMs: 10,
+      retryMs: 10,
+      coalesceMs: 0,
+      plainHoldMs: 0,
+      broadPauseMs: 60_000,
+      restSignalMs: 50,
+      signalDir: dir,
+    });
+    const inj = new Recorder();
+    router.register('wren', inj);
+    const ac = new AbortController();
+    const done = router.run(ac.signal);
+    await until(() => fake.subs.length === 1);
+    fake.push('posts', [post()]);
+    await until(() => inj.wakes.length === 1);
+    // The only subscription now rests for 60 s and isn't polled. Age the file
+    // past WATCHED_MS: the rest refreshes it.
+    const polls = fake.polls.length;
+    touch('watching-wren', Date.now() - 10 * 60_000);
+    await until(() => Date.now() - watchSignal('wren', dir).watching! < 5_000);
+    expect(fake.polls.length).toBe(polls);
+    ac.abort();
+    await done;
+  });
+
   test('a poll where every subscription errored is not "watched"', async () => {
     const fake = new FakeTilori();
     const logs: string[] = [];

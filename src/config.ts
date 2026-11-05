@@ -55,7 +55,7 @@ export interface AgentSettings {
   /** After a wake from a broad subscription (not inbox, mentions or DMs),
    * wait up to this many seconds before the next one from it, so a burst
    * makes one wake (default 60, 0–300). The first post after a quiet spell
-   * still wakes promptly. Direct subscriptions pause a fixed 10 s. */
+   * still wakes as before (up to 30 s, so an inbox copy can join it). Direct subscriptions pause a fixed 10 s. */
   pause_seconds?: number;
   /** Minutes a session may sit blocked on a prompt, with wakes arriving,
    * before the router logs it once (default 10; 0 turns it off). Needs a

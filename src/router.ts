@@ -33,6 +33,9 @@ const MAX_RECENT = 5_000;
  * long, so a follow-up (a correction, the next reply) queues on the server
  * and arrives with whatever else came in as one batch. */
 const DIRECT_PAUSE_MS = 10_000;
+/** While every subscription rests, `watching-` is refreshed this often, well
+ * inside status's WATCHED_MS. */
+const REST_SIGNAL_MS = 30_000;
 
 export interface RouterAgentConfig {
   handle: string;
@@ -91,6 +94,8 @@ export interface RouterOptions {
    * without `pauseSeconds` (default 60 s). Generalises UNI-478's edit pause:
    * a burst queues on the server and arrives as one batch. */
   broadPauseMs?: number;
+  /** While every subscription rests, refresh `watching-` this often (default 30 s). */
+  restSignalMs?: number;
   /** The run directory for `status`'s files (attempting-, watching-, woke-),
    * or unset to write none (tests, or no private run directory). */
   signalDir?: string;
@@ -175,6 +180,8 @@ interface AgentState {
   heldSince: number;
   /** Subscriptions resting after a hand-off, until when (Date.now()). */
   paused: Map<string, number>;
+  /** When `watching-` was last refreshed for a rest (0: not yet). */
+  restSignalAt: number;
   heldNotice: string;
   /** When the next reminder is due (unused without a reminder). An event
    * wake pushes it back when the reminder is only for idle agents. */
@@ -244,6 +251,7 @@ export class Router {
   readonly #plainHoldMs: number;
   readonly #directPauseMs: number;
   readonly #broadPauseMs: number;
+  readonly #restSignalMs: number;
   readonly #now: () => number;
   readonly #signalDir: string | undefined;
   readonly #signalFailed = new Set<string>();
@@ -257,6 +265,7 @@ export class Router {
     this.#plainHoldMs = Math.max(this.#coalesceMs, options.plainHoldMs ?? 30_000);
     this.#directPauseMs = options.directPauseMs ?? DIRECT_PAUSE_MS;
     this.#broadPauseMs = options.broadPauseMs ?? DEFAULT_PAUSE_SECONDS * 1000;
+    this.#restSignalMs = options.restSignalMs ?? REST_SIGNAL_MS;
     this.#now = options.now ?? Date.now;
     this.#signalDir = options.signalDir;
     for (const cfg of options.agents) {
@@ -285,6 +294,7 @@ export class Router {
         handedOff: new Set(),
         heldSince: 0,
         paused: new Map(),
+        restSignalAt: 0,
         heldNotice: '',
         reminderAt: cfg.reminder ? Date.now() + cfg.reminder.everyMs : 0,
         stats: { wakes: 0, events: 0, delayed: 0, reminders: 0 },
@@ -366,7 +376,9 @@ export class Router {
 
   /** Push mode: waits until a frame or a reconnect moved `seq` past `seen`,
    * or the generation ends. */
-  /** Waits for a frame or a reconnect, or until `untilMs` from now. */
+  /** Waits for a frame or a reconnect, or until `untilMs` from now. Real
+   * time (`Date.now()`), like the pauses that set `untilMs` and the timers
+   * that end them; `this.#now` is a fakeable clock for the wake caps only. */
   async #waitPush(st: AgentState, seen: number, signal: AbortSignal, untilMs = Infinity): Promise<void> {
     const p = st.push!;
     const end = Date.now() + untilMs;
@@ -592,6 +604,12 @@ export class Router {
       const idle = usable.filter((s) => !pending.has(s.id) && this.#restingMs(st, s.id) <= 0);
       const resting = usable.map((s) => this.#restingMs(st, s.id)).filter((ms) => ms > 0);
       if (!idle.length) {
+        // Resting after a wake is still watched: keep `status` from saying
+        // "not watched" during a pause longer than its window (Iris).
+        if (resting.length && Date.now() - st.restSignalAt >= this.#restSignalMs) {
+          st.restSignalAt = Date.now();
+          this.#signal(handle, 'watching');
+        }
         await sleep(Math.min(this.#retryMs, ...resting), signal, st.polled.promise);
         continue;
       }
