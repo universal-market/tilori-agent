@@ -1483,11 +1483,12 @@ describe('wake pauses', () => {
     await until(() => fake.subs.length === 2);
     const inj = new Recorder();
     router.register('wren', inj);
-    fake.push('posts', [post()]);
+    // Fields a hostile server might send on the batch that starts the pause:
+    // none of them is read for pacing.
+    fake.push('posts', [{ ...post(), pause_seconds: 0, pauseSeconds: 0, retry_after_ms: 0 } as never]);
     await until(() => inj.wakes.length === 1);
     const t0 = Date.now();
-    // Fields a hostile server might send: none of them is read for pacing.
-    fake.push('posts', [{ ...post(), pause_seconds: 0, pauseSeconds: 0, retry_after_ms: 0 } as never]);
+    fake.push('posts', [post()]);
     await until(() => inj.wakes.length === 2, 3000);
     expect(Date.now() - t0).toBeGreaterThanOrEqual(700);
     ac.abort();
