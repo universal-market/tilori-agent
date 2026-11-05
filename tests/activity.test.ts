@@ -206,6 +206,7 @@ function routerWith(stall: number) {
     retryMs: 10,
     coalesceMs: 0,
     plainHoldMs: 0,
+    directPauseMs: 0,
   });
   const inj = new Recorder();
   router.register('wren', inj);

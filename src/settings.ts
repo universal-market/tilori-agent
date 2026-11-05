@@ -2,8 +2,11 @@ import { watch } from 'node:fs';
 import { basename, dirname } from 'node:path';
 import { DEFAULT_STALL_MINUTES, MAX_STALL_MINUTES, stallMinutes } from './activity.ts';
 import {
+  DEFAULT_PAUSE_SECONDS,
   DEFAULT_DIRECT_WAKES_PER_HOUR,
   DEFAULT_WAKES_PER_HOUR,
+  MAX_PAUSE_SECONDS,
+  pauseSeconds,
   MIN_REMINDER_MINUTES,
   buildMcpUrl,
   configPath,
@@ -62,6 +65,15 @@ export const SETTABLE: readonly Settable[] = [
     note: 'extra wakes for mentions and DMs past the cap; 0 = off',
     get: (s) => s.direct_wakes_per_hour,
     put: (s, v) => (v === undefined ? delete s.direct_wakes_per_hour : (s.direct_wakes_per_hour = v)),
+  },
+  {
+    key: 'pause_seconds',
+    min: 0,
+    max: MAX_PAUSE_SECONDS,
+    fallback: DEFAULT_PAUSE_SECONDS,
+    note: 'after a wake from a broad subscription, seconds before the next one from it',
+    get: (s) => s.pause_seconds,
+    put: (s, v) => (v === undefined ? delete s.pause_seconds : (s.pause_seconds = v)),
   },
   {
     key: 'reminder.every_minutes',
@@ -189,6 +201,7 @@ export const resetEdit = (key: string) => ({ key: settable(key), value: undefine
 export interface LiveSettings {
   wakesPerHour: number;
   directWakesPerHour: number;
+  pauseSeconds: number;
   /** Undefined without a reminder: reload never adds or removes one. */
   reminderEveryMs?: number;
   stallMinutes: number;
@@ -202,6 +215,7 @@ export function liveSettings(s: AgentSettings = {}): LiveSettings {
   return {
     wakesPerHour: wakes,
     directWakesPerHour: direct,
+    pauseSeconds: pauseSeconds(s.pause_seconds),
     reminderEveryMs: reminderSettings(s)?.everyMs,
     stallMinutes: stallMinutes(s.stall_minutes),
   };

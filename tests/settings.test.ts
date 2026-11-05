@@ -317,10 +317,13 @@ describe('live reload', () => {
   });
 
   test('liveSettings validates as the router does at start', () => {
-    expect(liveSettings({})).toEqual({ wakesPerHour: 20, directWakesPerHour: 10, reminderEveryMs: undefined, stallMinutes: 10 });
+    expect(liveSettings({})).toEqual({ wakesPerHour: 20, directWakesPerHour: 10, pauseSeconds: 60, reminderEveryMs: undefined, stallMinutes: 10 });
     expect(() => liveSettings({ wakes_per_hour: 0 })).toThrow();
     expect(() => liveSettings({ direct_wakes_per_hour: -1 })).toThrow();
     expect(() => liveSettings({ stall_minutes: 2000 })).toThrow();
+    expect(liveSettings({ pause_seconds: 0 }).pauseSeconds).toBe(0);
+    expect(liveSettings({ pause_seconds: 300 }).pauseSeconds).toBe(300);
+    for (const bad of [-1, 301, 2.5, '30', null, Number.NaN]) expect(() => liveSettings({ pause_seconds: bad as never })).toThrow();
     expect(() => liveSettings({ reminder: { every_minutes: 5, prompt: 'x' } })).toThrow();
   });
 });

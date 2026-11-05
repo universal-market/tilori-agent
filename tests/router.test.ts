@@ -26,7 +26,9 @@ function setup(
     now?: () => number;
     coalesceMs?: number;
     plainHoldMs?: number;
-    editPauseMs?: number;
+    pauseSeconds?: number;
+    directPauseMs?: number;
+    broadPauseMs?: number;
     subscriptions?: SubscriptionSpec[];
     reminder?: { everyMs: number; prompt: string; onlyWhenIdle: boolean };
   } = {},
@@ -43,6 +45,7 @@ function setup(
         subscriptions,
         wakesPerHour: opts.wakesPerHour,
         directWakesPerHour: opts.directWakesPerHour,
+        pauseSeconds: opts.pauseSeconds,
         reminder: opts.reminder,
       },
     ],
@@ -51,7 +54,8 @@ function setup(
     retryMs: 10,
     coalesceMs: opts.coalesceMs ?? 0,
     plainHoldMs: opts.plainHoldMs ?? 0,
-    editPauseMs: opts.editPauseMs ?? 0,
+    directPauseMs: opts.directPauseMs ?? 0,
+    broadPauseMs: opts.broadPauseMs ?? 0,
     now: opts.now,
   });
   const ac = new AbortController();
@@ -221,7 +225,7 @@ describe('router', () => {
     fake.push('posts', [post(), post()]);
     await until(() => router.stats('wren')!.delayed === 2);
     expect(router.usage('wren')).toEqual({ wakes: { used: 1, limit: 1 }, direct: { used: 0, limit: 10 }, held: 2 });
-    expect(router.reload('wren', { wakesPerHour: 5, directWakesPerHour: 10, stallMinutes: 0 })).toEqual(['wakes_per_hour 1 -> 5']);
+    expect(router.reload('wren', { wakesPerHour: 5, directWakesPerHour: 10, pauseSeconds: 0, stallMinutes: 0 })).toEqual(['wakes_per_hour 1 -> 5']);
     // No hour passes: the raised cap alone releases them.
     await until(() => inj.wakes.length === 2);
     expect(inj.wakes[1].events).toHaveLength(2);
@@ -241,14 +245,14 @@ describe('router', () => {
       fake.push('posts', [post()]);
       await until(() => inj.wakes.length === i);
     }
-    router.reload('wren', { wakesPerHour: 2, directWakesPerHour: 0, stallMinutes: 0 });
+    router.reload('wren', { wakesPerHour: 2, directWakesPerHour: 0, pauseSeconds: 0, stallMinutes: 0 });
     expect(router.usage('wren')).toEqual({ wakes: { used: 2, limit: 2 }, direct: null, held: 0 });
     // Over the new cap, and the direct allowance is off: even a mention waits.
     fake.push('inbox', [mention()]);
     await until(() => router.stats('wren')!.delayed === 1);
     expect(inj.wakes).toHaveLength(2);
     // Turning the direct allowance back on lets it out.
-    expect(router.reload('wren', { wakesPerHour: 2, directWakesPerHour: 3, stallMinutes: 0 })).toEqual([
+    expect(router.reload('wren', { wakesPerHour: 2, directWakesPerHour: 3, pauseSeconds: 0, stallMinutes: 0 })).toEqual([
       'direct_wakes_per_hour 0 -> 3',
     ]);
     await until(() => inj.wakes.length === 3);
@@ -269,9 +273,9 @@ describe('router', () => {
       await until(() => inj.wakes.length === i);
     }
     expect(router.usage('wren')!.direct).toEqual({ used: 2, limit: 2 });
-    router.reload('wren', { wakesPerHour: 1, directWakesPerHour: 0, stallMinutes: 0 });
+    router.reload('wren', { wakesPerHour: 1, directWakesPerHour: 0, pauseSeconds: 0, stallMinutes: 0 });
     expect(router.usage('wren')!.direct).toBeNull();
-    router.reload('wren', { wakesPerHour: 1, directWakesPerHour: 3, stallMinutes: 0 });
+    router.reload('wren', { wakesPerHour: 1, directWakesPerHour: 3, pauseSeconds: 0, stallMinutes: 0 });
     // Back on with a higher cap: the two spent wakes still count, one is left.
     expect(router.usage('wren')!.direct).toEqual({ used: 2, limit: 3 });
     fake.push('inbox', [mention()]);
@@ -288,7 +292,7 @@ describe('router', () => {
     const { router, ac, done } = setup({ reminder: { everyMs: 3600_000, prompt: 'Check in.', onlyWhenIdle: false } });
     const inj = new Recorder();
     router.register('wren', inj);
-    const changed = router.reload('wren', { wakesPerHour: 20, directWakesPerHour: 10, reminderEveryMs: 50, stallMinutes: 0 });
+    const changed = router.reload('wren', { wakesPerHour: 20, directWakesPerHour: 10, pauseSeconds: 0, reminderEveryMs: 50, stallMinutes: 0 });
     expect(changed).toHaveLength(1);
     expect(changed[0]).toStartWith('reminder.every_minutes 60 -> ');
     await until(() => inj.wakes.some((w) => w.reminder === 'Check in.'));
@@ -297,7 +301,7 @@ describe('router', () => {
     const plain = setup();
     const inj2 = new Recorder();
     plain.router.register('wren', inj2);
-    expect(plain.router.reload('wren', { wakesPerHour: 20, directWakesPerHour: 10, reminderEveryMs: 50, stallMinutes: 0 })).toEqual([]);
+    expect(plain.router.reload('wren', { wakesPerHour: 20, directWakesPerHour: 10, pauseSeconds: 0, reminderEveryMs: 50, stallMinutes: 0 })).toEqual([]);
     await new Promise((r) => setTimeout(r, 150));
     expect(inj2.wakes).toHaveLength(0);
     plain.ac.abort();
@@ -434,7 +438,7 @@ describe('router', () => {
   });
 
   test('a burst of edits on a broad subscription gives at most two wakes: the first now, the rest together', async () => {
-    const { fake, router, ac, done } = setup({ posts: true, editPauseMs: 400 });
+    const { fake, router, ac, done } = setup({ posts: true, broadPauseMs: 400 });
     const inj = new Recorder();
     router.register('wren', inj);
     await until(() => fake.subs.length === 3);
@@ -458,7 +462,7 @@ describe('router', () => {
   });
 
   test('an edit of a reply to you, on both the inbox and posts, wakes once (Pax, tilori-agent#42)', async () => {
-    const { fake, router, ac, done } = setup({ posts: true, editPauseMs: 300 });
+    const { fake, router, ac, done } = setup({ posts: true, broadPauseMs: 300 });
     const inj = new Recorder();
     router.register('wren', inj);
     await until(() => fake.subs.length === 3);
@@ -480,7 +484,7 @@ describe('router', () => {
   });
 
   test('an edit that adds a mention wakes once, as the mention (Pax, tilori-agent#42)', async () => {
-    const { fake, router, ac, done } = setup({ posts: true, editPauseMs: 300 });
+    const { fake, router, ac, done } = setup({ posts: true, broadPauseMs: 300 });
     const inj = new Recorder();
     router.register('wren', inj);
     await until(() => fake.subs.length === 3);
@@ -503,7 +507,7 @@ describe('router', () => {
   });
 
   test('edits on a direct subscription wake once per revision; older copies wake nothing', async () => {
-    const { fake, router, ac, done } = setup({ posts: true, editPauseMs: 300 });
+    const { fake, router, ac, done } = setup({ posts: true, broadPauseMs: 300 });
     const inj = new Recorder();
     router.register('wren', inj);
     await until(() => fake.subs.length === 3);
@@ -531,7 +535,7 @@ describe('router', () => {
   });
 
   test('a mention during an edit pause wakes at once; the pause is not extended', async () => {
-    const { fake, router, ac, done } = setup({ posts: true, editPauseMs: 600 });
+    const { fake, router, ac, done } = setup({ posts: true, broadPauseMs: 600 });
     const inj = new Recorder();
     router.register('wren', inj);
     await until(() => fake.subs.length === 3);
@@ -878,6 +882,7 @@ describe('router', () => {
       waitMs: 20_000,
       retryMs: 10,
       coalesceMs: 0,
+      directPauseMs: 0,
     });
     let calls = 0;
     const slow: Injector = {
@@ -1383,5 +1388,109 @@ describe('UNI-562 unfiltered posts warning', () => {
     ac.abort();
     await done;
     expect(logs.some((l) => l.includes('subscription has no filter'))).toBe(false);
+  });
+});
+
+// Efficient wakes §2: a pause after each hand-off, per subscription.
+describe('wake pauses', () => {
+  const broadSubs = desiredSubscriptions({ direct_messages: false, subscriptions: [{ scope: { type: 'posts' } }] });
+
+  test('a stream of mentions wakes at once, then once per direct pause with the queued ones together', async () => {
+    const { fake, router, ac, done } = setup({ directPauseMs: 600 });
+    await until(() => fake.subs.length === 2);
+    const inj = new Recorder();
+    router.register('wren', inj);
+    const t0 = Date.now();
+    let streaming = true;
+    const stream = (async () => {
+      while (streaming) {
+        fake.push('inbox', [mention()]);
+        await Bun.sleep(250);
+      }
+    })();
+    await until(() => inj.wakes.length >= 1, 3000);
+    expect(Date.now() - t0).toBeLessThan(300);
+    await until(() => inj.wakes.length >= 2, 3000);
+    const second = Date.now() - t0;
+    streaming = false;
+    await stream;
+    expect(second).toBeGreaterThanOrEqual(550);
+    expect(inj.wakes[0].events).toHaveLength(1);
+    expect(inj.wakes[1].events.length).toBeGreaterThanOrEqual(2);
+    ac.abort();
+    await done;
+  });
+
+  test('a paused posts subscription never holds back an inbox mention', async () => {
+    const { fake, router, ac, done } = setup({ broadPauseMs: 5000, subscriptions: broadSubs });
+    await until(() => fake.subs.length === 2);
+    const inj = new Recorder();
+    router.register('wren', inj);
+    fake.push('posts', [post()]);
+    await until(() => inj.wakes.length === 1);
+    // posts now rests for 5 s; a post queued behind it waits.
+    fake.push('posts', [post()]);
+    const t0 = Date.now();
+    fake.push('inbox', [mention()]);
+    await until(() => inj.wakes.length === 2, 3000);
+    expect(Date.now() - t0).toBeLessThan(1000);
+    expect(inj.wakes[1].events.map((e) => e.kind)).toEqual(['mention']);
+    ac.abort();
+    await done;
+  });
+
+  test("an agent's pause_seconds sets its broad pause over the router default", async () => {
+    for (const [pauseSeconds, broadPauseMs, rests] of [
+      [1, 0, true],
+      [0, 5000, false],
+    ] as const) {
+      const { fake, router, ac, done } = setup({ pauseSeconds, broadPauseMs, subscriptions: broadSubs });
+      await until(() => fake.subs.length === 2);
+      const inj = new Recorder();
+      router.register('wren', inj);
+      fake.push('posts', [post()]);
+      await until(() => inj.wakes.length === 1);
+      const t0 = Date.now();
+      fake.push('posts', [post()]);
+      await until(() => inj.wakes.length === 2, 3000);
+      if (rests) expect(Date.now() - t0).toBeGreaterThanOrEqual(800);
+      else expect(Date.now() - t0).toBeLessThan(500);
+      ac.abort();
+      await done;
+    }
+  });
+
+  test('a reload changes pause_seconds from the next hand-off', async () => {
+    const { fake, router, ac, done } = setup({ pauseSeconds: 0, subscriptions: broadSubs });
+    await until(() => fake.subs.length === 2);
+    const inj = new Recorder();
+    router.register('wren', inj);
+    expect(router.reload('wren', { wakesPerHour: 20, directWakesPerHour: 10, pauseSeconds: 1, stallMinutes: 0 })).toEqual([
+      'pause_seconds 0 -> 1',
+    ]);
+    fake.push('posts', [post()]);
+    await until(() => inj.wakes.length === 1);
+    const t0 = Date.now();
+    fake.push('posts', [post()]);
+    await until(() => inj.wakes.length === 2, 3000);
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(800);
+    ac.abort();
+    await done;
+  });
+
+  test('nothing in a batch shortens or skips a pause', async () => {
+    const { fake, router, ac, done } = setup({ broadPauseMs: 800, subscriptions: broadSubs });
+    await until(() => fake.subs.length === 2);
+    const inj = new Recorder();
+    router.register('wren', inj);
+    fake.push('posts', [post()]);
+    await until(() => inj.wakes.length === 1);
+    const t0 = Date.now();
+    // Fields a hostile server might send: none of them is read for pacing.
+    fake.push('posts', [{ ...post(), pause_seconds: 0, pauseSeconds: 0, retry_after_ms: 0 } as never]);
+    await until(() => inj.wakes.length === 2, 3000);
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(700);
+    ac.abort();
+    await done;
   });
 });

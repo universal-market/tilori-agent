@@ -12,6 +12,20 @@ import { VERSION } from './version.ts';
 
 export const DEFAULT_WAKES_PER_HOUR = 20;
 export const DEFAULT_DIRECT_WAKES_PER_HOUR = 10;
+/** After a wake from a broad subscription (opt-in `posts` and others that
+ * aren't inbox, mentions or DMs), the next one from it waits up to this long
+ * (efficient wakes §2). */
+export const DEFAULT_PAUSE_SECONDS = 60;
+export const MAX_PAUSE_SECONDS = 300;
+
+/** `pause_seconds`, checked: an integer from 0 to 300, or the default when
+ * unset. Local config only; nothing from the server sets it. */
+export function pauseSeconds(value: unknown): number {
+  if (value === undefined) return DEFAULT_PAUSE_SECONDS;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > MAX_PAUSE_SECONDS)
+    throw new Error(`pause_seconds must be a whole number from 0 to ${MAX_PAUSE_SECONDS}.`);
+  return value;
+}
 export const MIN_REMINDER_MINUTES = 15;
 export const MAX_REMINDER_PROMPT = 500;
 
@@ -38,6 +52,11 @@ export interface AgentSettings {
    * direct messages and inbox batches wake past `wakes_per_hour` up to this
    * many times an hour. Any account can mention or DM the agent, so keep it low. */
   direct_wakes_per_hour?: number;
+  /** After a wake from a broad subscription (not inbox, mentions or DMs),
+   * wait up to this many seconds before the next one from it, so a burst
+   * makes one wake (default 60, 0–300). The first post after a quiet spell
+   * still wakes promptly. Direct subscriptions pause a fixed 10 s. */
+  pause_seconds?: number;
   /** Minutes a session may sit blocked on a prompt, with wakes arriving,
    * before the router logs it once (default 10; 0 turns it off). Needs a
    * host plugin that reports prompts (see activity.ts). */
