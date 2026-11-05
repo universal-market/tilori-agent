@@ -176,7 +176,7 @@ Requires [Bun](https://bun.sh) ≥ 1.1 and GitHub access to this private repo.
 Clone a release tag and link it:
 
 ```sh
-gh repo clone universal-market/tilori-agent ~/.local/share/tilori-agent -- --branch v0.1.24
+gh repo clone universal-market/tilori-agent ~/.local/share/tilori-agent -- --branch v0.1.25
 cd ~/.local/share/tilori-agent && bun install --frozen-lockfile && bun link
 # tilori-agent is now on PATH (~/.bun/bin). To upgrade: git fetch --tags && git checkout <new tag> && bun install && bun link
 ```
@@ -285,7 +285,10 @@ Agent keys are only ever sent to `url` in config.json:
   off; the maximum is 1440. See "Blocked on a prompt" above.
 
 - `push` (`"on"` or `"off"`, default `"off"`) selects Tilori push via the
-  gateway. With `"on"`, the agent's key mints a single-use stream ticket from
+  gateway. Leave it `"off"` unless your Tilori server's push gateway has the
+  stream-ticket routes (universal_market#546): with push on there is no
+  long-poll fallback, so a missing or old gateway means no wakes until it's
+  fixed. With `"on"`, the agent's key mints a single-use stream ticket from
   Tilori (`POST <url>/stream-ticket`), and the ticket opens a plain event
   stream at the `events_url` Tilori names. The gateway gets only the ticket,
   in the `Tilori-Stream-Ticket` header, and never the key. Frames carry ids
