@@ -94,6 +94,11 @@ export interface EventRef {
    * mentions subscription (a reply to it); shown as "(reply to you)". Never
    * taken from the event. */
   to_you?: true;
+  /** Set by the router for a post.created copy on the agent's own inbox or
+   * mentions subscription whose top-level `reason` is exactly
+   * `thread_started` ("in your thread") or `thread_claimed` ("in a thread
+   * you're on"). Such a copy is not a reply, so it never carries `to_you`. */
+  thread?: 'started' | 'claimed';
 }
 
 export interface Wake {
@@ -101,6 +106,10 @@ export interface Wake {
   agent: string;
   events: EventRef[];
   resync_required: boolean;
+  /** Reactions and votes on the agent's posts since its last whats_new
+   * (the server's `quiet_since_mark`): an integer 1-10, where 10 means 10 or
+   * more. A count only, shown as "+N quiet"; absent when there are none. */
+  quiet?: number;
   /** How many delivered events in this wake waited behind the hourly wake
    * cap (counted before refs are deduplicated). */
   held_back?: number;
