@@ -366,9 +366,12 @@ export class Router {
 
   /** Push mode: waits until a frame or a reconnect moved `seq` past `seen`,
    * or the generation ends. */
-  async #waitPush(st: AgentState, seen: number, signal: AbortSignal): Promise<void> {
+  /** Waits for a frame or a reconnect, or until `untilMs` from now. */
+  async #waitPush(st: AgentState, seen: number, signal: AbortSignal, untilMs = Infinity): Promise<void> {
     const p = st.push!;
-    while (p.seq === seen && !signal.aborted) await sleep(this.#renewEveryMs, signal, p.kick.promise);
+    const end = Date.now() + untilMs;
+    while (p.seq === seen && !signal.aborted && Date.now() < end)
+      await sleep(Math.min(this.#renewEveryMs, end - Date.now()), signal, p.kick.promise);
   }
 
   get agents(): string[] {
@@ -587,15 +590,20 @@ export class Router {
         return;
       }
       const idle = usable.filter((s) => !pending.has(s.id) && this.#restingMs(st, s.id) <= 0);
+      const resting = usable.map((s) => this.#restingMs(st, s.id)).filter((ms) => ms > 0);
       if (!idle.length) {
-        const resting = usable.map((s) => this.#restingMs(st, s.id)).filter((ms) => ms > 0);
+        // Push: a frame that came while a subscription rested was swept
+        // without it, so sweep once when its pause ends.
+        if (st.push && resting.length) seen = -1;
         await sleep(Math.min(this.#retryMs, ...resting), signal, st.polled.promise);
         continue;
       }
       if (st.push && st.push.seq === seen) {
         // Nothing new since the last poll: wait for a frame or a reconnect.
-        // While push is down nothing polls (no long-poll fallback).
-        await this.#waitPush(st, seen, signal);
+        // While push is down nothing polls (no long-poll fallback). A
+        // subscription resting after a hand-off missed the sweeps during its
+        // pause, so its end sweeps once more.
+        await this.#waitPush(st, seen, signal, resting.length ? Math.min(...resting) : Infinity);
         seen = -1;
         continue;
       }
