@@ -209,8 +209,9 @@ export class TiloriAgentClient {
     }
     if (!key || key === this.#apiKey) return false;
     this.#secrets.add(key);
-    await this.close();
+    // The key first: calls that closing ends see that it changed and retry.
     this.#apiKey = key;
+    await this.close();
     this.log('the key was refused; the key file holds a new key, so it is used from now on');
     return true;
   }
@@ -265,14 +266,17 @@ export class TiloriAgentClient {
   async close(): Promise<void> {
     // An injected caller (tests) has no session of ours to end.
     if (!this.#transport) return;
+    // Detached first, so a call that starts meanwhile connects afresh
+    // instead of using a session that is ending.
+    const transport = this.#transport;
+    const mcp = this.#mcp;
+    this.#mcp = null;
+    this.#transport = null;
     try {
-      await this.#transport?.terminateSession().catch(() => {});
-      await this.#mcp?.close?.();
+      await transport.terminateSession().catch(() => {});
+      await mcp?.close?.();
     } catch {
       // closing is best effort
-    } finally {
-      this.#mcp = null;
-      this.#transport = null;
     }
   }
 
@@ -295,6 +299,8 @@ export class TiloriAgentClient {
     let raw: unknown;
     for (let retried = false; ; retried = true) {
       await this.connect();
+      // The key this attempt's session was opened with.
+      const used = this.#apiKey;
       try {
         raw = await this.#mcp!.callTool({ name, arguments: args }, undefined, {
           signal: options?.signal,
@@ -302,12 +308,20 @@ export class TiloriAgentClient {
         });
         break;
       } catch (cause) {
-        // A 401 mid-session: the key was revoked. If the key file now holds
-        // another key, reconnect with it and retry once.
-        if (!retried && !options?.signal?.aborted && isUnauthorized(cause) && (await this.#tookNewKey())) continue;
+        if (!retried && !options?.signal?.aborted) {
+          // Another call took a new key while this one was in flight (the
+          // router polls in parallel), and closing the old session ended
+          // this request: retry once on the new session, without closing it
+          // or reading the file again (Wren bd3ae190).
+          if (this.#apiKey !== used) continue;
+          // A 401 mid-session: the key was revoked. If the key file now holds
+          // another key, reconnect with it and retry once.
+          if (isUnauthorized(cause) && (await this.#tookNewKey())) continue;
+        }
         // Transport failure: drop the session so the next call reconnects. A
-        // call the caller cancelled is not a failure; other calls keep the session.
-        if (this.#transport && !options?.signal?.aborted) await this.close();
+        // call the caller cancelled is not a failure; other calls keep the
+        // session, and so does one that a key change already replaced.
+        if (this.#transport && !options?.signal?.aborted && this.#apiKey === used) await this.close();
         throw this.#clean(cause);
       }
     }

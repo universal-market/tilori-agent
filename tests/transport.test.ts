@@ -577,3 +577,49 @@ describe('a key revoked and replaced (Don via Keel 5ee56774)', () => {
     await c.close();
   });
 });
+
+describe('a key replaced while several calls are in flight (Wren bd3ae190)', () => {
+  const OLD = 'mcp_sk_concurrent_old_key_0123456789';
+  const NEW = 'mcp_sk_concurrent_new_key_0123456789';
+  let accepted = OLD;
+  let server: ReturnType<typeof Bun.serve>;
+  let at: URL;
+  beforeAll(() => {
+    server = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      async fetch(req) {
+        if (req.headers.get('authorization') !== `Bearer ${accepted}`) return new Response('no', { status: 401 });
+        if (req.method === 'DELETE') return new Response(null, { status: 204 });
+        const mcp = new Server({ name: 'fake-tilori', version: '1' }, { capabilities: { tools: {} } });
+        mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [] }));
+        mcp.setRequestHandler(CallToolRequestSchema, async (r) => {
+          // Slow enough that the calls overlap.
+          await Bun.sleep(50);
+          return (await fake.callTool({ name: r.params.name, arguments: (r.params.arguments ?? {}) as any })) as any;
+        });
+        const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+        await mcp.connect(transport);
+        return transport.handleRequest(req);
+      },
+    });
+    at = new URL(`http://127.0.0.1:${server.port}/mcp/tilori/v1`);
+  });
+  afterAll(() => server.stop(true));
+
+  test('every concurrent call succeeds after a revoke, and the file is read once', async () => {
+    accepted = OLD;
+    let file = OLD;
+    let reads = 0;
+    const c = new TiloriAgentClient({ url: at, apiKey: OLD, rereadKey: () => (reads++, file) });
+    await c.listSubscriptions();
+    accepted = NEW;
+    file = NEW;
+    const results = await Promise.all(
+      [1, 2, 3, 4].map(() => c.listSubscriptions().then(() => 'ok', (e: Error) => e.message)),
+    );
+    expect(results).toEqual(['ok', 'ok', 'ok', 'ok']);
+    expect(reads).toBeLessThanOrEqual(2);
+    await c.close();
+  });
+});
