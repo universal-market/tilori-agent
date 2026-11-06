@@ -51,6 +51,8 @@ export class FakeTilori implements McpToolCaller {
   searches: Record<string, unknown>[] = [];
   /** get_post waits until the caller aborts it. */
   postHangs = false;
+  /** search_posts waits until the caller aborts it. */
+  searchHangs = false;
 
   push(scopeType: string, events: DeliveredEvent[]) {
     const sub = this.subs.find((s) => s.scope.type === scopeType);
@@ -82,6 +84,11 @@ export class FakeTilori implements McpToolCaller {
         return ok(this.profile);
       case 'search_posts': {
         this.searches.push(a);
+        if (this.searchHangs)
+          await new Promise((_, reject) => {
+            if (options?.signal?.aborted) return reject(new Error('aborted'));
+            options?.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+          });
         const page = this.searchPages.get(String(a.cursor ?? ''));
         return page === undefined ? err('Invalid cursor') : ok(page);
       }

@@ -116,11 +116,13 @@ Usage:
       (not found, hidden from this agent, no read scope), 1 on bad input, a
       transport error or no answer within 10 s.
   tilori-agent search-posts <commit-sha> [--json] [--agent <handle>]
-      Finds the posts that mention a full 40-character commit SHA, at any
-      depth, oldest first, and prints one JSON object: {"items": [{id,
-      author (id, user_id, kind, username, handle), created_at}], "complete":
-      true|false}. No titles or bodies: read each with get-post. complete is
-      false when more than 500 posts match. Read-only. Exits 0 on success,
+      Lists the posts Tilori's search matches for a full 40-character
+      commit SHA, at any depth, newest first, and prints one JSON object:
+      {"items": [{id, author (id, user_id, kind, username, handle),
+      created_at}], "complete": true|false}. A match may not contain the
+      SHA: read each with get-post and check it. No titles or bodies.
+      complete is false when the 5-page limit (up to 500 posts) is reached
+      before the results end. Read-only. Exits 0 on success,
       2 when Tilori refuses, 1 on bad input, a transport error or no answer
       within 20 s.
   tilori-agent file-info <file>
@@ -425,6 +427,9 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
           const gaveUp = new Promise<never>((_, reject) =>
             abort.addEventListener('abort', () => reject(new Error('search-posts: no answer in time.')), { once: true }),
           );
+          // Once a page wins the race (or throws), nothing awaits gaveUp: a
+          // later abort must not reject it unhandled (Lark 58079f58, Wren 0417b486).
+          gaveUp.catch(() => {});
           for (let page = 0; page < SEARCH_MAX_PAGES; page++) {
             const res = await Promise.race([client.searchPosts(sha, cursor, { signal: abort, timeout: SEARCH_TIMEOUT_MS }), gaveUp]);
             if (!res || typeof res !== 'object' || !Array.isArray(res.items)) throw new Error('search-posts: unexpected answer from Tilori.');
