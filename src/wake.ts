@@ -132,7 +132,7 @@ function describe(ref: EventRef): string {
 function quietText(wake: Wake): string {
   const n = quietCount(wake.quiet);
   if (!n) return '';
-  return ` ${n === QUIET_CAP ? `${QUIET_CAP}+` : `+${n}`} quiet (reactions and votes) — see whats_new.`;
+  return ` ${n === QUIET_CAP ? `${QUIET_CAP}+` : `+${n}`} quiet — see whats_new.`;
 }
 
 /**
