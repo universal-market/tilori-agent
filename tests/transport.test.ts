@@ -439,6 +439,95 @@ describe('over real MCP HTTP transport', () => {
       rmSync(dir, { recursive: true, force: true });
     });
 
+    // UNI-748: the Market MCP endpoint, the one other server a key may go to.
+    const MARKET = 'https://market.example/mcp/v1';
+    const initWith = (env: Record<string, string | undefined>, ...extra: string[]) =>
+      Bun.spawnSync(['bun', cli, 'init', '--agent', 'wren', '--no-verify', ...extra], {
+        env,
+        stdin: new TextEncoder().encode(KEY + '\n'),
+      });
+
+    test('init --market-url stores it; a re-init keeps it, a new --url or "none" drops it, unknown fields survive', () => {
+      const { dir, env } = fresh();
+      process.env.TILORI_HOME = env.TILORI_HOME;
+      // A field this version doesn't know, as a newer writer would leave it.
+      saveConfig({ url, future_field: { x: 1 } } as any);
+      delete process.env.TILORI_HOME;
+      expect(initWith(env, '--url', url, '--market-url', 'https://MARKET.example:443').exitCode).toBe(0);
+      expect(configIn(dir).market_url).toBe(MARKET);
+      expect((configIn(dir) as any).future_field).toEqual({ x: 1 });
+      // Same url, no --market-url: kept.
+      expect(initWith(env, '--url', url).exitCode).toBe(0);
+      expect(configIn(dir).market_url).toBe(MARKET);
+      // "none" removes it.
+      expect(initWith(env, '--market-url', 'none').exitCode).toBe(0);
+      expect(configIn(dir).market_url).toBeUndefined();
+      // A new Tilori url without --market-url drops an old one, loudly.
+      expect(initWith(env, '--market-url', MARKET).exitCode).toBe(0);
+      const moved = initWith(env, '--url', 'https://other.example/mcp/tilori/v1');
+      expect(moved.exitCode).toBe(0);
+      expect(moved.stderr.toString()).toContain('removing market_url');
+      expect(configIn(dir).market_url).toBeUndefined();
+      expect((configIn(dir) as any).future_field).toEqual({ x: 1 });
+      rmSync(dir, { recursive: true, force: true });
+    }, 60000);
+
+    test('init refuses a Market URL that is not exactly an HTTPS /mcp/v1 endpoint, before reading the key', () => {
+      const { dir, env } = fresh();
+      for (const bad of [
+        'http://market.example/mcp/v1',
+        'https://user:pw@market.example/mcp/v1',
+        'https://market.example/mcp/tilori/v1',
+        'https://market.example/mcp/v1/extra',
+        'not a url',
+        url.replace('/mcp/tilori/v1', '/mcp/v1').replace('http://127.0.0.1', 'https://127.0.0.1') + 'x',
+      ]) {
+        const r = initWith(env, '--url', url, '--market-url', bad);
+        expect(r.exitCode).toBe(1);
+        expect(r.stderr.toString()).not.toContain(KEY);
+      }
+      expect(initWith(env, '--url', url, '--market-url', url.replace('/mcp/tilori/v1', '/mcp/v1')).exitCode).toBe(0);
+      rmSync(dir, { recursive: true, force: true });
+    }, 60000);
+
+    test('headers releases the key to exactly "url" or "market_url", by the same normaliser, and nowhere else', () => {
+      const { dir, env } = fresh();
+      process.env.TILORI_HOME = env.TILORI_HOME;
+      writeKey('wren', KEY);
+      saveConfig({ url, market_url: MARKET, default_agent: 'wren' });
+      delete process.env.TILORI_HOME;
+      const headers = (asked: string) =>
+        Bun.spawnSync(['bun', cli, 'headers'], { env: { ...env, CLAUDE_CODE_MCP_SERVER_URL: asked } });
+      for (const ok of [url, MARKET, 'https://MARKET.example:443/mcp/v1/', 'https://market.example/mcp/v1?agent=wren']) {
+        const r = headers(ok);
+        expect(r.exitCode).toBe(0);
+        expect(JSON.parse(r.stdout.toString())).toEqual({ Authorization: `Bearer ${KEY}` });
+      }
+      for (const no of [
+        'https://market.example/mcp/v1.evil',
+        'https://market.example/mcp/v1/../x',
+        'https://market.example/mcp/v1/x',
+        'https://user@market.example/mcp/v1',
+        'https://market.example:8443/mcp/v1',
+        'http://market.example/mcp/v1',
+        'https://market.example/mcp/tilori/v1',
+        'https://market.example.evil/mcp/v1',
+        '',
+      ]) {
+        const r = headers(no);
+        expect(r.exitCode).toBe(1);
+        expect(r.stdout.toString()).toBe('');
+        expect(r.stderr.toString()).not.toContain(KEY);
+      }
+      // No market_url: the Market server gets nothing, even with a valid URL.
+      process.env.TILORI_HOME = env.TILORI_HOME;
+      saveConfig({ url, default_agent: 'wren' });
+      delete process.env.TILORI_HOME;
+      expect(headers(MARKET).exitCode).toBe(1);
+      expect(headers(MARKET).stdout.toString()).toBe('');
+      rmSync(dir, { recursive: true, force: true });
+    }, 60000);
+
     test('a redirect from the configured server is refused, not followed', async () => {
       // The SDK already refuses cross-origin redirects; a same-origin one to
       // another path would still carry the key there without redirect: 'error'.
