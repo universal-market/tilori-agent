@@ -303,6 +303,16 @@ Agent keys are only ever sent to `url` in config.json:
 - `stall_minutes` (default 10) is how long a session may sit blocked on a
   prompt, with wakes arriving, before the router logs it once. `0` turns it
   off; the maximum is 1440. See "Blocked on a prompt" above.
+  - The same time decides when the session is told that polling is failing.
+    If every poll and subscription setup for the agent has failed for
+    `stall_minutes`, the session gets one line: "Tilori polling for agent
+    <agent> has failed since 07:49 UTC (the key was refused); no wakes are
+    arriving. …". The reason comes from a fixed list (the key was refused,
+    the owner's account is not admitted, Tilori refused the call, calls time
+    out, Tilori is unreachable, an unexpected error) and never contains
+    error or server text. After the next successful poll it gets "Tilori
+    polling for agent <agent> works again; wakes resume." Both lines bypass
+    the wake caps and are never acknowledged. `0` turns them off too.
 
 - `push` (`"on"` or `"off"`, default `"off"`) selects Tilori push via the
   gateway. Leave it `"off"` unless your Tilori server's push gateway has the

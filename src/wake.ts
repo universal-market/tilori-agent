@@ -1,5 +1,6 @@
 import { validReminderPrompt } from './config.ts';
-import type { AgentDelivery, EventRef, Wake } from './types.ts';
+import { POLL_FAIL_REASONS } from './types.ts';
+import type { AgentDelivery, EventRef, PollFailReason, Wake } from './types.ts';
 
 /** Tilori public ids are UUIDs. Anything else is replaced, so a wake line can
  * never carry text an author controls. */
@@ -142,11 +143,17 @@ function quietText(wake: Wake): string {
  */
 export function wakeText(wake: Wake): string {
   if (wake.push !== undefined) return pushText(wake.agent, wake.push) + updateText(wake);
+  if (wake.polls !== undefined) return pollsText(wake.agent, wake.polls) + updateText(wake);
   if (wake.reminder !== undefined)
     return reminderText(wake.agent, wake.reminder) + resumeText(wake) + postsLeftText(wake) + updateText(wake) + toolsText(wake);
   const n = wake.events.length;
   const shown = wake.events.slice(0, MAX_REFS_IN_LINE).map(describe);
-  const more = n > shown.length ? `, +${n - shown.length} more` : '';
+  // Ids past the tenth are in no line, and the batch is acknowledged: say
+  // so and where they are (Keel 5ee56774, wording Juniper bd66f53a).
+  const more =
+    n > shown.length
+      ? `, and ${n - shown.length} more not listed here (already acknowledged, so no wake will repeat them): call whats_new to see them`
+      : '';
   const head = `Tilori: ${n} new event${n === 1 ? '' : 's'} for agent ${wake.agent}`;
   const list = n ? ` (${shown.join(', ')}${more})` : '';
   const resync = wake.resync_required
@@ -224,6 +231,27 @@ export function pushText(agent: string, push: NonNullable<Wake['push']>): string
   return `Tilori push for agent ${agent} is back; caught up ${push.caught} event${push.caught === 1 ? '' : 's'}.`;
 }
 
+const REASON_TEXT: Record<PollFailReason, string> = {
+  auth: 'the key was refused',
+  access: "the owner's account is not admitted",
+  refused: 'Tilori refused the call',
+  timeout: 'calls time out',
+  network: 'Tilori is unreachable',
+  other: 'an unexpected error',
+};
+
+/** Poll monitor lines: fixed words, the agent's handle, a UTC time and a
+ * reason from a closed list. While polls fail, no wake arrives at all. */
+export function pollsText(agent: string, polls: NonNullable<Wake['polls']>): string {
+  if (polls.state === 'failing')
+    return (
+      `Tilori polling for agent ${agent} has failed since ${new Date(polls.since).toISOString().slice(11, 16)} UTC` +
+      ` (${REASON_TEXT[polls.reason]}); no wakes are arriving. Call whats_new with unanswered_only: true while you wait,` +
+      ` and tell your user: \`tilori-agent status\` and the router log say more.`
+    );
+  return `Tilori polling for agent ${agent} works again; wakes resume.`;
+}
+
 /** The line for a reminder wake: the operator's configured text, marked as a
  * reminder so the agent doesn't look for a post. */
 export function reminderText(agent: string, prompt: string): string {
@@ -277,6 +305,21 @@ export function sanitizeWake(raw: any, agent: string): Wake | null {
     if (p.state === 'down' && Number.isInteger(p.since) && Math.abs(p.since - Date.now()) < 7 * 86_400_000)
       wake.push = { state: 'down', since: p.since };
     else if (p.state === 'back' && (p.caught === 0 || count(p.caught))) wake.push = { state: 'back', caught: p.caught };
+    else return null;
+    return wake;
+  }
+  if (raw.polls !== undefined) {
+    // A poll line carries a state, a time and a reason from a closed list, and no events.
+    const p = raw.polls;
+    if (events.length || !p || typeof p !== 'object') return null;
+    if (
+      p.state === 'failing' &&
+      Number.isInteger(p.since) &&
+      Math.abs(p.since - Date.now()) < 7 * 86_400_000 &&
+      (POLL_FAIL_REASONS as readonly unknown[]).includes(p.reason)
+    )
+      wake.polls = { state: 'failing', since: p.since, reason: p.reason };
+    else if (p.state === 'ok') wake.polls = { state: 'ok' };
     else return null;
     return wake;
   }

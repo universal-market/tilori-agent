@@ -5,9 +5,10 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { activityDir, ago, promptSignal, stallMinutes, statusLine, touchSignal, watchSignal } from '../src/activity.ts';
 import { desiredSubscriptions } from '../src/config.ts';
-import { Router } from '../src/router.ts';
+import { ToolRefused } from '../src/client.ts';
+import { Router, failReason } from '../src/router.ts';
 import type { DeliverResult, Injector, Wake } from '../src/types.ts';
-import { sanitizeWake, wakeText } from '../src/wake.ts';
+import { pollsText, sanitizeWake, wakeText } from '../src/wake.ts';
 import { FakeTilori, mention, post, until } from './fake-tilori.ts';
 
 let dir = '';
@@ -388,5 +389,107 @@ describe('the direct tag over the socket', () => {
       'wren',
     )!;
     expect(w.events.map((e) => e.to_you)).toEqual([true, undefined, undefined]);
+  });
+});
+
+describe('poll failure lines', () => {
+  function failing(stall: number) {
+    const fake = new FakeTilori();
+    const logs: string[] = [];
+    const router = new Router({
+      agents: [{ handle: 'wren', client: fake.client(), subscriptions: desiredSubscriptions({}), stallMinutes: stall }],
+      logger: (m) => logs.push(m),
+      waitMs: 10,
+      retryMs: 10,
+      coalesceMs: 0,
+      plainHoldMs: 0,
+      directPauseMs: 0,
+      pollFailMs: 0,
+    });
+    const inj = new Recorder();
+    router.register('wren', inj);
+    const ac = new AbortController();
+    const done = router.run(ac.signal);
+    return { fake, logs, inj, ac, done };
+  }
+
+  test('tells the session once that polls fail, then once that they work again', async () => {
+    const { fake, logs, inj, ac, done } = failing(10);
+    await until(() => fake.subs.length === 2);
+    fake.failNextPolls = 2;
+    await until(() => inj.wakes.some((w) => w.polls?.state === 'ok'));
+    const lines = inj.wakes.filter((w) => w.polls);
+    expect(lines.map((w) => w.polls!.state)).toEqual(['failing', 'ok']);
+    const first = lines[0]!;
+    expect(first.events).toEqual([]);
+    expect(first.polls).toMatchObject({ state: 'failing', reason: 'network' });
+    // Fixed words only: no error text or credential reaches the session.
+    const text = wakeText(first);
+    expect(text).toContain('Tilori polling for agent wren has failed since');
+    expect(text).toContain('(Tilori is unreachable)');
+    expect(text).not.toContain('abcdefghijklmnop');
+    expect(text).not.toContain('network down');
+    expect(wakeText(lines[1]!)).toBe('Tilori polling for agent wren works again; wakes resume.');
+    expect(logs.filter((l) => l.includes('told the session'))).toHaveLength(2);
+    // A later wake is an ordinary one.
+    fake.push('inbox', [mention()]);
+    await until(() => inj.wakes.some((w) => w.events.length > 0));
+    expect(inj.wakes.filter((w) => w.polls)).toHaveLength(2);
+    ac.abort();
+    await done;
+  });
+
+  test('stall_minutes 0 turns the poll lines off', async () => {
+    const { fake, logs, inj, ac, done } = failing(0);
+    await until(() => fake.subs.length === 2);
+    fake.failNextPolls = 1;
+    await until(() => logs.some((l) => l.includes('Tilori error')));
+    fake.push('inbox', [mention()]);
+    await until(() => inj.wakes.length === 1);
+    expect(inj.wakes.every((w) => !w.polls)).toBe(true);
+    ac.abort();
+    await done;
+  });
+
+  test('failReason maps errors to a closed set of words', () => {
+    expect(failReason(new ToolRefused('Access is restricted on this instance. More text'))).toBe('access');
+    expect(failReason(new Error('Error POSTing to endpoint (HTTP 401): Unauthorized'))).toBe('auth');
+    expect(failReason(new ToolRefused('Invalid agent key'))).toBe('auth');
+    expect(failReason(Object.assign(new Error('The operation timed out.'), { name: 'TimeoutError' }))).toBe('timeout');
+    expect(failReason(new ToolRefused('Rate limited'))).toBe('refused');
+    expect(failReason(new TypeError('fetch failed'))).toBe('network');
+    expect(failReason(new Error('read ECONNRESET'))).toBe('network');
+    expect(failReason(new Error('something odd'))).toBe('other');
+    expect(failReason('a string')).toBe('other');
+  });
+
+  test('poll lines over IPC: valid ones kept, others dropped', () => {
+    const since = Date.now() - 60_000;
+    expect(sanitizeWake({ wake_id: 'w', events: [], polls: { state: 'failing', since, reason: 'auth' } }, 'wren')?.polls).toEqual({
+      state: 'failing',
+      since,
+      reason: 'auth',
+    });
+    expect(sanitizeWake({ wake_id: 'w', events: [], polls: { state: 'ok' } }, 'wren')?.polls).toEqual({ state: 'ok' });
+    for (const polls of [
+      { state: 'failing', since, reason: 'HTTP 401: key sk-abc' },
+      { state: 'failing', since: 1, reason: 'auth' },
+      { state: 'failing', since: 'soon', reason: 'auth' },
+      { state: 'down' },
+      'failing',
+    ])
+      expect(sanitizeWake({ wake_id: 'w', events: [], polls }, 'wren')).toBeNull();
+    expect(
+      sanitizeWake({ wake_id: 'w', events: [{ id: 'e', kind: 'mention', entity_type: 'post', entity_id: 'p' }], polls: { state: 'ok' } }, 'wren'),
+    ).toBeNull();
+  });
+
+  test('pollsText is one line with a UTC time', () => {
+    const t = pollsText('keel', { state: 'failing', since: Date.UTC(2026, 10, 6, 7, 49), reason: 'auth' });
+    expect(t).toBe(
+      'Tilori polling for agent keel has failed since 07:49 UTC (the key was refused); no wakes are arriving.' +
+        ' Call whats_new with unanswered_only: true while you wait, and tell your user: `tilori-agent status` and the router log say more.',
+    );
+    expect(t).not.toContain('\n');
   });
 });

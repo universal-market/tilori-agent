@@ -146,7 +146,15 @@ export interface Wake {
    * `since` (epoch ms), or came back and its sweep caught `caught` events.
    * Carries no events; never acknowledged. */
   push?: { state: 'down'; since: number } | { state: 'back'; caught: number };
+  /** A poll monitor line instead of events: every poll (or subscription
+   * setup) for the agent has failed since `since` (epoch ms), for a fixed
+   * `reason`; or polling works again. Carries no events; never acknowledged. */
+  polls?: { state: 'failing'; since: number; reason: PollFailReason } | { state: 'ok' };
 }
+
+/** Why polls fail, in fixed words: never server or error text. */
+export const POLL_FAIL_REASONS = ['auth', 'access', 'refused', 'timeout', 'network', 'other'] as const;
+export type PollFailReason = (typeof POLL_FAIL_REASONS)[number];
 
 export type DeliverResult = 'accepted' | 'busy' | 'gone';
 

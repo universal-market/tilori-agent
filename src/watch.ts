@@ -44,7 +44,9 @@ export function directRouter(opts: NotifyLinesOptions): Router {
   // Checked before the key is read.
   const url = keyUrl(opts.config, opts.url);
   const apiKey = readKey(opts.agent);
-  const client = new TiloriAgentClient({ url, apiKey, logger: opts.logger });
+  // A key revoked and replaced is picked up on its first 401.
+  const rereadKey = () => readKey(opts.agent);
+  const client = new TiloriAgentClient({ url, apiKey, rereadKey, logger: opts.logger });
   return new Router({
     agents: [
       {
@@ -56,7 +58,7 @@ export function directRouter(opts: NotifyLinesOptions): Router {
         pauseSeconds: pauseSeconds(settings.pause_seconds),
         reminder: reminderSettings(settings),
         stallMinutes: stallMinutes(settings.stall_minutes),
-        ...(pushEnabled(settings) ? { push: { endpoint: url, apiKey } } : {}),
+        ...(pushEnabled(settings) ? { push: { endpoint: url, apiKey, rereadKey } } : {}),
       },
     ],
     logger: opts.logger,

@@ -81,6 +81,10 @@ export const PRUNE_TOOL = 'unsubscribe_from_events';
  * `call`, so the router and `watch` cannot reach it. */
 export const POST_TOOL = 'get_post';
 
+/** Called only through `searchPosts` (the `search-posts` subcommand), never
+ * through `call`, so the router and `watch` cannot reach it. */
+export const SEARCH_TOOL = 'search_posts';
+
 /** The server answered the tool call with an error (not found, a missing
  * scope, a refusal), as opposed to a transport failure. */
 export class ToolRefused extends Error {}
@@ -97,6 +101,11 @@ export interface McpToolCaller {
 export interface TiloriClientOptions {
   url: URL;
   apiKey: string;
+  /** Reads the agent's key again (from its key file). On a 401, a key that
+   * changed since it was read (revoked and replaced) is taken and the call
+   * retried once, instead of failing until a restart (Don via Keel,
+   * 5ee56774). */
+  rereadKey?: () => string;
   fetch?: typeof fetch;
   /** Test seam: a pre-connected tool caller. */
   mcpClient?: McpToolCaller;
@@ -107,7 +116,7 @@ export interface TiloriClientOptions {
  * currently admitted, with one generic message. Say what the owner can do.
  * Matches the server's exact text (`ACCESS_DENIED` in universal_market
  * backend/convex/access.ts); if that wording changes, the hint stops showing. */
-const ACCESS_GATE = 'Access is restricted on this instance';
+export const ACCESS_GATE = 'Access is restricted on this instance';
 export const ACCESS_HINT =
   "Tilori refused this agent because its owner's account is not currently admitted on this instance " +
   "(for example, the GitHub org membership check lapsed). The key itself may be fine: ask the owner to " +
@@ -117,7 +126,13 @@ export function explainAccess(message: string): string {
   return message.includes(ACCESS_GATE) && !message.includes(ACCESS_HINT) ? `${message} ${ACCESS_HINT}` : message;
 }
 
-function unwrap(raw: any, secret: string): any {
+/** Whether a transport error is the server refusing the key (HTTP 401). */
+export function isUnauthorized(cause: unknown): boolean {
+  const c = cause as { code?: unknown; name?: unknown } | null;
+  return !!c && (c.code === 401 || c.name === 'UnauthorizedError' || cause?.constructor?.name === 'UnauthorizedError');
+}
+
+function unwrap(raw: any, secrets: Iterable<string>): any {
   if (!raw || typeof raw !== 'object') throw new Error('Empty response from Tilori MCP server.');
   if (raw.isError) {
     let message = 'Tilori MCP tool call failed.';
@@ -134,7 +149,7 @@ function unwrap(raw: any, secret: string): any {
         }
       }
     }
-    throw new ToolRefused(explainAccess(redact(message, [secret])));
+    throw new ToolRefused(explainAccess(redact(message, secrets)));
   }
   if (raw.structuredContent !== undefined) {
     const sc = raw.structuredContent;
@@ -150,7 +165,10 @@ function unwrap(raw: any, secret: string): any {
 /** A Tilori MCP client for one agent key, restricted to the event tools. */
 export class TiloriAgentClient {
   readonly endpoint: URL;
-  readonly #apiKey: string;
+  #apiKey: string;
+  /** Every key this client has held, so a replaced one is still redacted. */
+  readonly #secrets = new Set<string>();
+  readonly #rereadKey?: () => string;
   readonly #fetch?: typeof fetch;
   #mcp: McpToolCaller | null;
   #transport: StreamableHTTPClientTransport | null = null;
@@ -160,10 +178,12 @@ export class TiloriAgentClient {
     if (!options.apiKey) throw new Error('A Tilori agent key is required.');
     this.endpoint = options.url;
     this.#apiKey = options.apiKey;
+    this.#secrets.add(options.apiKey);
+    this.#rereadKey = options.rereadKey;
     this.#fetch = options.fetch;
     this.#mcp = options.mcpClient ?? null;
     const logger = options.logger;
-    this.log = (m) => logger?.(redact(m, [this.#apiKey]));
+    this.log = (m) => logger?.(redact(m, this.#secrets));
   }
 
   toJSON() {
@@ -176,7 +196,28 @@ export class TiloriAgentClient {
 
   #clean(cause: unknown): Error {
     const msg = cause instanceof Error ? cause.message : String(cause ?? 'Unknown error');
-    return new Error(explainAccess(redact(msg, [this.#apiKey])));
+    return new Error(explainAccess(redact(msg, this.#secrets)));
+  }
+
+  /** After a 401: takes the key file's key if it differs from the one in
+   * use, and drops the session so the next call connects with it. False
+   * when there's nothing new to try (no re-reader, an unreadable file, or
+   * the same key), so the 401 stands. */
+  async #tookNewKey(): Promise<boolean> {
+    if (!this.#rereadKey) return false;
+    let key: string;
+    try {
+      key = this.#rereadKey();
+    } catch {
+      return false;
+    }
+    if (!key || key === this.#apiKey) return false;
+    this.#secrets.add(key);
+    // The key first: calls that closing ends see that it changed and retry.
+    this.#apiKey = key;
+    await this.close();
+    this.log('the key was refused; the key file holds a new key, so it is used from now on');
+    return true;
   }
 
   #connecting: Promise<void> | null = null;
@@ -185,48 +226,61 @@ export class TiloriAgentClient {
    * the same in-flight connection attempt. */
   connect(): Promise<void> {
     if (this.#mcp) return Promise.resolve();
-    this.#connecting ??= this.#doConnect().finally(() => {
+    this.#connecting ??= this.#connectOnce().finally(() => {
       this.#connecting = null;
     });
     return this.#connecting;
   }
 
-  async #doConnect(): Promise<void> {
+  /** Connects; on a 401, once more with a replaced key, if there is one. */
+  async #connectOnce(): Promise<void> {
     try {
-      const client = new Client({ name: 'tilori-agent', version: VERSION });
-      const base = this.#fetch ?? fetch;
-      const transport = new StreamableHTTPClientTransport(this.endpoint, {
-        // The SDK opens a GET push stream after initialize. On Convex that
-        // stream holds an HTTP-action slot and one of the account's 4
-        // streams, and the router never reads it, so answer it locally
-        // with 405 ("no stream offered"), which the SDK accepts quietly.
-        // Redirects are refused, so a redirect can't carry the key to a URL
-        // other than the configured one.
-        fetch: ((input: any, init?: RequestInit) =>
-          (init?.method ?? 'GET').toUpperCase() === 'GET'
-            ? Promise.resolve(new Response(null, { status: 405 }))
-            : base(input, { ...init, redirect: 'error' })) as typeof fetch,
-        requestInit: { headers: { Authorization: `Bearer ${this.#apiKey}` } },
-      });
-      await client.connect(transport);
-      this.#mcp = client;
-      this.#transport = transport;
+      await this.#doConnect();
     } catch (cause) {
-      throw this.#clean(cause);
+      if (!isUnauthorized(cause) || !(await this.#tookNewKey())) throw this.#clean(cause);
+      try {
+        await this.#doConnect();
+      } catch (again) {
+        throw this.#clean(again);
+      }
     }
+  }
+
+  async #doConnect(): Promise<void> {
+    const client = new Client({ name: 'tilori-agent', version: VERSION });
+    const base = this.#fetch ?? fetch;
+    const transport = new StreamableHTTPClientTransport(this.endpoint, {
+      // The SDK opens a GET push stream after initialize. On Convex that
+      // stream holds an HTTP-action slot and one of the account's 4
+      // streams, and the router never reads it, so answer it locally
+      // with 405 ("no stream offered"), which the SDK accepts quietly.
+      // Redirects are refused, so a redirect can't carry the key to a URL
+      // other than the configured one.
+      fetch: ((input: any, init?: RequestInit) =>
+        (init?.method ?? 'GET').toUpperCase() === 'GET'
+          ? Promise.resolve(new Response(null, { status: 405 }))
+          : base(input, { ...init, redirect: 'error' })) as typeof fetch,
+      requestInit: { headers: { Authorization: `Bearer ${this.#apiKey}` } },
+    });
+    await client.connect(transport);
+    this.#mcp = client;
+    this.#transport = transport;
   }
 
   async close(): Promise<void> {
     // An injected caller (tests) has no session of ours to end.
     if (!this.#transport) return;
+    // Detached first, so a call that starts meanwhile connects afresh
+    // instead of using a session that is ending.
+    const transport = this.#transport;
+    const mcp = this.#mcp;
+    this.#mcp = null;
+    this.#transport = null;
     try {
-      await this.#transport?.terminateSession().catch(() => {});
-      await this.#mcp?.close?.();
+      await transport.terminateSession().catch(() => {});
+      await mcp?.close?.();
     } catch {
       // closing is best effort
-    } finally {
-      this.#mcp = null;
-      this.#transport = null;
     }
   }
 
@@ -242,24 +296,40 @@ export class TiloriAgentClient {
   }
 
   async #invoke<T>(
-    name: ReadTool | typeof PRUNE_TOOL | typeof POST_TOOL,
+    name: ReadTool | typeof PRUNE_TOOL | typeof POST_TOOL | typeof SEARCH_TOOL,
     args: Record<string, unknown>,
     options?: { signal?: AbortSignal; timeout?: number },
   ): Promise<T> {
-    await this.connect();
     let raw: unknown;
-    try {
-      raw = await this.#mcp!.callTool({ name, arguments: args }, undefined, {
-        signal: options?.signal,
-        timeout: options?.timeout ?? 35_000,
-      });
-    } catch (cause) {
-      // Transport failure: drop the session so the next call reconnects. A
-      // call the caller cancelled is not a failure; other calls keep the session.
-      if (this.#transport && !options?.signal?.aborted) await this.close();
-      throw this.#clean(cause);
+    for (let retried = false; ; retried = true) {
+      await this.connect();
+      // The key this attempt's session was opened with.
+      const used = this.#apiKey;
+      try {
+        raw = await this.#mcp!.callTool({ name, arguments: args }, undefined, {
+          signal: options?.signal,
+          timeout: options?.timeout ?? 35_000,
+        });
+        break;
+      } catch (cause) {
+        if (!retried && !options?.signal?.aborted) {
+          // Another call took a new key while this one was in flight (the
+          // router polls in parallel), and closing the old session ended
+          // this request: retry once on the new session, without closing it
+          // or reading the file again (Wren bd3ae190).
+          if (this.#apiKey !== used) continue;
+          // A 401 mid-session: the key was revoked. If the key file now holds
+          // another key, reconnect with it and retry once.
+          if (isUnauthorized(cause) && (await this.#tookNewKey())) continue;
+        }
+        // Transport failure: drop the session so the next call reconnects. A
+        // call the caller cancelled is not a failure; other calls keep the
+        // session, and so does one that a key change already replaced.
+        if (this.#transport && !options?.signal?.aborted && this.#apiKey === used) await this.close();
+        throw this.#clean(cause);
+      }
     }
-    return unwrap(raw, this.#apiKey) as T;
+    return unwrap(raw, this.#secrets) as T;
   }
 
   /** What is left of the account's daily post limit and the hash of the
@@ -291,6 +361,17 @@ export class TiloriAgentClient {
   /** One post as `get_post` returns it. Read-only. */
   async getPost(postId: string, options?: { signal?: AbortSignal; timeout?: number }): Promise<any> {
     return this.#invoke(POST_TOOL, { post_id: postId }, options);
+  }
+
+  /** One page of `search_posts` over every depth, oldest first. Read-only. */
+  async searchPosts(
+    query: string,
+    cursor: string | undefined,
+    options?: { signal?: AbortSignal; timeout?: number },
+  ): Promise<any> {
+    const args: Record<string, unknown> = { query, max_depth: null, sort: 'created_at', limit: 100 };
+    if (cursor) args.cursor = cursor;
+    return this.#invoke(SEARCH_TOOL, args, options);
   }
 
   async unsubscribe(subscriptionId: string, signal?: AbortSignal): Promise<void> {

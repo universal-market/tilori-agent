@@ -144,6 +144,37 @@ describe('push stream', () => {
     expect(r.statuses.at(-1)?.state).toBe('live');
   });
 
+  test('a 401 at stream-ticket mints once more with a replaced key (Don via Keel 5ee56774)', async () => {
+    const b = sseBody();
+    const NEW = 'mcp_sk_replaced_new_key_0123456789ab';
+    const { f, calls } = fakeFetch({ mints: [() => new Response('no', { status: 401 })], opens: [stream(b)] });
+    const { r, hooks } = recorder();
+    const ac = new AbortController();
+    const done = new PushStream({ endpoint: ENDPOINT, apiKey: KEY, rereadKey: () => NEW, fetch: f }, hooks).run(ac.signal);
+    await until(() => r.connected.length === 1);
+    ac.abort();
+    await done;
+    const mints = calls.filter((c) => c.url.endsWith('/stream-ticket'));
+    expect(mints.map((c) => c.headers.authorization)).toEqual([`Bearer ${KEY}`, `Bearer ${NEW}`]);
+    expect(r.logs.join('\n')).toContain('the key file holds a new key');
+    expect(r.logs.join('\n')).not.toContain(NEW);
+  });
+
+  test('a 401 with the same key, or a 403, is still refused without a second mint', async () => {
+    for (const [status, reread] of [[401, () => KEY], [403, () => 'mcp_sk_other_key_0123456789abcdef']] as const) {
+      const { f, calls } = fakeFetch({ mints: [() => new Response('no', { status })] });
+      const { r, hooks } = recorder();
+      const t = fakeTime();
+      const ac = new AbortController();
+      await new PushStream({ endpoint: ENDPOINT, apiKey: KEY, rereadKey: reread, fetch: f, now: t.now, sleep: async (ms, s) => {
+        ac.abort();
+        await t.sleep(ms, s);
+      } }, hooks).run(ac.signal);
+      expect(calls.filter((c) => c.url.endsWith('/stream-ticket'))).toHaveLength(1);
+      expect(r.statuses.at(-1)?.state).not.toBe('live');
+    }
+  });
+
   test('only an https events URL (or loopback http for a loopback endpoint) gets the ticket', () => {
     const https = new URL('https://tilori.example/mcp/tilori/v1');
     expect(eventsUrl('https://gw.example/v1/events', https)?.href).toBe('https://gw.example/v1/events');
