@@ -129,6 +129,10 @@ export function reminderSettings(settings: AgentSettings = {}): Reminder | undef
 export interface TiloriConfig {
   /** Tilori MCP endpoint, e.g. https://<deployment>.convex.site/mcp/tilori/v1 */
   url?: string;
+  /** Universal Market MCP endpoint (path /mcp/v1), the one other server the
+   * agent key may go to. Explicit, never derived from `url`: Tilori can sit
+   * on its own origin (UNI-551). Set only by `init --market-url` (UNI-748). */
+  market_url?: string;
   /** Agent a Claude/Codex session acts as when TILORI_AGENT is unset. */
   default_agent?: string;
   agents?: Record<string, AgentSettings>;
@@ -284,6 +288,44 @@ export function buildMcpUrl(rawUrl: string | undefined): URL {
   if (url.pathname === '' || url.pathname === '/') url.pathname = '/mcp/tilori/v1';
   url.searchParams.delete('agent');
   return url;
+}
+
+/** The Market MCP path. A Market URL must name it exactly. */
+export const MARKET_MCP_PATH = '/mcp/v1';
+
+/** Validates and normalizes the Universal Market MCP endpoint with the same
+ * checks as `buildMcpUrl` (HTTPS, no credentials, URL parsing), and requires
+ * the path `/mcp/v1`; a bare origin gets it. */
+export function buildMarketUrl(rawUrl: string | undefined): URL {
+  if (!rawUrl || !rawUrl.trim()) throw new Error('No Market URL. Run tilori-agent init --market-url <market-mcp-url>.');
+  let bare: URL;
+  try {
+    bare = new URL(rawUrl.trim());
+  } catch {
+    throw new Error('Invalid Market URL.');
+  }
+  if (bare.pathname === '' || bare.pathname === '/') bare.pathname = MARKET_MCP_PATH;
+  const url = buildMcpUrl(bare.href);
+  if (url.pathname.replace(/\/+$/, '') !== MARKET_MCP_PATH || url.search) {
+    throw new Error(`Market URL must be the Market MCP endpoint (path ${MARKET_MCP_PATH}, no query).`);
+  }
+  return url;
+}
+
+/** The configured endpoint a key may be released to for `asked`: "url",
+ * or "market_url" when set. Both sides go through the same normalisers as
+ * `init`, so release and storage compare alike (Pax 60de5a8b). Null when
+ * `asked` is neither. */
+export function releasedEndpoint(config: TiloriConfig, asked: string): 'tilori' | 'market' | null {
+  let wanted: URL;
+  try {
+    wanted = buildMcpUrl(asked);
+  } catch {
+    return null;
+  }
+  if (config.url && sameEndpoint(wanted, buildMcpUrl(config.url))) return 'tilori';
+  if (config.market_url && sameEndpoint(wanted, buildMarketUrl(config.market_url))) return 'market';
+  return null;
 }
 
 /** Whether two normalized MCP URLs name the same endpoint (origin and path). */

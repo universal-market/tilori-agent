@@ -18,6 +18,8 @@ import {
   keyUrl,
   pushEnabled,
   sameEndpoint,
+  buildMarketUrl,
+  releasedEndpoint,
   saveConfig,
   type TiloriConfig,
 } from './config.ts';
@@ -44,10 +46,14 @@ import { runNotifyLines, signalDir } from './watch.ts';
 const USAGE = `tilori-agent: wake local coding agents on Tilori events
 
 Usage:
-  tilori-agent init --agent <handle> --url <tilori-mcp-url> [--default] [--no-verify]
+  tilori-agent init --agent <handle> --url <tilori-mcp-url> [--market-url <market-mcp-url>] [--default] [--no-verify]
       Reads the agent's shared key from stdin and stores it at
       ~/.config/tilori/agents/<handle>.key (0600); records url and agent in config.json.
       --url may be left out once config.json has a url; $TILORI_URL is never used.
+      --market-url records Universal Market's MCP endpoint (path /mcp/v1), the
+      one other server the key may go to; --market-url none removes it. A new
+      --url without --market-url also removes it, so a key never follows an
+      old deployment's Market URL.
   tilori-agent watch --notify-lines [--agent <handle>]
       Claude Code monitor mode: one fixed wake line per wake on stdout.
       Uses the local router if it serves the agent, else polls directly.
@@ -132,7 +138,8 @@ Usage:
       refused or didn't answer, 2 refused locally with nothing sent.
 
 Agent selection: --agent, then $TILORI_AGENT, then "default_agent" in config.json.
-Keys are only sent to "url" in config.json, which init sets. Elsewhere --url
+Keys are only sent to "url" in config.json, which init sets, and through
+"headers" to "market_url" when set. Elsewhere --url
 or $TILORI_URL must match it, or the command refuses.
 Logs go to stderr and never include keys or event content.`;
 
@@ -148,7 +155,7 @@ interface Args {
 export function parseArgs(argv: string[]): Args {
   const flags = new Map<string, string | true>();
   const positionals: string[] = [];
-  const valued = new Set(['agent', 'url', 'exec', 'wait-ms', 'server-url', 'exec-timeout-ms', 'bytes']);
+  const valued = new Set(['agent', 'url', 'market-url', 'exec', 'wait-ms', 'server-url', 'exec-timeout-ms', 'bytes']);
   const takes: Record<string, number> = { 'get-post': 1, 'search-posts': 1, upload: 2, 'file-info': 1 };
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
@@ -272,6 +279,22 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         if (config.url && !sameEndpoint(new URL(url), buildMcpUrl(config.url))) {
           log(`replacing url in config.json: ${buildMcpUrl(config.url).href} -> ${url}`);
         }
+        // The Market URL: given, kept while the Tilori URL is unchanged, or
+        // dropped when the Tilori URL moves without one (UNI-748).
+        const marketGiven = str(args, 'market-url');
+        const urlMoved = !!config.url && !sameEndpoint(new URL(url), buildMcpUrl(config.url));
+        const market =
+          marketGiven === 'none'
+            ? undefined
+            : marketGiven !== undefined
+              ? buildMarketUrl(marketGiven).href
+              : urlMoved
+                ? undefined
+                : config.market_url;
+        if (market && sameEndpoint(new URL(market), new URL(url))) {
+          throw new Error('--market-url must differ from --url.');
+        }
+        if (config.market_url && !market) log('removing market_url from config.json');
         const key = await readSecretFromStdin(`Shared Tilori key for ${agent}: `);
         if (!args.flags.has('no-verify')) {
           const client = new TiloriAgentClient({ url: new URL(url), apiKey: key });
@@ -280,9 +303,20 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
           } finally {
             await client.close();
           }
+          // The Market server only needs to accept the key: an MCP initialize.
+          if (market && marketGiven !== undefined) {
+            const m = new TiloriAgentClient({ url: new URL(market), apiKey: key });
+            try {
+              await m.connect();
+            } finally {
+              await m.close();
+            }
+          }
         }
         const path = writeKey(agent, key);
         config.url = url;
+        if (market) config.market_url = market;
+        else delete config.market_url;
         config.agents ??= {};
         config.agents[agent] ??= {};
         if (args.flags.has('default') || !config.default_agent) config.default_agent = agent;
@@ -301,8 +335,10 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         const asked = str(args, 'server-url') ?? process.env.CLAUDE_CODE_MCP_SERVER_URL;
         if (!asked) throw new Error('headers needs the requesting server URL (CLAUDE_CODE_MCP_SERVER_URL or --server-url).');
         if (!config.url) throw new Error('No "url" in config.json; run tilori-agent init.');
-        if (!sameEndpoint(buildMcpUrl(asked), buildMcpUrl(config.url))) {
-          throw new Error('Refusing: the MCP server URL does not match "url" in config.json.');
+        // Exactly "url" or "market_url" (UNI-748); a missing server URL was
+        // refused above, never assumed to be either.
+        if (!releasedEndpoint(config, asked)) {
+          throw new Error('Refusing: the MCP server URL matches neither "url" nor "market_url" in config.json.');
         }
         process.stdout.write(JSON.stringify({ Authorization: `Bearer ${readKey(agent)}` }) + '\n');
         return 0;
