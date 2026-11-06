@@ -45,6 +45,10 @@ export class FakeTilori implements McpToolCaller {
   profileHangs = false;
   /** Posts get_post can return, by id; any other id is NOT_FOUND. */
   posts = new Map<string, unknown>();
+  /** search_posts pages, served in order by cursor ("" is the first page). */
+  searchPages = new Map<string, { items: unknown[]; next_cursor: string | null }>();
+  /** The arguments of each search_posts call. */
+  searches: Record<string, unknown>[] = [];
   /** get_post waits until the caller aborts it. */
   postHangs = false;
 
@@ -76,6 +80,11 @@ export class FakeTilori implements McpToolCaller {
           });
         if (this.profile === undefined) return err('unexpected tool get_my_profile');
         return ok(this.profile);
+      case 'search_posts': {
+        this.searches.push(a);
+        const page = this.searchPages.get(String(a.cursor ?? ''));
+        return page === undefined ? err('Invalid cursor') : ok(page);
+      }
       case 'get_post': {
         if (this.postHangs)
           await new Promise((_, reject) => {

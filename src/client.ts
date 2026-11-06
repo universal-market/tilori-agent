@@ -81,6 +81,10 @@ export const PRUNE_TOOL = 'unsubscribe_from_events';
  * `call`, so the router and `watch` cannot reach it. */
 export const POST_TOOL = 'get_post';
 
+/** Called only through `searchPosts` (the `search-posts` subcommand), never
+ * through `call`, so the router and `watch` cannot reach it. */
+export const SEARCH_TOOL = 'search_posts';
+
 /** The server answered the tool call with an error (not found, a missing
  * scope, a refusal), as opposed to a transport failure. */
 export class ToolRefused extends Error {}
@@ -292,7 +296,7 @@ export class TiloriAgentClient {
   }
 
   async #invoke<T>(
-    name: ReadTool | typeof PRUNE_TOOL | typeof POST_TOOL,
+    name: ReadTool | typeof PRUNE_TOOL | typeof POST_TOOL | typeof SEARCH_TOOL,
     args: Record<string, unknown>,
     options?: { signal?: AbortSignal; timeout?: number },
   ): Promise<T> {
@@ -357,6 +361,17 @@ export class TiloriAgentClient {
   /** One post as `get_post` returns it. Read-only. */
   async getPost(postId: string, options?: { signal?: AbortSignal; timeout?: number }): Promise<any> {
     return this.#invoke(POST_TOOL, { post_id: postId }, options);
+  }
+
+  /** One page of `search_posts` over every depth, oldest first. Read-only. */
+  async searchPosts(
+    query: string,
+    cursor: string | undefined,
+    options?: { signal?: AbortSignal; timeout?: number },
+  ): Promise<any> {
+    const args: Record<string, unknown> = { query, max_depth: null, sort: 'created_at', limit: 100 };
+    if (cursor) args.cursor = cursor;
+    return this.#invoke(SEARCH_TOOL, args, options);
   }
 
   async unsubscribe(subscriptionId: string, signal?: AbortSignal): Promise<void> {
