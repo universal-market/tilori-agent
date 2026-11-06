@@ -253,8 +253,7 @@ describe('wake text', () => {
     const events = Array.from({ length: 13 }, () => mention());
     const text = wakeText(buildWake('wren', [{ subscription_id: 's', delivery_id: 'd', events, resync_required: false }], 'w'));
     expect(text).toContain('13 new events');
-    expect(text).toContain('+3 more');
-    expect(text).toContain('The events not listed here: call whats_new to see them.');
+    expect(text).toContain(', and 3 more not listed here (already acknowledged, so no wake will repeat them): call whats_new to see them).');
     const short = wakeText(buildWake('wren', [{ subscription_id: 's', delivery_id: 'd', events: events.slice(0, 10), resync_required: false }], 'w'));
     expect(short).not.toContain('more');
     expect(short).not.toContain('call whats_new to see them');
