@@ -68,7 +68,8 @@ Usage:
       do, or "blocked on a prompt since HH:MM UTC" while its session waits on
       a permission or elicitation prompt. Reads only file times in the run
       directory. The router also logs a blocked session once, after
-      stall_minutes (default 10, 0 = off) with wakes arriving.
+      stall_minutes (default 10, 0 = off) with wakes arriving, and tells the
+      session once when its polls have failed that long.
   tilori-agent ensure [--agent <handle>] [--prune [--yes]]
       Creates or renews the agent's subscriptions and prints them, plus any
       "unmanaged" ones config does not ask for (nothing polls those).
