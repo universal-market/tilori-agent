@@ -70,6 +70,9 @@ export interface PushOptions {
   /** The agent's Tilori MCP endpoint (the key's URL). */
   endpoint: URL;
   apiKey: string;
+  /** Reads the key file again: on a 401 at stream-ticket, a key that was
+   * replaced is used and the mint retried once (see TiloriClientOptions). */
+  rereadKey?: () => string;
   fetch?: typeof fetch;
   now?: () => number;
   random?: () => number;
@@ -132,7 +135,8 @@ export function eventsUrl(raw: unknown, endpoint: URL): URL | null {
  * every outcome is a state, a log line or a hook call.
  */
 export class PushStream {
-  readonly #o: Required<Omit<PushOptions, 'fetch'>> & { fetch: typeof fetch };
+  readonly #o: Required<Omit<PushOptions, 'fetch' | 'rereadKey'>> & { fetch: typeof fetch };
+  readonly #rereadKey?: () => string;
   #status: PushStatus;
   /** When push was last lost (0 while live or before the first open). */
   #lostAt = 0;
@@ -154,6 +158,7 @@ export class PushStream {
       random: options.random ?? Math.random,
       sleep: options.sleep ?? defaultSleep,
     };
+    this.#rereadKey = options.rereadKey;
     this.#status = { state: 'connecting', since: this.#o.now() };
   }
 
@@ -285,19 +290,39 @@ export class PushStream {
     return { kind: 'failed', why: 'stream closed early' };
   }
 
+  /** After a 401: the key file's key, if it differs from the one in use. */
+  #newKey(): string | null {
+    if (!this.#rereadKey) return null;
+    try {
+      const key = this.#rereadKey();
+      return key && key !== this.#o.apiKey ? key : null;
+    } catch {
+      return null;
+    }
+  }
+
   async #mint(signal: AbortSignal): Promise<{ ticket: string; url: URL }> {
     const at = new URL(this.#o.endpoint.pathname.replace(/\/+$/, '') + '/stream-ticket', this.#o.endpoint);
     let res: Response;
-    try {
-      res = await this.#o.fetch(at, {
-        method: 'POST',
-        headers: { authorization: `Bearer ${this.#o.apiKey}`, accept: 'application/json' },
-        // A redirect must not carry the key anywhere else.
-        redirect: 'error',
-        signal,
-      });
-    } catch {
-      throw new Failed('Tilori unreachable');
+    for (let retried = false; ; retried = true) {
+      try {
+        res = await this.#o.fetch(at, {
+          method: 'POST',
+          headers: { authorization: `Bearer ${this.#o.apiKey}`, accept: 'application/json' },
+          // A redirect must not carry the key anywhere else.
+          redirect: 'error',
+          signal,
+        });
+      } catch {
+        throw new Failed('Tilori unreachable');
+      }
+      // A revoked key: if the key file holds a new one, mint with it once.
+      // 403 is the access gate, which a new key doesn't change.
+      const key = !retried && res.status === 401 ? this.#newKey() : null;
+      if (!key) break;
+      await res.body?.cancel().catch(() => {});
+      this.#o.apiKey = key;
+      this.hooks.log('push: the key was refused; the key file holds a new key, so it is used from now on');
     }
     if (res.status === 401 || res.status === 403) {
       await res.body?.cancel().catch(() => {});

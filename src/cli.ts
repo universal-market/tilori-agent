@@ -472,7 +472,9 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         const settings = config.agents?.[agent] ?? {};
         const url = keyUrl(config, str(args, 'url'));
         const apiKey = readKey(agent);
-        const client = new TiloriAgentClient({ url, apiKey, logger: log });
+        // A key revoked and replaced is picked up on its first 401.
+        const rereadKey = () => readKey(agent);
+        const client = new TiloriAgentClient({ url, apiKey, rereadKey, logger: log });
         const router = new Router({
           agents: [
             {
@@ -484,7 +486,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
               pauseSeconds: pauseSeconds(settings.pause_seconds),
               reminder: reminderSettings(settings),
               stallMinutes: stallMinutes(settings.stall_minutes),
-              ...(pushEnabled(settings) ? { push: { endpoint: url, apiKey } } : {}),
+              ...(pushEnabled(settings) ? { push: { endpoint: url, apiKey, rereadKey } } : {}),
             },
           ],
           logger: log,
@@ -505,10 +507,11 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         const agents: RouterAgentConfig[] = handles.map((handle) => {
           const s = config.agents?.[handle] ?? {};
           const apiKey = readKey(handle);
+          const rereadKey = () => readKey(handle);
           return {
             handle,
-            client: new TiloriAgentClient({ url, apiKey, logger: log }),
-            ...(pushEnabled(s) ? { push: { endpoint: url, apiKey } } : {}),
+            client: new TiloriAgentClient({ url, apiKey, rereadKey, logger: log }),
+            ...(pushEnabled(s) ? { push: { endpoint: url, apiKey, rereadKey } } : {}),
             subscriptions: desiredSubscriptions(s),
             wakesPerHour: s.wakes_per_hour,
             directWakesPerHour: s.direct_wakes_per_hour,
