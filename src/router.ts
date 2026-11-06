@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { clock, promptSignal, touchSignal, writePushSignal, type SignalKind } from './activity.ts';
 import {
+  ACCESS_GATE,
   MAX_POLL_SUBSCRIPTIONS,
   MultiPollUnsupported,
+  ToolRefused,
   type MultiPollResult,
   type ProfileNotes,
   type TiloriAgentClient,
@@ -11,7 +13,7 @@ import { DEFAULT_PAUSE_SECONDS, DEFAULT_DIRECT_WAKES_PER_HOUR, DEFAULT_WAKES_PER
 import { PushStream, type PushOptions, type PushStatus } from './push.ts';
 import { WakeLimiter } from './ratelimit.ts';
 import type { LiveSettings } from './settings.ts';
-import type { AgentDelivery, AgentSubscription, DeliverResult, EventRef, Injector, SubscriptionSpec, Wake } from './types.ts';
+import type { AgentDelivery, AgentSubscription, DeliverResult, EventRef, Injector, PollFailReason, SubscriptionSpec, Wake } from './types.ts';
 import { KIND_RANK, buildWake, refKey, toRefs } from './wake.ts';
 
 /** How long a delivered post or conversation is remembered. Longer than the
@@ -100,6 +102,9 @@ export interface RouterOptions {
    * or unset to write none (tests, or no private run directory). */
   signalDir?: string;
   now?: () => number;
+  /** Test seam: how long polls must fail before the session is told
+   * (default: the agent's stall_minutes; 0 there still turns it off). */
+  pollFailMs?: number;
 }
 
 function sleep(ms: number, signal?: AbortSignal, kick?: Promise<void>): Promise<void> {
@@ -192,6 +197,9 @@ interface AgentState {
   /** The prompt the session is blocked on (by its signal's mtime), the wakes
    * accepted since, and whether the stall line was logged for it. */
   blocked: { since: number; wakes: number; logged: boolean };
+  /** Since when every poll or subscription setup has failed, why (the last
+   * failure), and whether the session was told. Null while polls work. */
+  pollFail: null | { since: number; reason: PollFailReason; told: boolean };
   /** Push mode only (cfg.push): `seq` counts frames and reconnects, so a
    * poller that saw `seq` knows to poll again once it moves. */
   push: null | {
@@ -218,6 +226,18 @@ function directLimiter(perHour: number | undefined, now: () => number): WakeLimi
   if (n === 0) return null;
   if (!Number.isInteger(n) || n < 0) throw new Error('direct_wakes_per_hour must be a non-negative integer.');
   return new WakeLimiter(n, now);
+}
+
+/** A failure's reason in fixed words, for the session's poll line. */
+export function failReason(cause: unknown): PollFailReason {
+  const name = cause instanceof Error ? cause.name : '';
+  const text = errText(cause);
+  if (text.includes(ACCESS_GATE)) return 'access';
+  if (/\b401\b|unauthori[sz]ed|invalid (api |agent )?key|key (was )?(revoked|refused|invalid)/i.test(text)) return 'auth';
+  if (name === 'TimeoutError' || /timed? ?out|ETIMEDOUT/i.test(text)) return 'timeout';
+  if (cause instanceof ToolRefused) return 'refused';
+  if (/fetch failed|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|socket|network|\b50[234]\b/i.test(text)) return 'network';
+  return 'other';
 }
 
 const errText = (cause: unknown) => (cause instanceof Error ? cause.message : String(cause));
@@ -255,6 +275,7 @@ export class Router {
   readonly #now: () => number;
   readonly #signalDir: string | undefined;
   readonly #signalFailed = new Set<string>();
+  readonly #pollFailMs: number | undefined;
 
   constructor(options: RouterOptions) {
     this.#log = options.logger ?? (() => {});
@@ -268,6 +289,7 @@ export class Router {
     this.#restSignalMs = options.restSignalMs ?? REST_SIGNAL_MS;
     this.#now = options.now ?? Date.now;
     this.#signalDir = options.signalDir;
+    this.#pollFailMs = options.pollFailMs;
     for (const cfg of options.agents) {
       if (this.#agents.has(cfg.handle)) throw new Error(`Agent ${cfg.handle} listed twice.`);
       const broad = unfilteredPostsWarning(cfg.handle, cfg.subscriptions);
@@ -300,6 +322,7 @@ export class Router {
         stats: { wakes: 0, events: 0, delayed: 0, reminders: 0 },
         profile: { at: -Infinity, value: { postsLeft: null, toolsHash: null } },
         blocked: { since: 0, wakes: 0, logged: false },
+        pollFail: null,
         push: null,
       });
       const st = this.#agents.get(cfg.handle)!;
@@ -366,12 +389,44 @@ export class Router {
   /** A push monitor line ("down", or "back" after the reconnect sweep): to
    * the newest injector, outside the wake caps, never acknowledged. */
   #pushLine(st: AgentState, push: NonNullable<Wake['push']>) {
+    this.#monitorLine(st, { push });
+  }
+
+  /** A monitor line (push or polls) to the newest injector, outside the wake
+   * caps, never acknowledged. False when no injector is registered. */
+  #monitorLine(st: AgentState, line: Pick<Wake, 'push' | 'polls'>): boolean {
     const injector = st.injectors.at(-1);
-    const wake: Wake = { wake_id: randomUUID(), agent: st.cfg.handle, events: [], resync_required: false, push };
-    if (!injector) return;
+    if (!injector) return false;
+    const wake: Wake = { wake_id: randomUUID(), agent: st.cfg.handle, events: [], resync_required: false, ...line };
     void Promise.resolve()
       .then(() => injector.deliver(wake))
       .catch(() => {});
+    return true;
+  }
+
+  /** A poll or subscription setup failed. Once failures have lasted
+   * stall_minutes with no success between, tell the session once: nothing
+   * else would, since no wake can arrive. Only fixed words reach it. */
+  #pollFailed(st: AgentState, cause: unknown): void {
+    const now = Date.now();
+    const f = (st.pollFail ??= { since: now, reason: 'other', told: false });
+    f.reason = failReason(cause);
+    const { handle, stallMinutes } = st.cfg;
+    if (!stallMinutes || f.told) return;
+    if (now - f.since < (this.#pollFailMs ?? stallMinutes * 60_000)) return;
+    // Without an injector there is no session to tell; try at the next failure.
+    if (!this.#monitorLine(st, { polls: { state: 'failing', since: f.since, reason: f.reason } })) return;
+    f.told = true;
+    this.#log(`[${handle}] told the session that polls have failed since ${clock(f.since)} (${f.reason})`);
+  }
+
+  /** A poll succeeded: if the session was told polls fail, say they work again. */
+  #pollOk(st: AgentState): void {
+    const f = st.pollFail;
+    if (!f) return;
+    st.pollFail = null;
+    if (f.told && this.#monitorLine(st, { polls: { state: 'ok' } }))
+      this.#log(`[${st.cfg.handle}] told the session that polls work again`);
   }
 
   /** Push mode: waits until a frame or a reconnect moved `seq` past `seen`,
@@ -538,6 +593,7 @@ export class Router {
         failures++;
         const backoff = Math.min(60_000, 1000 * 2 ** (failures - 1));
         this.#log(`[${handle}] could not set up subscriptions (retry in ${backoff} ms): ${errText(cause)}`);
+        this.#pollFailed(st, cause);
         await sleep(backoff, signal);
         continue;
       }
@@ -685,7 +741,10 @@ export class Router {
             );
         // Answered, but nothing can arrive while every polled subscription
         // errored (they are re-subscribed next): not watched yet.
-        if (res.errors.length < idle.length) this.#signal(handle, 'watching');
+        if (res.errors.length < idle.length) {
+          this.#signal(handle, 'watching');
+          this.#pollOk(st);
+        }
         failures = 0;
         let got = false;
         for (const d of res.deliveries) {
@@ -765,6 +824,7 @@ export class Router {
         failures++;
         const backoff = Math.min(30_000, 500 * 2 ** (failures - 1));
         this.#log(`[${handle}] Tilori error (attempt ${failures}, retry in ${backoff} ms): ${msg}`);
+        this.#pollFailed(st, cause);
         await sleep(backoff, signal);
       } finally {
         st.onPolled = null;
@@ -859,6 +919,7 @@ export class Router {
         this.#signal(handle, 'attempting');
         const { delivery: d, retryAfterMs } = await client.pollOne(sub.id, this.#waitMs, signal);
         this.#signal(handle, 'watching');
+        this.#pollOk(st);
         failures = 0;
         if (d && (d.events.length > 0 || d.resync_required)) {
           // Only the first held batch starts the hold (see #pollAgent).
@@ -883,6 +944,7 @@ export class Router {
         failures++;
         const backoff = Math.min(30_000, 500 * 2 ** (failures - 1));
         this.#log(`[${handle}] Tilori error on ${sub.scope.type} (attempt ${failures}, retry in ${backoff} ms): ${msg}`);
+        this.#pollFailed(st, cause);
         await sleep(backoff, signal);
       }
     }

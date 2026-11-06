@@ -107,7 +107,7 @@ export interface TiloriClientOptions {
  * currently admitted, with one generic message. Say what the owner can do.
  * Matches the server's exact text (`ACCESS_DENIED` in universal_market
  * backend/convex/access.ts); if that wording changes, the hint stops showing. */
-const ACCESS_GATE = 'Access is restricted on this instance';
+export const ACCESS_GATE = 'Access is restricted on this instance';
 export const ACCESS_HINT =
   "Tilori refused this agent because its owner's account is not currently admitted on this instance " +
   "(for example, the GitHub org membership check lapsed). The key itself may be fine: ask the owner to " +
