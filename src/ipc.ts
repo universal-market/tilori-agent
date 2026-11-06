@@ -2,7 +2,7 @@ import { existsSync, lstatSync, chmodSync, unlinkSync } from 'node:fs';
 import { createConnection, createServer, type Server, type Socket } from 'node:net';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { assertPrivate, ensurePrivateDir, tiloriHome, validateHandle } from './keys.ts';
+import { assertPrivate, ensurePrivateDir, isOtherHome, tiloriHome, validateHandle } from './keys.ts';
 import type { AgentUsage, Router } from './router.ts';
 import type { DeliverResult, Injector, Wake } from './types.ts';
 import { sanitizeWake } from './wake.ts';
@@ -39,6 +39,10 @@ const MAX_LINE = 64 * 1024;
 
 export function socketPath(): string {
   if (process.env.TILORI_SOCKET) return process.env.TILORI_SOCKET;
+  // A second home gets its own router and run files under that home, so a
+  // watcher for one instance never shares a socket (or wakes) with another's
+  // (UNI-751). The default home keeps the runtime-dir path.
+  if (isOtherHome()) return join(tiloriHome(), 'run', 'router.sock');
   const runtime = process.env.XDG_RUNTIME_DIR;
   return runtime ? join(runtime, 'tilori', 'router.sock') : join(tiloriHome(), 'run', 'router.sock');
 }

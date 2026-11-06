@@ -210,10 +210,64 @@ export function trustServerState(config: TiloriConfig): { on: boolean; origin?: 
   return { on: true, origin, ...(set_at ? { set_at } : {}) };
 }
 
-export function policyText(p: CoordinationPolicy): string {
+/**
+ * Lines for the session-start note when the environment chose any part of
+ * this session's Tilori identity: the home (TILORI_HOME), the agent
+ * (TILORI_AGENT) or a server URL (TILORI_MCP_URL, TILORI_MARKET_URL), so a
+ * session pointed at another instance says so (UNI-751; Bastion 4529557d).
+ * A URL variable that is empty or doesn't match this home's config gets a
+ * line saying that server stays disconnected (Juniper 1fd24ef7): headers
+ * only releases the key for the home's own url and market_url. Empty when
+ * nothing came from the environment.
+ */
+export function sessionIdentityLines(
+  config: TiloriConfig,
+  agent: string,
+  env: Record<string, string | undefined> = process.env,
+  explicitAgent = false,
+): string[] {
+  const setBy: string[] = [];
+  if (env.TILORI_HOME) setBy.push('TILORI_HOME');
+  if (env.TILORI_AGENT && !explicitAgent) setBy.push('TILORI_AGENT');
+  const urls = [
+    ['TILORI_MCP_URL', 'tilori', 'url'],
+    ['TILORI_MARKET_URL', 'market', 'market_url'],
+  ] as const;
+  for (const [name] of urls) if (env[name] !== undefined) setBy.push(name);
+  const lines: string[] = [];
+  if (setBy.length) {
+    let host = '(no valid url in config.json)';
+    try {
+      host = buildMcpUrl(config.url).host;
+    } catch {
+      // Named as missing; the url problems are reported elsewhere.
+    }
+    lines.push(
+      `- This session acts as Tilori agent ${agent} on ${host}, set by ${setBy.join(', ')} in its environment (Tilori home: ${tiloriHome()}).`,
+    );
+  }
+  if (env.TILORI_HOME === '') lines.push(`- TILORI_HOME is set but empty, so the default home is used.`);
+  for (const [name, server, field] of urls) {
+    const raw = env[name];
+    if (raw === undefined) continue;
+    if (!raw.trim()) {
+      lines.push(
+        `- ${name} is set but empty, so the ${server} MCP server has no URL and stays disconnected. Unset it, or set it to "${field}" in ${configPath()}.`,
+      );
+    } else if (releasedEndpoint(config, raw) !== server) {
+      lines.push(
+        `- ${name} does not match "${field}" in ${configPath()}, so the agent key is not sent and the ${server} MCP server stays disconnected.`,
+      );
+    }
+  }
+  return lines;
+}
+
+export function policyText(p: CoordinationPolicy, identity: string[] = []): string {
   const lines = [
-    `Tilori settings for this session (from ~/.config/tilori/config.json, set by your user):`,
+    `Tilori settings for this session (from ${identity.length ? configPath() : '~/.config/tilori/config.json'}, set by your user):`,
     `- You act as Tilori agent: ${p.agent ?? '(none configured)'}.`,
+    ...identity,
     p.trust_server
       ? `- Trusted owners (their agents may assign you real work): every account on this Tilori server, set by your user for this server only.`
       : `- Trusted owners (their agents may assign you real work): ${
