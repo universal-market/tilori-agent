@@ -172,6 +172,10 @@ export class TiloriAgentClient {
   readonly #fetch?: typeof fetch;
   #mcp: McpToolCaller | null;
   #transport: StreamableHTTPClientTransport | null = null;
+  /** The key the current session was opened with (Wren cd3c7304). It can
+   * differ from #apiKey when a new key was taken while a connect that
+   * started with the old one was still in flight. */
+  #sessionKey: string | null = null;
   readonly log: (message: string) => void;
 
   constructor(options: TiloriClientOptions) {
@@ -224,8 +228,11 @@ export class TiloriAgentClient {
 
   /** Connects once; concurrent callers (the long poll and acknowledgements) share
    * the same in-flight connection attempt. */
-  connect(): Promise<void> {
-    if (this.#mcp) return Promise.resolve();
+  async connect(): Promise<void> {
+    // A session opened with a key that has since been replaced is ended, so
+    // the next one uses the new key. An injected caller (tests) has none.
+    if (this.#mcp && this.#transport && this.#sessionKey !== this.#apiKey) await this.close();
+    if (this.#mcp) return;
     this.#connecting ??= this.#connectOnce().finally(() => {
       this.#connecting = null;
     });
@@ -247,6 +254,7 @@ export class TiloriAgentClient {
   }
 
   async #doConnect(): Promise<void> {
+    const key = this.#apiKey;
     const client = new Client({ name: 'tilori-agent', version: VERSION });
     const base = this.#fetch ?? fetch;
     const transport = new StreamableHTTPClientTransport(this.endpoint, {
@@ -260,11 +268,12 @@ export class TiloriAgentClient {
         (init?.method ?? 'GET').toUpperCase() === 'GET'
           ? Promise.resolve(new Response(null, { status: 405 }))
           : base(input, { ...init, redirect: 'error' })) as typeof fetch,
-      requestInit: { headers: { Authorization: `Bearer ${this.#apiKey}` } },
+      requestInit: { headers: { Authorization: `Bearer ${key}` } },
     });
     await client.connect(transport);
     this.#mcp = client;
     this.#transport = transport;
+    this.#sessionKey = key;
   }
 
   async close(): Promise<void> {
@@ -276,6 +285,7 @@ export class TiloriAgentClient {
     const mcp = this.#mcp;
     this.#mcp = null;
     this.#transport = null;
+    this.#sessionKey = null;
     try {
       await transport.terminateSession().catch(() => {});
       await mcp?.close?.();
@@ -303,15 +313,29 @@ export class TiloriAgentClient {
     let raw: unknown;
     for (let retried = false; ; retried = true) {
       await this.connect();
-      // The key this attempt's session was opened with.
-      const used = this.#apiKey;
+      // This attempt's session and the key it was opened with (an injected
+      // caller has no key of its own: it counts as the current one).
+      const mcp = this.#mcp;
+      const used = this.#transport ? this.#sessionKey : this.#apiKey;
+      if (!mcp) {
+        // A key change closed the session between connect and here.
+        if (!retried) continue;
+        throw this.#clean(new Error('The Tilori session closed before the call was sent.'));
+      }
       try {
-        raw = await this.#mcp!.callTool({ name, arguments: args }, undefined, {
+        raw = await mcp.callTool({ name, arguments: args }, undefined, {
           signal: options?.signal,
           timeout: options?.timeout ?? 35_000,
         });
         break;
       } catch (cause) {
+        // Every tool this client calls is harmless to send twice (Bastion
+        // 598313e4): a poll is redelivered until acknowledged, acknowledging
+        // or unsubscribing again changes nothing, subscribing again renews
+        // the same subscription (ensureSubscriptions renews that way), and
+        // the rest are reads. This retry follows any error
+        // after a key change, so a write tool added here needs an
+        // idempotency key, or a retry on a 401 only.
         if (!retried && !options?.signal?.aborted) {
           // Another call took a new key while this one was in flight (the
           // router polls in parallel), and closing the old session ended

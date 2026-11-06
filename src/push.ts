@@ -321,6 +321,10 @@ export class PushStream {
       const key = !retried && res.status === 401 ? this.#newKey() : null;
       if (!key) break;
       await res.body?.cancel().catch(() => {});
+      // PushStream logs only fixed text and status codes, so it keeps no
+      // redaction set. If it ever logs response or error text, redact
+      // every key it has held, the old one included, as the client does
+      // (Bastion eacccffa).
       this.#o.apiKey = key;
       this.hooks.log('push: the key was refused; the key file holds a new key, so it is used from now on');
     }

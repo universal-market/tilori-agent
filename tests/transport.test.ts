@@ -317,7 +317,20 @@ describe('over real MCP HTTP transport', () => {
       expect(r.stdout).toBe('');
     }
     expect(ok.stderr + many.stderr + refused.stderr).not.toContain(KEY);
-  }, 30_000);
+
+    // A search that never answers: 1 after the 20 s budget, not a hang
+    // (Lark 58079f58).
+    fake.searchHangs = true;
+    try {
+      const started = Date.now();
+      const slow = await run('search-posts', sha);
+      expect(slow.exitCode).toBe(1);
+      expect(Date.now() - started).toBeLessThan(28_000);
+      expect(slow.stdout).toBe('');
+    } finally {
+      fake.searchHangs = false;
+    }
+  }, 60_000);
 
   test('CLI get-post prints the post as data, exits 2 when refused and 1 on bad input', async () => {
     const env = { ...process.env, TILORI_HOME: join(home, 'tilori'), TILORI_AGENT: 'wren' };
