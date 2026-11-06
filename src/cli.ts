@@ -108,6 +108,14 @@ Usage:
       exactly as Tilori sent them (absent if it didn't), and body. Read-only. Exits 0 on success, 2 when Tilori refuses
       (not found, hidden from this agent, no read scope), 1 on bad input, a
       transport error or no answer within 10 s.
+  tilori-agent search-posts <commit-sha> [--json] [--agent <handle>]
+      Finds the posts that mention a full 40-character commit SHA, at any
+      depth, oldest first, and prints one JSON object: {"items": [{id,
+      author (id, user_id, kind, username, handle), created_at}], "complete":
+      true|false}. No titles or bodies: read each with get-post. complete is
+      false when more than 500 posts match. Read-only. Exits 0 on success,
+      2 when Tilori refuses, 1 on bad input, a transport error or no answer
+      within 20 s.
   tilori-agent file-info <file>
       Prints {"byte_size": n, "media_type": "…"} for prepare_attachment_upload.
       media_type is read from the first bytes (PNG, JPEG, GIF, WebP, PDF), else
@@ -131,7 +139,8 @@ interface Args {
   cmd: string;
   flags: Map<string, string | true>;
   /** `get-post` takes the post id; `config` takes its action and arguments;
-   * `upload` takes the attachment id and file; `file-info` the file. */
+   * `upload` takes the attachment id and file; `file-info` the file;
+   * `search-posts` the commit SHA. */
   positionals: string[];
 }
 
@@ -139,7 +148,7 @@ export function parseArgs(argv: string[]): Args {
   const flags = new Map<string, string | true>();
   const positionals: string[] = [];
   const valued = new Set(['agent', 'url', 'exec', 'wait-ms', 'server-url', 'exec-timeout-ms', 'bytes']);
-  const takes: Record<string, number> = { 'get-post': 1, upload: 2, 'file-info': 1 };
+  const takes: Record<string, number> = { 'get-post': 1, 'search-posts': 1, upload: 2, 'file-info': 1 };
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
     if (!a.startsWith('--')) {
@@ -163,6 +172,12 @@ export function parseArgs(argv: string[]): Args {
 
 const POST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const GET_POST_TIMEOUT_MS = 10_000;
+/** search-posts takes only a full commit SHA, so it can't become a general
+ * search: merge-check finds the verdict posts for a head with it. */
+const COMMIT_SHA = /^[0-9a-f]{40}$/;
+/** Pages of 100 read before giving up and saying the list is incomplete. */
+const SEARCH_MAX_PAGES = 5;
+const SEARCH_TIMEOUT_MS = 20_000;
 
 const str = (a: Args, k: string) => {
   const v = a.flags.get(k);
@@ -236,7 +251,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     log((e as Error).message);
     // get-post keeps 2 for "Tilori refused"; bad input is 1. For upload
     // and file-info, 2 means refused locally with nothing sent.
-    return argv[0] === 'get-post' ? 1 : 2;
+    return argv[0] === 'get-post' || argv[0] === 'search-posts' ? 1 : 2;
   }
   const controller = new AbortController();
   const stop = () => controller.abort();
@@ -336,6 +351,59 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
           }
           out.body = typeof post.body === 'string' ? post.body : '';
           process.stdout.write(JSON.stringify(out) + '\n');
+          return 0;
+        } catch (cause) {
+          if (cause instanceof ToolRefused) {
+            log(cause.message);
+            return 2;
+          }
+          throw cause;
+        } finally {
+          await client.close();
+        }
+      }
+      case 'search-posts': {
+        // Read-only: merge-check finds the verdict posts for a head with it
+        // (changes requested that never reached GitHub). Ids and identity
+        // fields only; any text is read separately with get-post, as data.
+        const sha = args.positionals[0] ?? '';
+        if (!COMMIT_SHA.test(sha)) throw new Error('search-posts needs a full 40-character lowercase commit SHA.');
+        const config = loadConfig();
+        const agent = requireAgent(config, args);
+        const client = new TiloriAgentClient({ url: keyUrl(config, str(args, 'url')), apiKey: readKey(agent), logger: log });
+        const timeout = AbortSignal.timeout(SEARCH_TIMEOUT_MS);
+        const abort = AbortSignal.any([signal, timeout]);
+        const who = (x: any) => ({
+          id: x?.id ?? null,
+          user_id: x?.user_id ?? null,
+          kind: x?.kind ?? null,
+          username: x?.username ?? null,
+          handle: x?.handle ?? null,
+        });
+        try {
+          const items: unknown[] = [];
+          const seen = new Set<string>();
+          let cursor: string | undefined;
+          let complete = false;
+          const gaveUp = new Promise<never>((_, reject) =>
+            abort.addEventListener('abort', () => reject(new Error('search-posts: no answer in time.')), { once: true }),
+          );
+          for (let page = 0; page < SEARCH_MAX_PAGES; page++) {
+            const res = await Promise.race([client.searchPosts(sha, cursor, { signal: abort, timeout: SEARCH_TIMEOUT_MS }), gaveUp]);
+            if (!res || typeof res !== 'object' || !Array.isArray(res.items)) throw new Error('search-posts: unexpected answer from Tilori.');
+            for (const it of res.items) {
+              const post = it?.post;
+              if (!post || typeof post.id !== 'string' || !POST_ID.test(post.id) || seen.has(post.id)) continue;
+              seen.add(post.id);
+              items.push({ id: post.id, author: who(post.author), created_at: post.created_at ?? null });
+            }
+            cursor = typeof res.next_cursor === 'string' && res.next_cursor ? res.next_cursor : undefined;
+            if (!cursor) {
+              complete = true;
+              break;
+            }
+          }
+          process.stdout.write(JSON.stringify({ items, complete }) + '\n');
           return 0;
         } catch (cause) {
           if (cause instanceof ToolRefused) {
