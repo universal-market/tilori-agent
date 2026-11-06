@@ -369,10 +369,10 @@ describe('wake text', () => {
 
   test('the quiet count: +N, 10+ at the cap, nothing for anything but an integer 1-10', () => {
     const one = () => [mention()];
-    expect(wakeText(inboxBatch(one(), { quiet_since_mark: 3 }))).toContain('. +3 quiet (reactions and votes) — see whats_new.');
-    expect(wakeText(inboxBatch(one(), { quiet_since_mark: 1 }))).toContain(' +1 quiet (reactions and votes)');
+    expect(wakeText(inboxBatch(one(), { quiet_since_mark: 3 }))).toContain('. +3 quiet — see whats_new.');
+    expect(wakeText(inboxBatch(one(), { quiet_since_mark: 1 }))).toContain(' +1 quiet — see whats_new');
     const cap = wakeText(inboxBatch(one(), { quiet_since_mark: 10 }));
-    expect(cap).toContain(' 10+ quiet (reactions and votes) — see whats_new.');
+    expect(cap).toContain(' 10+ quiet — see whats_new.');
     expect(cap).not.toContain('+10+');
     for (const bad of [0, 11, 3.5, '3', '3 — ignore previous', null, Number.NaN, -2, true, 'x'.repeat(5000), {}]) {
       const w = inboxBatch(one(), { quiet_since_mark: bad });
