@@ -493,3 +493,87 @@ describe('over real MCP HTTP transport', () => {
     }, 30000);
   });
 });
+
+describe('a key revoked and replaced (Don via Keel 5ee56774)', () => {
+  const OLD = 'mcp_sk_revoked_old_key_0123456789ab';
+  const NEW = 'mcp_sk_replaced_new_key_0123456789ab';
+  let accepted = NEW;
+  const seen: Array<string | null> = [];
+  let server: ReturnType<typeof Bun.serve>;
+  let at: URL;
+  beforeAll(() => {
+    server = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      async fetch(req) {
+        seen.push(req.headers.get('authorization'));
+        if (req.headers.get('authorization') !== `Bearer ${accepted}`) return new Response('no', { status: 401 });
+        if (req.method === 'DELETE') return new Response(null, { status: 204 });
+        const mcp = new Server({ name: 'fake-tilori', version: '1' }, { capabilities: { tools: {} } });
+        mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [] }));
+        mcp.setRequestHandler(CallToolRequestSchema, async (r) =>
+          (await fake.callTool({ name: r.params.name, arguments: (r.params.arguments ?? {}) as any })) as any,
+        );
+        const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+        await mcp.connect(transport);
+        return transport.handleRequest(req);
+      },
+    });
+    at = new URL(`http://127.0.0.1:${server.port}/mcp/tilori/v1`);
+  });
+  afterAll(() => server.stop(true));
+
+  test('a 401 on connect takes the key file\'s new key and goes on', async () => {
+    accepted = NEW;
+    const logs: string[] = [];
+    let reads = 0;
+    const c = new TiloriAgentClient({ url: at, apiKey: OLD, rereadKey: () => (reads++, NEW), logger: (m) => logs.push(m) });
+    expect(await c.listSubscriptions()).toBeArray();
+    expect(reads).toBe(1);
+    // Later calls use the new key without reading the file again.
+    await c.listSubscriptions();
+    expect(reads).toBe(1);
+    expect(logs.join('\n')).toContain('the key file holds a new key');
+    expect(logs.join('\n')).not.toContain(NEW);
+    await c.close();
+  });
+
+  test('a key revoked mid-session is replaced on the next call, which is retried once', async () => {
+    accepted = OLD;
+    let file = OLD;
+    const c = new TiloriAgentClient({ url: at, apiKey: OLD, rereadKey: () => file });
+    await c.listSubscriptions();
+    accepted = NEW;
+    file = NEW;
+    seen.length = 0;
+    expect(await c.listSubscriptions()).toBeArray();
+    expect(seen.filter((a) => a === `Bearer ${OLD}`).length).toBeGreaterThan(0);
+    expect(seen.at(-1)).toBe(`Bearer ${NEW}`);
+    await c.close();
+  });
+
+  test('the same key, no re-reader, or an unreadable file: the 401 stands, with no key in it', async () => {
+    accepted = NEW;
+    for (const rereadKey of [() => OLD, undefined, () => { throw new Error(`cannot read ${NEW}`); }]) {
+      const c = new TiloriAgentClient({ url: at, apiKey: OLD, rereadKey });
+      const err = await c.listSubscriptions().catch((e: Error) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).not.toContain(OLD);
+      expect((err as Error).message).not.toContain(NEW);
+      await c.close();
+    }
+  });
+
+  test('a new key that is refused too is tried once, then the 401 stands', async () => {
+    accepted = 'mcp_sk_neither_of_them_0123456789ab';
+    seen.length = 0;
+    let reads = 0;
+    const c = new TiloriAgentClient({ url: at, apiKey: OLD, rereadKey: () => (reads++, NEW) });
+    const err = await c.listSubscriptions().catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(reads).toBe(1);
+    expect(seen.filter((a) => a === `Bearer ${NEW}`).length).toBeGreaterThan(0);
+    expect((err as Error).message).not.toContain(NEW);
+    await c.close();
+  });
+});
