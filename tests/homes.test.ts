@@ -303,6 +303,33 @@ describe('the homes allow-list (Don, 11-07)', () => {
     expect(help.stdout.toString()).toContain('tilori-agent claude --home');
   });
 
+  test('--help and -h print the usage from any command and read no home (UNI-762)', () => {
+    // An unlisted home: anything that read it would refuse with exit 1.
+    const h = join(dir, 'unlisted-help');
+    withEnv({ TILORI_HOME: h }, () => {
+      writeKey('wren', KEY);
+      saveConfig({ url, default_agent: 'wren' });
+    });
+    for (const argv of [
+      ['init', '--help'],
+      ['init', '-h'],
+      ['init', '--agent', '--help'],
+      ['init', '--agent', 'wren', '--url', url, '--help'],
+      ['status', '-h'],
+      ['watch', '--notify-lines', '--help'],
+      ['config', 'set', '-h'],
+      ['get-post', '--help'],
+      ['--help'],
+      ['-h'],
+    ]) {
+      const p = Bun.spawnSync(['bun', cli, ...argv], { env: envWith({ TILORI_HOME: h }), stdin: 'ignore' });
+      expect({ argv, code: p.exitCode }).toEqual({ argv, code: 0 });
+      expect(p.stdout.toString()).toContain('tilori-agent init --agent <handle>');
+      expect(p.stderr.toString()).toBe('');
+      expect(p.stdout.toString() + p.stderr.toString()).not.toContain(KEY);
+    }
+  });
+
   describe('tilori-agent claude --home', () => {
     let bin: string;
     let record: string;
