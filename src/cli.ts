@@ -148,6 +148,7 @@ Usage:
       nothing from the server's answer. Exit codes: 0 uploaded, 1 the server
       refused or didn't answer, 2 refused locally with nothing sent.
 
+--help or -h after any command prints this text and does nothing else.
 Agent selection: --agent, then $TILORI_AGENT, then "default_agent" in config.json.
 Keys are only sent to "url" in config.json, which init sets, and through
 "headers" to "market_url" when set. Elsewhere --url
@@ -178,6 +179,12 @@ export function parseArgs(argv: string[]): Args {
       rest = argv.slice(i + 1);
       break;
     }
+    // `-h` and `--help` ask for the usage text from any command (UNI-762),
+    // so `init --help` doesn't go on to read a home or a key.
+    if (a === '-h' || a === '--help') {
+      flags.set('help', true);
+      continue;
+    }
     if (!a.startsWith('--')) {
       if (positionals.length < (takes[argv[0]] ?? 0) || argv[0] === 'config') {
         positionals.push(a);
@@ -191,6 +198,11 @@ export function parseArgs(argv: string[]): Args {
     else if (valued.has(name)) {
       const v = argv[++i];
       if (v === undefined) throw new Error(`--${name} needs a value.`);
+      // `init --agent --help` asks for help; it doesn't name an agent "--help".
+      if (v === '-h' || v === '--help') {
+        flags.set('help', true);
+        continue;
+      }
       flags.set(name, v);
     } else flags.set(name, true);
   }
@@ -339,6 +351,10 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   process.once('SIGTERM', stop);
   const signal = controller.signal;
 
+  if (args.flags.has('help')) {
+    console.log(USAGE);
+    return 0;
+  }
   try {
     if (!HOMELESS.has(args.cmd)) assertHomeAllowed();
     switch (args.cmd) {

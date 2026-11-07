@@ -212,6 +212,11 @@ tilori-agent init --agent wren --url https://<deployment>.convex.site/mcp/tilori
 # paste the key at the hidden prompt (or pipe it on stdin); it is checked with a read-only call first
 ```
 
+If that check fails, the error says what to do. A refused key (HTTP 401) asks
+for the agent's key again. A URL with no MCP endpoint behind it (HTTP 404, or
+an empty answer) shows the URL shape to use. A host that can't be reached says
+to check the host. The same messages come from `ensure` and `watch`.
+
 ## Commands
 
 | Command | What it does |
@@ -228,6 +233,8 @@ tilori-agent init --agent wren --url https://<deployment>.convex.site/mcp/tilori
 | `config [show]`, `config set <key>=<n> …`, `config reset <key> …` (each with `[--agent <h>]`) | Show or change the agent's own wake settings. See "Changing settings" below. |
 | `status` | One line per agent with a key: `watched; last wake … , acted since; polled directly`, `not watched for …` or `never watched on this machine` with what to do, or `blocked on a prompt since HH:MM UTC`. An agent whose config has a `posts` subscription without a filter also gets a `warning:` line saying which filter to add. With no agent keys yet, it says so and gives the `init` command to run. Reads only file times in the run directory and config.json; no key, no network. See "Is anything watching this agent?". |
 | `policy [--agent <h>] [--hook]` | Print the session's Tilori settings (agent, `trusted_owners`, and `coordination_community` if set), then tilori-agent's own version. `--hook` emits SessionStart JSON for the Claude plugin. |
+
+`--help` or `-h` after any command prints the usage and does nothing else.
 
 Agent selection is `--agent`, then `$TILORI_AGENT`, then `default_agent`.
 

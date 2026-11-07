@@ -126,6 +126,45 @@ export function explainAccess(message: string): string {
   return message.includes(ACCESS_GATE) && !message.includes(ACCESS_HINT) ? `${message} ${ACCESS_HINT}` : message;
 }
 
+/** The server refused the agent's key (HTTP 401). Says what to do; the same
+ * words whether the key is wrong, revoked or names no agent. */
+export class KeyRejected extends Error {}
+
+/** Where the MCP endpoints live, for errors about a URL that isn't one. */
+export const URL_SHAPE =
+  "Tilori's MCP URL looks like https://<deployment>.convex.site/mcp/tilori/v1, and Market's ends in /mcp/v1 on the same host.";
+
+/** Network failures that mean the host couldn't be reached at all. */
+const UNREACHABLE = /ENOTFOUND|EAI_AGAIN|ECONNREFUSED|getaddrinfo|Unable to connect|fetch failed|certificate|CERT_|SSL|TLS/i;
+
+/**
+ * A transport failure in words that say what to do (UNI-760): a refused key,
+ * no MCP endpoint at the URL, or a host that can't be reached. The URL named
+ * is the configured endpoint (redirects are refused, so no server chooses it).
+ * `message` is already redacted; it's kept at the end as the server's own
+ * words. Anything else (tool refusals, timeouts, 5xx with a body) is left as
+ * it was.
+ */
+export function explainTransport(cause: unknown, endpoint: URL, message: string): Error {
+  const where = `${endpoint.origin}${endpoint.pathname}`;
+  const code = (cause as { code?: unknown } | null)?.code;
+  const said = message ? ` (${message})` : '';
+  if (isUnauthorized(cause)) {
+    return new KeyRejected(
+      `${where} refused this agent's key (HTTP 401). Copy the agent's key from Tilori again and store it with ` +
+        `tilori-agent init --agent <handle>.${said}`,
+    );
+  }
+  if (code === 404) return new Error(`No MCP endpoint at ${where} (HTTP 404). ${URL_SHAPE}${said}`);
+  if (typeof code === 'number' && /endpoint:\s*$/.test(message)) {
+    return new Error(`${where} answered HTTP ${code} with no MCP response. ${URL_SHAPE}${said}`);
+  }
+  if (cause instanceof TypeError && UNREACHABLE.test(message)) {
+    return new Error(`Could not reach ${endpoint.host}: check the host in the URL. ${URL_SHAPE}${said}`);
+  }
+  return new Error(message);
+}
+
 /** Whether a transport error is the server refusing the key (HTTP 401). */
 export function isUnauthorized(cause: unknown): boolean {
   const c = cause as { code?: unknown; name?: unknown } | null;
@@ -200,7 +239,9 @@ export class TiloriAgentClient {
 
   #clean(cause: unknown): Error {
     const msg = cause instanceof Error ? cause.message : String(cause ?? 'Unknown error');
-    return new Error(explainAccess(redact(msg, this.#secrets)));
+    const clean = explainTransport(cause, this.endpoint, redact(msg, this.#secrets));
+    clean.message = explainAccess(clean.message);
+    return clean;
   }
 
   /** After a 401: takes the key file's key if it differs from the one in
