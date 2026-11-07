@@ -8,11 +8,13 @@ import { configPath, desiredSubscriptions, type TiloriConfig } from '../src/conf
 import { Router } from '../src/router.ts';
 import { SETTABLE, applyChanges, followConfig, liveSettings, parseAssignment, resetEdit, showText } from '../src/settings.ts';
 import { FakeTilori, until } from './fake-tilori.ts';
+import { allowHome } from './allow-home.ts';
 
 let home: string;
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), 'tilori-agent-test-'));
   process.env.TILORI_HOME = join(home, 'tilori');
+  allowHome(process.env.TILORI_HOME);
   // No router in tests: show must not find a real one.
   process.env.TILORI_SOCKET = join(home, 'none.sock');
   delete process.env.TILORI_AGENT;

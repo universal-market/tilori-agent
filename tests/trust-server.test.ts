@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { main } from '../src/cli.ts';
 import { configPath, coordinationPolicy, policyText, trustServerState, type TiloriConfig } from '../src/config.ts';
+import { allowHome } from './allow-home.ts';
 
 // UNI-556: the server-wide trust option.
 
@@ -15,6 +16,7 @@ let home: string;
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), 'tilori-agent-test-'));
   process.env.TILORI_HOME = join(home, 'tilori');
+  allowHome(process.env.TILORI_HOME);
   process.env.TILORI_SOCKET = join(home, 'none.sock');
   delete process.env.TILORI_AGENT;
   delete process.env.TILORI_URL;
