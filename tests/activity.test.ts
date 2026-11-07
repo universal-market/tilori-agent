@@ -1,12 +1,12 @@
 import './setup.ts';
-import { lstatSync, mkdtempSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { activityDir, ago, promptSignal, stallMinutes, statusLine, touchSignal, watchSignal } from '../src/activity.ts';
 import { desiredSubscriptions } from '../src/config.ts';
-import { ToolRefused } from '../src/client.ts';
-import { Router, failReason } from '../src/router.ts';
+import { KeyRejected, ToolRefused } from '../src/client.ts';
+import { Router, failReason, keyRefused } from '../src/router.ts';
 import type { DeliverResult, Injector, Wake } from '../src/types.ts';
 import { pollsText, sanitizeWake, wakeText } from '../src/wake.ts';
 import { FakeTilori, mention, post, until } from './fake-tilori.ts';
@@ -144,6 +144,23 @@ describe('status line', () => {
     expect(line()).toBe(
       "wren: not watched for 40 min (since 00:20 UTC): a monitor or router is running, but its polls are failing; check the agent's key and network (the tilori-agent log says which).",
     );
+  });
+
+  test('a refused key: says stopped and to re-run init, until a poll succeeds again (UNI-761)', () => {
+    const STOPPED =
+      "wren: stopped: Tilori refused the agent's key (HTTP 401). Re-run tilori-agent init --agent wren with the agent's key; the watcher picks it up within a minute.";
+    touch('attempting-wren', now - 20_000);
+    touch('rejected-wren', now - 20_000);
+    expect(line()).toBe(STOPPED);
+    touch('watching-wren', now - 40 * 60_000);
+    expect(line()).toBe(STOPPED);
+    // A good poll after the refusal: watched again.
+    touch('watching-wren', now - 5_000);
+    expect(line()).toStartWith('wren: watched;');
+    // An old refusal with nothing retrying: the usual "not watched" line.
+    touch('watching-wren', now - 40 * 60_000);
+    touch('rejected-wren', now - 30 * 60_000);
+    expect(line()).toStartWith('wren: not watched for 40 min');
   });
 
   test('blocked on a prompt still comes first', () => {
@@ -439,6 +456,56 @@ describe('poll failure lines', () => {
     await done;
   });
 
+  test('a refused key: one log line, the session told at once, slow retries, and back when the key works (UNI-761)', async () => {
+    const fake = new FakeTilori();
+    fake.refuseKey = true;
+    const logs: string[] = [];
+    const dir = mkdtempSync(join(tmpdir(), 'ta-761-'));
+    const router = new Router({
+      agents: [{ handle: 'wren', client: fake.client(), subscriptions: desiredSubscriptions({}), stallMinutes: 10 }],
+      logger: (m) => logs.push(m),
+      waitMs: 10,
+      retryMs: 10,
+      coalesceMs: 0,
+      plainHoldMs: 0,
+      directPauseMs: 0,
+      // The usual threshold would hold the line back; a refused key skips it.
+      pollFailMs: 60 * 60_000,
+      keyRetryMs: 50,
+      signalDir: dir,
+    });
+    const inj = new Recorder();
+    router.register('wren', inj);
+    const ac = new AbortController();
+    const done = router.run(ac.signal);
+    await until(() => inj.wakes.some((w) => w.polls?.state === 'failing'));
+    const first = inj.wakes.find((w) => w.polls)!;
+    expect(first.polls).toMatchObject({ state: 'failing', reason: 'auth' });
+    expect(wakeText(first)).toContain('Tell your user to re-run `tilori-agent init --agent wren`');
+    // Several slow tries, each logged by nothing but the first line.
+    const tries = () => fake.calls.filter((c) => c === 'list_agent_subscriptions').length;
+    const before = tries();
+    await until(() => tries() >= before + 2);
+    expect(logs.filter((l) => l.includes("Tilori refused this agent's key"))).toHaveLength(1);
+    expect(logs.some((l) => l.includes('could not set up subscriptions'))).toBe(false);
+    expect(logs.find((l) => l.includes("refused this agent's key"))).toContain('Re-run tilori-agent init --agent wren');
+    expect(existsSync(join(dir, 'rejected-wren'))).toBe(true);
+    // The key works again (a new key in the key file): polls resume and the session hears it.
+    fake.refuseKey = false;
+    await until(() => inj.wakes.some((w) => w.polls?.state === 'ok'));
+    expect(logs).toContain("[wren] Tilori accepts the agent's key again");
+    ac.abort();
+    await done;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test('a bare 401, 5xx or network failure keeps the usual backoff (UNI-761)', () => {
+    expect(keyRefused(new KeyRejected('x refused this agent\'s key (HTTP 401). (Streamable HTTP error: {"error":"invalid_token"})'))).toBe(true);
+    expect(keyRefused(new KeyRejected("x refused this agent's key (HTTP 401). (Streamable HTTP error: no)"))).toBe(false);
+    expect(keyRefused(new Error('{"error":"invalid_token"}'))).toBe(false);
+    expect(keyRefused(new TypeError('fetch failed'))).toBe(false);
+  });
+
   test('stall_minutes 0 turns the poll lines off', async () => {
     const { fake, logs, inj, ac, done } = failing(0);
     await until(() => fake.subs.length === 2);
@@ -485,11 +552,18 @@ describe('poll failure lines', () => {
   });
 
   test('pollsText is one line with a UTC time', () => {
-    const t = pollsText('keel', { state: 'failing', since: Date.UTC(2026, 10, 6, 7, 49), reason: 'auth' });
+    const t = pollsText('keel', { state: 'failing', since: Date.UTC(2026, 10, 6, 7, 49), reason: 'network' });
     expect(t).toBe(
-      'Tilori polling for agent keel has failed since 07:49 UTC (the key was refused); no wakes are arriving.' +
+      'Tilori polling for agent keel has failed since 07:49 UTC (Tilori is unreachable); no wakes are arriving.' +
         ' Call whats_new with unanswered_only: true while you wait, and tell your user: `tilori-agent status` and the router log say more.',
     );
     expect(t).not.toContain('\n');
+    // A refused key says what fixes it (UNI-761).
+    const k = pollsText('keel', { state: 'failing', since: Date.UTC(2026, 10, 6, 7, 49), reason: 'auth' });
+    expect(k).toBe(
+      'Tilori polling for agent keel has failed since 07:49 UTC (the key was refused); no wakes are arriving.' +
+        " Tell your user to re-run `tilori-agent init --agent keel` with the agent's key from Tilori. Call whats_new with unanswered_only: true while you wait.",
+    );
+    expect(k).not.toContain('\n');
   });
 });

@@ -39,7 +39,7 @@ export function activityDir(): string {
   return dirname(socketPath());
 }
 
-export type SignalKind = 'attempting' | 'watching' | 'woke';
+export type SignalKind = 'attempting' | 'watching' | 'woke' | 'rejected';
 
 /** Sets `<kind>-<agent>` in the run directory to now. The file is opened
  * without following a symlink, created 0600 if missing, and its times set
@@ -170,6 +170,8 @@ export interface WatchSignal {
   attempting: number | null;
   watching: number | null;
   woke: number | null;
+  /** The last time the server refused the agent's key (`rejected-`, UNI-761). */
+  rejected?: number | null;
   /** The last tool call (`activity-`), for "acted since". */
   activity: number | null;
   /** Whether this client's hooks report tool calls at all. */
@@ -185,6 +187,7 @@ export function watchSignal(handle: string, dir = activityDir(), router = false)
     attempting: at('attempting'),
     watching: at('watching'),
     woke: at('woke'),
+    rejected: at('rejected'),
     activity,
     reports: activity !== null || at('blocked') !== null,
     router,
@@ -232,6 +235,12 @@ export function statusLine(
     return opts.push!.state === 'refused'
       ? `${handle}: ${chip}: Tilori refused the agent's key for push; ${CHECK}`
       : `${handle}: ${chip}; wakes may be late until it's back. Nothing polls meanwhile: call whats_new or poll_events yourself if you're waiting on something.`;
+  // A watcher whose key is refused retries once a minute (UNI-761): while
+  // that's fresh and newer than its last good poll, say so, not "never watched".
+  const refusedAt = watch.rejected ?? null;
+  const rejected = refusedAt !== null && now - refusedAt < WATCHED_MS && (watch.watching ?? 0) < refusedAt;
+  if (rejected)
+    return `${handle}: stopped: Tilori refused the agent's key (HTTP 401). Re-run tilori-agent init --agent ${handle} with the agent's key; the watcher picks it up within a minute.`;
   const failing = watch.attempting !== null && now - watch.attempting < WATCHED_MS;
   if (watch.watching === null) {
     // A first long poll can take 25 s to answer, so a fresh attempt with no

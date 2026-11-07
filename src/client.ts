@@ -132,7 +132,7 @@ export class KeyRejected extends Error {}
 
 /** Where the MCP endpoints live, for errors about a URL that isn't one. */
 export const URL_SHAPE =
-  "Tilori's MCP URL looks like https://<deployment>.convex.site/mcp/tilori/v1, and Market's ends in /mcp/v1 on the same host.";
+  "Tilori's MCP URL looks like https://<deployment>.convex.site/mcp/tilori/v1, and Market's ends in /mcp/v1 (possibly on another host).";
 
 /** Network failures that mean the host couldn't be reached at all. */
 const UNREACHABLE = /ENOTFOUND|EAI_AGAIN|ECONNREFUSED|getaddrinfo|Unable to connect|fetch failed|certificate|CERT_|SSL|TLS/i;

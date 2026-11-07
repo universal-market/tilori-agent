@@ -14,6 +14,9 @@ export class FakeTilori implements McpToolCaller {
   failUnsubscribe = new Set<string>();
   acks: string[] = [];
   failNextPolls = 0;
+  /** While true, every call fails as Tilori's 401 for a refused key does
+   * (UNI-761). */
+  refuseKey = false;
   failAcks = 0;
   refuse = new Set<string>();
   /** Behave like a server from before UNI-380: refuse subscription_ids. */
@@ -73,6 +76,8 @@ export class FakeTilori implements McpToolCaller {
   ): Promise<unknown> {
     const { name, arguments: a } = params;
     this.calls.push(name);
+    if (this.refuseKey)
+      throw Object.assign(new Error('Streamable HTTP error: Error POSTing to endpoint: {"error":"invalid_token"}'), { code: 401 });
     const ok = (result: unknown) => ({ content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: { result } });
     const err = (message: string) => ({ isError: true, content: [{ type: 'text', text: JSON.stringify({ message }) }] });
     switch (name) {

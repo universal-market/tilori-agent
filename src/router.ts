@@ -110,6 +110,9 @@ export interface RouterOptions {
   /** Test seam: how long polls must fail before the session is told
    * (default: the agent's stall_minutes; 0 there still turns it off). */
   pollFailMs?: number;
+  /** How long to wait between tries while the server refuses the agent's
+   * key (default 60 s, UNI-761). Each try reads the key file again. */
+  keyRetryMs?: number;
 }
 
 function sleep(ms: number, signal?: AbortSignal, kick?: Promise<void>): Promise<void> {
@@ -207,6 +210,8 @@ interface AgentState {
   /** Since when every poll or subscription setup has failed, why (the last
    * failure), and whether the session was told. Null while polls work. */
   pollFail: null | { since: number; reason: PollFailReason; told: boolean };
+  /** Since when the server has refused the key (keyRefused), or null. */
+  keyRefusedSince: number | null;
   /** Push mode only (cfg.push): `seq` counts frames and reconnects, so a
    * poller that saw `seq` knows to poll again once it moves. */
   push: null | {
@@ -250,6 +255,13 @@ export function failReason(cause: unknown): PollFailReason {
 
 const errText = (cause: unknown) => (cause instanceof Error ? cause.message : String(cause));
 
+/** A 401 whose body names the token invalid (Bastion 487eaa99): it doesn't
+ * recover by itself, unlike 5xx, 429, the network, or a bare 401 from
+ * something in between. Only a new key in the key file ends it (UNI-761). */
+export function keyRefused(cause: unknown): boolean {
+  return cause instanceof KeyRejected && /invalid_token/.test(cause.message);
+}
+
 /** A subscription's identity (scope, exclude_self, filter), stable across renewals. */
 const specKey = (s: AgentSubscription) => JSON.stringify([s.scope, s.exclude_self, s.filter]);
 
@@ -284,6 +296,7 @@ export class Router {
   readonly #signalDir: string | undefined;
   readonly #signalFailed = new Set<string>();
   readonly #pollFailMs: number | undefined;
+  readonly #keyRetryMs: number;
 
   constructor(options: RouterOptions) {
     this.#log = options.logger ?? (() => {});
@@ -298,6 +311,7 @@ export class Router {
     this.#now = options.now ?? Date.now;
     this.#signalDir = options.signalDir;
     this.#pollFailMs = options.pollFailMs;
+    this.#keyRetryMs = options.keyRetryMs ?? 60_000;
     for (const cfg of options.agents) {
       if (this.#agents.has(cfg.handle)) throw new Error(`Agent ${cfg.handle} listed twice.`);
       const broad = unfilteredPostsWarning(cfg.handle, cfg.subscriptions);
@@ -332,6 +346,7 @@ export class Router {
         profile: { at: -Infinity, value: { postsLeft: null, toolsHash: null } },
         blocked: { since: 0, wakes: 0, logged: false },
         pollFail: null,
+        keyRefusedSince: null,
         push: null,
       });
       const st = this.#agents.get(cfg.handle)!;
@@ -416,21 +431,41 @@ export class Router {
   /** A poll or subscription setup failed. Once failures have lasted
    * stall_minutes with no success between, tell the session once: nothing
    * else would, since no wake can arrive. Only fixed words reach it. */
-  #pollFailed(st: AgentState, cause: unknown): void {
+  #pollFailed(st: AgentState, cause: unknown): number | null {
     const now = Date.now();
     const f = (st.pollFail ??= { since: now, reason: 'other', told: false });
     f.reason = failReason(cause);
     const { handle, stallMinutes } = st.cfg;
-    if (!stallMinutes || f.told) return;
-    if (now - f.since < (this.#pollFailMs ?? stallMinutes * 60_000)) return;
+    // A refused key won't recover by itself (UNI-761): say so once, mark it
+    // for `status`, and try again only slowly, reading the key file each time.
+    const refused = keyRefused(cause);
+    if (refused) {
+      this.#signal(handle, 'rejected');
+      if (st.keyRefusedSince === null) {
+        st.keyRefusedSince = now;
+        this.#log(
+          `[${handle}] Tilori refused this agent's key (HTTP 401 invalid_token). Re-run tilori-agent init --agent ${handle} ` +
+            `with the agent's key from Tilori; until then the key file is read again every ${Math.round(this.#keyRetryMs / 1000)} s.`,
+        );
+      }
+    }
+    const wait = refused ? this.#keyRetryMs : null;
+    if (!stallMinutes || f.told) return wait;
+    // The session hears at once: waiting stall_minutes wouldn't help.
+    if (!refused && now - f.since < (this.#pollFailMs ?? stallMinutes * 60_000)) return wait;
     // Without an injector there is no session to tell; try at the next failure.
-    if (!this.#monitorLine(st, { polls: { state: 'failing', since: f.since, reason: f.reason } })) return;
+    if (!this.#monitorLine(st, { polls: { state: 'failing', since: f.since, reason: f.reason } })) return wait;
     f.told = true;
     this.#log(`[${handle}] told the session that polls have failed since ${clock(f.since)} (${f.reason})`);
+    return wait;
   }
 
   /** A poll succeeded: if the session was told polls fail, say they work again. */
   #pollOk(st: AgentState): void {
+    if (st.keyRefusedSince !== null) {
+      st.keyRefusedSince = null;
+      this.#log(`[${st.cfg.handle}] Tilori accepts the agent's key again`);
+    }
     const f = st.pollFail;
     if (!f) return;
     st.pollFail = null;
@@ -601,9 +636,9 @@ export class Router {
         if (signal?.aborted) return;
         failures++;
         const backoff = Math.min(60_000, 1000 * 2 ** (failures - 1));
-        this.#log(`[${handle}] could not set up subscriptions (retry in ${backoff} ms): ${errText(cause)}`);
-        this.#pollFailed(st, cause);
-        await sleep(backoff, signal);
+        const slow = this.#pollFailed(st, cause);
+        if (slow === null) this.#log(`[${handle}] could not set up subscriptions (retry in ${backoff} ms): ${errText(cause)}`);
+        await sleep(slow ?? backoff, signal);
         continue;
       }
       if (!subs.length) {
@@ -832,9 +867,9 @@ export class Router {
         }
         failures++;
         const backoff = Math.min(30_000, 500 * 2 ** (failures - 1));
-        this.#log(`[${handle}] Tilori error (attempt ${failures}, retry in ${backoff} ms): ${msg}`);
-        this.#pollFailed(st, cause);
-        await sleep(backoff, signal);
+        const slow = this.#pollFailed(st, cause);
+        if (slow === null) this.#log(`[${handle}] Tilori error (attempt ${failures}, retry in ${backoff} ms): ${msg}`);
+        await sleep(slow ?? backoff, signal);
       } finally {
         st.onPolled = null;
         clearTimeout(restartTimer);
@@ -952,9 +987,9 @@ export class Router {
         }
         failures++;
         const backoff = Math.min(30_000, 500 * 2 ** (failures - 1));
-        this.#log(`[${handle}] Tilori error on ${sub.scope.type} (attempt ${failures}, retry in ${backoff} ms): ${msg}`);
-        this.#pollFailed(st, cause);
-        await sleep(backoff, signal);
+        const slow = this.#pollFailed(st, cause);
+        if (slow === null) this.#log(`[${handle}] Tilori error on ${sub.scope.type} (attempt ${failures}, retry in ${backoff} ms): ${msg}`);
+        await sleep(slow ?? backoff, signal);
       }
     }
   }
