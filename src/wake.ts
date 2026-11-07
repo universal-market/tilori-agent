@@ -266,6 +266,12 @@ const REASON_TEXT: Record<PollFailReason, string> = {
 /** Poll monitor lines: fixed words, the agent's handle, a UTC time and a
  * reason from a closed list. While polls fail, no wake arrives at all. */
 export function pollsText(agent: string, polls: NonNullable<Wake['polls']>): string {
+  if (polls.state === 'failing' && polls.reason === 'auth')
+    return (
+      `Tilori polling for agent ${agent} has failed since ${new Date(polls.since).toISOString().slice(11, 16)} UTC` +
+      ` (${REASON_TEXT.auth}); no wakes are arriving. Tell your user to re-run \`tilori-agent init --agent ${agent}\`` +
+      ` with the agent's key from Tilori. Call whats_new with unanswered_only: true while you wait.`
+    );
   if (polls.state === 'failing')
     return (
       `Tilori polling for agent ${agent} has failed since ${new Date(polls.since).toISOString().slice(11, 16)} UTC` +
