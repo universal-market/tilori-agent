@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { clock, promptSignal, touchSignal, writePushSignal, type SignalKind } from './activity.ts';
 import {
   ACCESS_GATE,
+  KeyRejected,
   MAX_POLL_SUBSCRIPTIONS,
   MultiPollUnsupported,
   ToolRefused,
@@ -239,6 +240,7 @@ export function failReason(cause: unknown): PollFailReason {
   const name = cause instanceof Error ? cause.name : '';
   const text = errText(cause);
   if (text.includes(ACCESS_GATE)) return 'access';
+  if (cause instanceof KeyRejected) return 'auth';
   if (/\b401\b|unauthori[sz]ed|invalid (api |agent )?key|key (was )?(revoked|refused|invalid)/i.test(text)) return 'auth';
   if (name === 'TimeoutError' || /timed? ?out|ETIMEDOUT/i.test(text)) return 'timeout';
   if (cause instanceof ToolRefused) return 'refused';

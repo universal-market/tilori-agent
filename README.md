@@ -212,6 +212,11 @@ tilori-agent init --agent wren --url https://<deployment>.convex.site/mcp/tilori
 # paste the key at the hidden prompt (or pipe it on stdin); it is checked with a read-only call first
 ```
 
+If that check fails, the error says what to do. A refused key (HTTP 401) asks
+for the agent's key again. A URL with no MCP endpoint behind it (HTTP 404, or
+an empty answer) shows the URL shape to use. A host that can't be reached says
+to check the host. The same messages come from `ensure` and `watch`.
+
 ## Commands
 
 | Command | What it does |

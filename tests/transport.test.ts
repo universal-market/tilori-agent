@@ -1,12 +1,13 @@
 import './setup.ts';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { ACCESS_HINT, TiloriAgentClient } from '../src/client.ts';
+import { ACCESS_HINT, KeyRejected, TiloriAgentClient, URL_SHAPE } from '../src/client.ts';
+import { failReason } from '../src/router.ts';
 import { desiredSubscriptions, loadConfig, saveConfig } from '../src/config.ts';
 import { writeKey } from '../src/keys.ts';
 import { FakeTilori, mention, until } from './fake-tilori.ts';
@@ -820,4 +821,89 @@ describe('a key replaced while several calls are in flight (Wren bd3ae190)', () 
     expect(reads).toBeLessThanOrEqual(2);
     await c.close();
   });
+});
+
+describe('key and URL errors say what to do (UNI-760)', () => {
+  const BAD = 'mcp_sk_wrong_key_for_uni760_0123456789';
+  let server: ReturnType<typeof Bun.serve>;
+  let base: string;
+  beforeAll(() => {
+    server = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      fetch(req) {
+        const p = new URL(req.url).pathname;
+        // A server that echoes the key back must not get it printed.
+        const sent = req.headers.get('authorization') ?? '';
+        if (p === '/key/mcp/tilori/v1') return new Response(`{"error":"invalid_token","got":"${sent}"}`, { status: 401 });
+        if (p === '/empty/mcp/tilori/v1') return new Response('', { status: 404 });
+        if (p === '/blank/mcp/tilori/v1') return new Response('', { status: 400 });
+        return new Response('No matching routes found', { status: 404 });
+      },
+    });
+    base = `http://127.0.0.1:${server.port}`;
+  });
+  afterAll(() => server.stop(true));
+
+  const failWith = async (at: string) => {
+    const c = new TiloriAgentClient({ url: new URL(at), apiKey: BAD });
+    try {
+      return (await c.listSubscriptions().catch((e: Error) => e)) as Error;
+    } finally {
+      await c.close();
+    }
+  };
+
+  test('a refused key says to store it again with init, and never shows it', async () => {
+    const err = await failWith(`${base}/key/mcp/tilori/v1`);
+    expect(err).toBeInstanceOf(KeyRejected);
+    expect(err.message).toStartWith(`${base}/key/mcp/tilori/v1 refused this agent's key (HTTP 401).`);
+    expect(err.message).toContain('tilori-agent init --agent <handle>');
+    expect(err.message).toContain('invalid_token');
+    expect(err.message).not.toContain(BAD);
+    expect(err.message).not.toContain(BAD.slice(0, 16));
+    expect(failReason(err)).toBe('auth');
+  });
+
+  test('a wrong path says there is no MCP endpoint there, with the expected shape', async () => {
+    const err = await failWith(`${base}/wrong/mcp/tilori/v1`);
+    expect(err).not.toBeInstanceOf(KeyRejected);
+    expect(err.message).toStartWith(`No MCP endpoint at ${base}/wrong/mcp/tilori/v1 (HTTP 404). ${URL_SHAPE}`);
+    expect(err.message).toContain('No matching routes found');
+  });
+
+  test('an empty error body says the URL is not an MCP endpoint', async () => {
+    expect((await failWith(`${base}/empty/mcp/tilori/v1`)).message).toStartWith(`No MCP endpoint at ${base}/empty/mcp/tilori/v1 (HTTP 404).`);
+    const blank = await failWith(`${base}/blank/mcp/tilori/v1`);
+    expect(blank.message).toStartWith(`${base}/blank/mcp/tilori/v1 answered HTTP 400 with no MCP response. ${URL_SHAPE}`);
+  });
+
+  test('a host that cannot be reached says to check the host', async () => {
+    const refused = await failWith('http://127.0.0.1:1/mcp/tilori/v1');
+    expect(refused.message).toStartWith(`Could not reach 127.0.0.1:1: check the host in the URL. ${URL_SHAPE}`);
+    expect(refused.message).toContain('ECONNREFUSED');
+    expect(failReason(refused)).toBe('network');
+    const unknown = await failWith('https://no-such-host.invalid/mcp/tilori/v1');
+    expect(unknown.message).toStartWith(`Could not reach no-such-host.invalid: check the host in the URL.`);
+    expect(failReason(unknown)).toBe('network');
+  }, 15000);
+
+  test('init with a refused key exits 1 with the hint and stores nothing', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ta-uni760-'));
+    chmodSync(dir, 0o700);
+    allowHome(join(dir, 'tilori'));
+    const cli = join(import.meta.dir, '../src/cli.ts');
+    const proc = Bun.spawn(['bun', cli, 'init', '--agent', 'wren', '--url', `${base}/key/mcp/tilori/v1`], {
+      env: { ...process.env, TILORI_HOME: join(dir, 'tilori') },
+      stdin: new TextEncoder().encode(BAD + '\n'),
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+    expect(code).toBe(1);
+    expect(err).toContain("refused this agent's key (HTTP 401). Copy the agent's key from Tilori again");
+    expect(out + err).not.toContain(BAD);
+    expect(existsSync(join(dir, 'tilori', 'agents', 'wren.key'))).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
+  }, 15000);
 });
