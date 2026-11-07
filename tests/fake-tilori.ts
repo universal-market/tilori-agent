@@ -54,12 +54,16 @@ export class FakeTilori implements McpToolCaller {
   /** search_posts waits until the caller aborts it. */
   searchHangs = false;
 
-  push(scopeType: string, events: DeliveredEvent[]) {
+  /** Subscriptions whose next batch is marked resync_required. */
+  resyncNext = new Set<string>();
+
+  push(scopeType: string, events: DeliveredEvent[], opts: { resync?: boolean } = {}) {
     const sub = this.subs.find((s) => s.scope.type === scopeType);
     if (!sub) throw new Error(`no ${scopeType} subscription`);
     const q = this.queues.get(sub.id) ?? [];
     q.push(events);
     this.queues.set(sub.id, q);
+    if (opts.resync) this.resyncNext.add(sub.id);
   }
 
   async callTool(
@@ -231,7 +235,7 @@ export class FakeTilori implements McpToolCaller {
       while (q.length && events.length + q[0].length <= 20) events.push(...q.shift()!);
       if (!events.length && q.length) events.push(...q.shift()!);
       if (events.length) {
-        d = { subscription_id: id, delivery_id: randomUUID(), events, resync_required: false };
+        d = { subscription_id: id, delivery_id: randomUUID(), events, resync_required: this.resyncNext.delete(id) };
         this.outstanding.set(id, d);
       }
     }
