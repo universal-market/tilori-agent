@@ -480,7 +480,7 @@ describe('poll failure lines', () => {
     const done = router.run(ac.signal);
     await until(() => inj.wakes.some((w) => w.polls?.state === 'failing'));
     const first = inj.wakes.find((w) => w.polls)!;
-    expect(first.polls).toMatchObject({ state: 'failing', reason: 'auth' });
+    expect(first.polls).toMatchObject({ state: 'failing', reason: 'auth', key_refused: true });
     expect(wakeText(first)).toContain('Tell your user to re-run `tilori-agent init --agent wren`');
     // Several slow tries, each logged by nothing but the first line.
     const tries = () => fake.calls.filter((c) => c === 'list_agent_subscriptions').length;
@@ -538,6 +538,14 @@ describe('poll failure lines', () => {
       reason: 'auth',
     });
     expect(sanitizeWake({ wake_id: 'w', events: [], polls: { state: 'ok' } }, 'wren')?.polls).toEqual({ state: 'ok' });
+    // key_refused survives only as a literal true with the auth reason (UNI-764).
+    expect(
+      sanitizeWake({ wake_id: 'w', events: [], polls: { state: 'failing', since, reason: 'auth', key_refused: true } }, 'wren')?.polls,
+    ).toEqual({ state: 'failing', since, reason: 'auth', key_refused: true });
+    for (const [reason, key_refused] of [['network', true], ['auth', 'yes'], ['auth', 1]] as const)
+      expect(
+        sanitizeWake({ wake_id: 'w', events: [], polls: { state: 'failing', since, reason, key_refused } }, 'wren')?.polls,
+      ).toEqual({ state: 'failing', since, reason });
     for (const polls of [
       { state: 'failing', since, reason: 'HTTP 401: key sk-abc' },
       { state: 'failing', since: 1, reason: 'auth' },
@@ -559,11 +567,19 @@ describe('poll failure lines', () => {
     );
     expect(t).not.toContain('\n');
     // A refused key says what fixes it (UNI-761).
-    const k = pollsText('keel', { state: 'failing', since: Date.UTC(2026, 10, 6, 7, 49), reason: 'auth' });
+    const k = pollsText('keel', { state: 'failing', since: Date.UTC(2026, 10, 6, 7, 49), reason: 'auth', key_refused: true });
     expect(k).toBe(
       'Tilori polling for agent keel has failed since 07:49 UTC (the key was refused); no wakes are arriving.' +
         " Tell your user to re-run `tilori-agent init --agent keel` with the agent's key from Tilori. Call whats_new with unanswered_only: true while you wait.",
     );
     expect(k).not.toContain('\n');
+    // Any other auth failure (a bare 401 from something in between) gets the
+    // general words, not advice the cause doesn't support (UNI-764).
+    const bare = pollsText('keel', { state: 'failing', since: Date.UTC(2026, 10, 6, 7, 49), reason: 'auth' });
+    expect(bare).toBe(
+      'Tilori polling for agent keel has failed since 07:49 UTC (the key was refused); no wakes are arriving.' +
+        ' Call whats_new with unanswered_only: true while you wait, and tell your user: `tilori-agent status` and the router log say more.',
+    );
+    expect(bare).not.toContain('init');
   });
 });

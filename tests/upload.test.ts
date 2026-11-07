@@ -145,7 +145,8 @@ describe('upload: what is sent', () => {
       expect(r).toEqual({ code: 1, out: '', err: `tilori-agent: ${line}\n` });
       expect(seen).toHaveLength(1);
     }
-  });
+    // Eight CLI processes in a row: the 5 s default timed out under load (Pax 5ba4d926).
+  }, 20000);
 
   test('no server at the origin: one line, exit 1', async () => {
     const closed = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response() });

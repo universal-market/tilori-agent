@@ -454,7 +454,8 @@ export class Router {
     // The session hears at once: waiting stall_minutes wouldn't help.
     if (!refused && now - f.since < (this.#pollFailMs ?? stallMinutes * 60_000)) return wait;
     // Without an injector there is no session to tell; try at the next failure.
-    if (!this.#monitorLine(st, { polls: { state: 'failing', since: f.since, reason: f.reason } })) return wait;
+    const line = { state: 'failing' as const, since: f.since, reason: f.reason, ...(refused ? { key_refused: true as const } : {}) };
+    if (!this.#monitorLine(st, { polls: line })) return wait;
     f.told = true;
     this.#log(`[${handle}] told the session that polls have failed since ${clock(f.since)} (${f.reason})`);
     return wait;

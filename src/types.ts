@@ -156,7 +156,9 @@ export interface Wake {
   /** A poll monitor line instead of events: every poll (or subscription
    * setup) for the agent has failed since `since` (epoch ms), for a fixed
    * `reason`; or polling works again. Carries no events; never acknowledged. */
-  polls?: { state: 'failing'; since: number; reason: PollFailReason } | { state: 'ok' };
+  /** `key_refused`: Tilori refused the key itself (401 invalid_token), so
+   * re-running init is the fix; absent for any other failure (UNI-764). */
+  polls?: { state: 'failing'; since: number; reason: PollFailReason; key_refused?: true } | { state: 'ok' };
 }
 
 /** Why polls fail, in fixed words: never server or error text. */
