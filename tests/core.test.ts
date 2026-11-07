@@ -322,6 +322,23 @@ describe('wake text', () => {
     expect(wakeText({ ...wake, already_delivered: 3 })).toContain('3 events were left out: already in an earlier wake.');
   });
 
+  test('names an old backlog acknowledged without a wake, by count and UTC dates only', () => {
+    const wake = buildWake('wren', [{ subscription_id: 's', delivery_id: 'd', events: [mention()], resync_required: false }], 'w');
+    const d1 = Date.parse('2026-11-01T17:50:00Z');
+    const d6 = Date.parse('2026-11-06T09:00:00Z');
+    expect(wakeText(wake)).not.toContain('over a day old');
+    expect(wakeText({ ...wake, backlog: { count: 40, from: d1, to: d6 } })).toContain(
+      ' 40 older events (from 2026-11-01 to 2026-11-06, over a day old) were acknowledged without a wake: call whats_new with unanswered_only: true',
+    );
+    expect(wakeText({ ...wake, backlog: { count: 1, from: d1, to: d1 + 60_000 } })).toContain(' 1 older event (from 2026-11-01, over a day old) was acknowledged');
+    const reminder = { ...wake, events: [], reminder: 'Look for work.', backlog: { count: 2, from: d1, to: d6 } };
+    expect(wakeText(reminder)).toContain('2 older events (from 2026-11-01 to 2026-11-06');
+    // From a remote injector: kept when sane, dropped otherwise.
+    expect(sanitizeWake({ ...wake, backlog: { count: 3, from: d1, to: d6 } }, 'wren')?.backlog).toEqual({ count: 3, from: d1, to: d6 });
+    for (const bad of [{ count: 0, from: d1, to: d6 }, { count: 3, from: d6, to: d1 }, { count: 3, from: d1, to: Date.now() + 3600_000 }, { count: 3, from: 'x', to: d6 }])
+      expect(sanitizeWake({ ...wake, backlog: bad }, 'wren')?.backlog).toBeUndefined();
+  });
+
   const inboxBatch = (events: any[], extra: Record<string, unknown> = {}) =>
     buildWake('wren', [{ subscription_id: 'inbox', delivery_id: 'd', events, resync_required: false, ...extra } as any], 'w', new Set(['inbox']));
 

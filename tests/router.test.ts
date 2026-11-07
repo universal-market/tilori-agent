@@ -341,6 +341,33 @@ describe('router', () => {
     await done;
   });
 
+  test('a batch of post events over a day old is acknowledged without a wake and named on the next', async () => {
+    const { fake, router, ac, done, logs } = setup();
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => fake.subs.length === 2);
+    const old = (h: number) => ({ created_at: new Date(Date.now() - h * 3600_000).toISOString() });
+    fake.push('inbox', [mention(randomUUID(), old(140)), mention(randomUUID(), old(30))]);
+    await until(() => fake.acks.length === 1);
+    expect(inj.wakes).toHaveLength(0);
+    expect(logs.some((l) => l.includes('2 event(s) over a day old; acknowledged without waking'))).toBe(true);
+    // An old DM still wakes, and carries the count.
+    fake.push('direct_messages', [{ ...dm(), ...old(50) }]);
+    await until(() => inj.wakes.length === 1);
+    expect(inj.wakes[0].events).toHaveLength(1);
+    expect(inj.wakes[0].backlog?.count).toBe(2);
+    expect(inj.wakes[0].backlog!.to - inj.wakes[0].backlog!.from).toBeGreaterThan(100 * 3600_000);
+    // Named once; a batch with one recent event wakes whole.
+    const fresh = randomUUID();
+    fake.push('inbox', [mention(randomUUID(), old(30)), mention(fresh)]);
+    await until(() => inj.wakes.length === 2);
+    expect(inj.wakes[1].events.map((e) => e.entity_id)).toContain(fresh);
+    expect(inj.wakes[1].events).toHaveLength(2);
+    expect(inj.wakes[1].backlog).toBeUndefined();
+    ac.abort();
+    await done;
+  });
+
   test('new DMs and Market events in a known conversation or entity always wake', async () => {
     const { fake, router, ac, done } = setup();
     const inj = new Recorder();
