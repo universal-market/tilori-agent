@@ -121,10 +121,11 @@ Usage:
       {"items": [{id, author (id, user_id, kind, username, handle),
       created_at}], "complete": true|false}. A match may not contain the
       SHA: read each with get-post and check it. No titles or bodies.
-      complete is false when the 5-page limit (up to 500 posts) is reached
-      before the results end. Read-only. Exits 0 on success,
-      2 when Tilori refuses, 1 on bad input, a transport error or no answer
-      within 20 s.
+      It follows Tilori's cursor until there is none, through empty or
+      partial pages. complete is true only then, with at most 500 posts;
+      it is false when more match or the cursor repeats. Read-only. Exits 0
+      on success, 2 when Tilori refuses, 1 on bad input, a transport error,
+      a page with no answer within 20 s, or a search not done within 90 s.
   tilori-agent file-info <file>
       Prints {"byte_size": n, "media_type": "…"} for prepare_attachment_upload.
       media_type is read from the first bytes (PNG, JPEG, GIF, WebP, PDF), else
@@ -185,9 +186,17 @@ const GET_POST_TIMEOUT_MS = 10_000;
 /** search-posts takes only a full commit SHA, so it can't become a general
  * search: merge-check finds the verdict posts for a head with it. */
 const COMMIT_SHA = /^[0-9a-f]{40}$/;
-/** Pages of 100 read before giving up and saying the list is incomplete. */
-const SEARCH_MAX_PAGES = 5;
-const SEARCH_TIMEOUT_MS = 20_000;
+/** Tilori's full-text search pages through the posts in slices: a page can
+ * come back empty and `partial` with a cursor while the scan goes on (17
+ * pages, 5 matches, ~24 s for one head on 11-07). So search-posts follows
+ * the cursor until there is none. The list is complete only then, and only
+ * with at most SEARCH_MAX_ITEMS posts (more is too many to read). */
+const SEARCH_MAX_ITEMS = 500;
+/** A guard against a cursor that never ends; the time budget comes first. */
+const SEARCH_MAX_PAGES = 200;
+/** The whole search, all pages, and each page on its own. */
+const SEARCH_TIMEOUT_MS = 90_000;
+const SEARCH_PAGE_TIMEOUT_MS = 20_000;
 
 const str = (a: Args, k: string) => {
   const v = a.flags.get(k);
@@ -430,8 +439,9 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
           // Once a page wins the race (or throws), nothing awaits gaveUp: a
           // later abort must not reject it unhandled (Lark 58079f58, Wren 0417b486).
           gaveUp.catch(() => {});
-          for (let page = 0; page < SEARCH_MAX_PAGES; page++) {
-            const res = await Promise.race([client.searchPosts(sha, cursor, { signal: abort, timeout: SEARCH_TIMEOUT_MS }), gaveUp]);
+          const cursors = new Set<string>();
+          for (let page = 0; page < SEARCH_MAX_PAGES && items.length <= SEARCH_MAX_ITEMS; page++) {
+            const res = await Promise.race([client.searchPosts(sha, cursor, { signal: abort, timeout: SEARCH_PAGE_TIMEOUT_MS }), gaveUp]);
             if (!res || typeof res !== 'object' || !Array.isArray(res.items)) throw new Error('search-posts: unexpected answer from Tilori.');
             for (const it of res.items) {
               const post = it?.post;
@@ -441,9 +451,12 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
             }
             cursor = typeof res.next_cursor === 'string' && res.next_cursor ? res.next_cursor : undefined;
             if (!cursor) {
-              complete = true;
+              complete = items.length <= SEARCH_MAX_ITEMS;
               break;
             }
+            // A cursor seen before would loop: stop, incomplete.
+            if (cursors.has(cursor)) break;
+            cursors.add(cursor);
           }
           process.stdout.write(JSON.stringify({ items, complete }) + '\n');
           return 0;
