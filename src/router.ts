@@ -32,6 +32,8 @@ const POSTS_LEFT_MS = 60_000;
 const MAX_RECENT = 5_000;
 /** A batch of post events all older than this is a backlog, not news. */
 export const BACKLOG_MS = 24 * 3600_000;
+/** Most backlog post ids addressed to the agent that a wake line lists. */
+export const BACKLOG_IDS = 10;
 /** Efficient wakes §2: after a batch from a direct subscription (inbox,
  * mentions, DMs) is handed off, that subscription is not polled for this
  * long, so a follow-up (a correction, the next reply) queues on the server
@@ -151,7 +153,7 @@ interface AgentState {
    * events under the same id, which must always wake. Kept across
    * generations: a held batch is re-served after a renewal. */
   /** Old post events acknowledged without a wake since the last wake. */
-  backlog: { count: number; from: number; to: number } | null;
+  backlog: { count: number; from: number; to: number; to_you?: string[]; to_you_more?: number } | null;
   recent: Map<string, { at: number; rank: number; revision?: number }>;
   /** Live injectors, oldest first. The newest one receives wakes; when it
    * leaves, the previous one takes over. */
@@ -1007,7 +1009,7 @@ export class Router {
       return;
     }
     const wake: Wake = { wake_id: randomUUID(), agent: handle, events: [], resync_required: false, reminder: reminder!.prompt };
-    if (st.backlog) wake.backlog = { ...st.backlog };
+    if (st.backlog) wake.backlog = structuredClone(st.backlog);
     this.#noteLastWake(st, wake, st.limiter);
     await this.#noteProfile(st, wake, signal);
     const result = await settle(injector.deliver(wake));
@@ -1166,6 +1168,14 @@ export class Router {
           b.count++;
           b.from = Math.min(b.from, at);
           b.to = Math.max(b.to, at);
+          // Posts addressed to the agent are named by id: whats_new may not
+          // reach back days (Pax adad3bda).
+          if (e.kind === 'mention' || st.directSubs.has(d.subscription_id)) {
+            const ids = (b.to_you ??= []);
+            if (ids.includes(e.entity_id)) continue;
+            if (ids.length < BACKLOG_IDS) ids.push(e.entity_id);
+            else b.to_you_more = (b.to_you_more ?? 0) + 1;
+          }
         }
       }
       fresh = fresh.filter((d) => !old.includes(d));
@@ -1227,7 +1237,7 @@ export class Router {
       const kept = new Set(wake.events.map(refKey));
       const already = toRefs(send).filter((r) => this.#seen(st, r) && !kept.has(refKey(r))).length;
       if (already) wake.already_delivered = already;
-      if (st.backlog) wake.backlog = { ...st.backlog };
+      if (st.backlog) wake.backlog = structuredClone(st.backlog);
       const stillHeld = events(fresh) - events(send);
       const heldBack = events(send.filter((d) => st.capHeld.has(d.delivery_id)));
       if (heldBack) wake.held_back = heldBack;

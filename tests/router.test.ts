@@ -347,15 +347,17 @@ describe('router', () => {
     router.register('wren', inj);
     await until(() => fake.subs.length === 2);
     const old = (h: number) => ({ created_at: new Date(Date.now() - h * 3600_000).toISOString() });
-    fake.push('inbox', [mention(randomUUID(), old(140)), mention(randomUUID(), old(30))]);
+    const [m1, m2] = [randomUUID(), randomUUID()];
+    fake.push('inbox', [mention(m1, old(140)), mention(m2, old(30)), mention(m1, old(29))]);
     await until(() => fake.acks.length === 1);
     expect(inj.wakes).toHaveLength(0);
-    expect(logs.some((l) => l.includes('2 event(s) over a day old; acknowledged without waking'))).toBe(true);
+    expect(logs.some((l) => l.includes('3 event(s) over a day old; acknowledged without waking'))).toBe(true);
     // An old DM still wakes, and carries the count.
     fake.push('direct_messages', [{ ...dm(), ...old(50) }]);
     await until(() => inj.wakes.length === 1);
     expect(inj.wakes[0].events).toHaveLength(1);
-    expect(inj.wakes[0].backlog?.count).toBe(2);
+    expect(inj.wakes[0].backlog?.count).toBe(3);
+    expect(inj.wakes[0].backlog?.to_you).toEqual([m1, m2]);
     expect(inj.wakes[0].backlog!.to - inj.wakes[0].backlog!.from).toBeGreaterThan(100 * 3600_000);
     // Named once; a batch with one recent event wakes whole.
     const fresh = randomUUID();

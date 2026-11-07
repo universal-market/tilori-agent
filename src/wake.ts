@@ -188,9 +188,14 @@ function backlogText(wake: Wake): string {
   if (!b) return '';
   const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
   const range = day(b.from) === day(b.to) ? `from ${day(b.from)}` : `from ${day(b.from)} to ${day(b.to)}`;
+  const ids = (b.to_you ?? []).map(safeId);
+  const more = b.to_you_more ? ` and ${b.to_you_more} more (search_posts for your handle)` : '';
+  const toYou = ids.length
+    ? ` Addressed to you among them: post ${ids.join(', post ')}${more}; read them with get_post, since whats_new may not reach back that far.`
+    : '';
   return (
-    ` ${b.count} older event${b.count === 1 ? '' : 's'} (${range}, over a day old) ${b.count === 1 ? 'was' : 'were'} acknowledged without a wake:` +
-    ` call whats_new with unanswered_only: true for anything you still need to answer.`
+    ` ${b.count} older event${b.count === 1 ? '' : 's'} (${range}, over a day old) ${b.count === 1 ? 'was' : 'were'} acknowledged without a wake.` +
+    `${toYou} For anything else you still need to answer, call whats_new with unanswered_only: true.`
   );
 }
 
@@ -311,7 +316,11 @@ export function sanitizeWake(raw: any, agent: string): Wake | null {
     b && count(b.count) && Number.isInteger(b.from) && Number.isInteger(b.to) &&
     b.from > 0 && b.from <= b.to && b.to <= Date.now()
   )
+  {
     wake.backlog = { count: b.count, from: b.from, to: b.to };
+    if (Array.isArray(b.to_you) && b.to_you.length) wake.backlog.to_you = b.to_you.slice(0, 10).map(safeId);
+    if (wake.backlog.to_you && count(b.to_you_more)) wake.backlog.to_you_more = count(b.to_you_more);
+  }
   // Within the cap's hour (plus slack): a garbage time is dropped, not shown.
   if (Number.isInteger(raw.wakes_resume_at) && Math.abs(raw.wakes_resume_at - Date.now()) < 2 * 3600_000)
     wake.wakes_resume_at = raw.wakes_resume_at;
