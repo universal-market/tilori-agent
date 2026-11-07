@@ -281,6 +281,9 @@ function requireAgent(config: TiloriConfig, a: Args): string {
  * hide the usage text. */
 const HOMELESS = new Set(['help', '--help', '-h']);
 
+/** The variables `claude` sets; any inherited value is dropped first. */
+const LAUNCH_VARS = ['TILORI_HOME', 'TILORI_MCP_URL', 'TILORI_MARKET_URL', 'TILORI_AGENT', 'TILORI_SOCKET', 'TILORI_URL'];
+
 /**
  * `tilori-agent claude --home <dir>`: starts Claude Code for a second Tilori
  * home (UNI-751, Don's decision). The home must be the default one or listed
@@ -292,6 +295,9 @@ const HOMELESS = new Set(['help', '--help', '-h']);
 async function launchClaude(args: Args): Promise<number> {
   const dir = str(args, 'home');
   if (!dir) throw new Error('claude needs --home <dir>: the default Tilori home or one listed in "homes".');
+  for (const name of args.flags.keys())
+    if (name !== 'home' && name !== 'agent')
+      throw new Error(`claude takes only --home and --agent; put Claude Code's own arguments after --.`);
   for (const a of args.rest)
     if (a === '--settings' || a.startsWith('--settings='))
       throw new Error("claude sets Claude Code's --settings itself; pass other settings in a settings file instead.");
@@ -301,9 +307,14 @@ async function launchClaude(args: Args): Promise<number> {
   if (config.market_url) env.TILORI_MARKET_URL = buildMarketUrl(config.market_url).toString();
   const agent = str(args, 'agent');
   if (agent) env.TILORI_AGENT = validateHandle(agent);
+  // Nothing Tilori-specific is inherited (Pax a9dbb150): launched from
+  // another home's session, its TILORI_MARKET_URL or TILORI_AGENT would
+  // otherwise reach this one. Only this home and --agent set them.
+  const inherited = { ...process.env };
+  for (const k of LAUNCH_VARS) delete inherited[k];
   const child = spawn('claude', ['--settings', JSON.stringify({ env }), ...args.rest], {
     stdio: 'inherit',
-    env: { ...process.env, ...env },
+    env: { ...inherited, ...env },
   });
   return await new Promise<number>((done, fail) => {
     child.once('error', (cause) => fail(new Error(`Could not start claude: ${cause.message}`)));

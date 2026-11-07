@@ -295,6 +295,7 @@ describe('the homes allow-list (Don, 11-07)', () => {
       expect(code).toBe(1);
       expect(out).toBe('');
       expect(err).toContain(`The Tilori home ${h} is not listed in "homes"`);
+      expect(err).toContain(`"homes": [${JSON.stringify(h)}]`);
       expect(out + err).not.toContain(KEY);
     }
     const help = Bun.spawnSync(['bun', cli, 'help'], { env: envWith({ TILORI_HOME: h }) });
@@ -316,10 +317,11 @@ describe('the homes allow-list (Don, 11-07)', () => {
         { mode: 0o755 },
       );
     });
-    const run = async (...argv: string[]) => {
+    const run = async (...argv: string[]) => runWith({}, ...argv);
+    const runWith = async (parent: Record<string, string>, ...argv: string[]) => {
       rmSync(record, { force: true });
       const p = Bun.spawn(['bun', cli, 'claude', ...argv], {
-        env: envWith({ PATH: `${bin}:${process.env.PATH ?? ''}` }),
+        env: envWith({ PATH: `${bin}:${process.env.PATH ?? ''}`, ...parent }),
         stdout: 'pipe',
         stderr: 'pipe',
       });
@@ -340,9 +342,16 @@ describe('the homes allow-list (Don, 11-07)', () => {
       expect(JSON.stringify(r.rec)).not.toContain(KEY);
     });
 
-    test('no market_url: TILORI_MARKET_URL is not set', async () => {
+    test("no market_url and no --agent: nothing is inherited from another home's session", async () => {
       const h = makeHome('launch-nomarket');
-      const r = await run('--home', h);
+      const r = await runWith(
+        { TILORI_MARKET_URL: 'https://leak.example.test/mcp/v1', TILORI_AGENT: 'pax', TILORI_MCP_URL: 'https://other.example.test/mcp/tilori/v1', TILORI_SOCKET: '/x/r.sock' },
+        '--home',
+        h,
+      );
+      expect(r.code).toBe(7);
+      expect(r.rec.env.TILORI_MARKET_URL).toBeUndefined();
+      expect(r.rec.env.TILORI_MCP_URL).toBe(new URL(url).toString());
       expect(JSON.parse(r.rec.argv[1]).env.TILORI_MARKET_URL).toBeUndefined();
       expect(r.rec.env.TILORI_AGENT).toBeUndefined();
     });
@@ -354,6 +363,7 @@ describe('the homes allow-list (Don, 11-07)', () => {
         [['--home', h], 'is not listed in "homes"'],
         [[], 'claude needs --home'],
         [['--home', makeHome('launch-2'), '--', '--settings', '{}'], "sets Claude Code's --settings itself"],
+        [['--home', makeHome('launch-3'), '--settings={}'], 'claude takes only --home and --agent'],
       ] as const) {
         const r = await run(...argv);
         expect(r.code).toBe(1);

@@ -453,8 +453,9 @@ tilori-agent claude --home ~/.config/tilori-prod --agent tinker
 It starts Claude Code with that home's `url` and `market_url` as a
 `--settings` launch flag, which repo settings can't override (the plugin's
 servers read `TILORI_MCP_URL` and `TILORI_MARKET_URL`; plugin 0.1.41 or
-later). Arguments after `--` go to Claude Code. A home without `market_url`
-leaves the Market server on the default URL, where the key isn't sent.
+later). Arguments after `--` go to Claude Code. Without `market_url` in that
+home, Market tools won't work in that session: the key is never sent to the
+default Market URL.
 
 ## Router protocol (local IPC)
 

@@ -96,7 +96,7 @@ export function allowedHome(dir: string): string {
   if (allowedHomes().some((h) => realPath(h) === want)) return want;
   throw new Error(
     `The Tilori home ${dir} is not listed in "homes" in ${join(defaultTiloriHome(), 'config.json')}. ` +
-      `Only the default home and the homes listed there can be used; add it there by hand to allow it.`,
+      `Only the default home and the homes listed there can be used; add it there by hand to allow it: "homes": [${JSON.stringify(dir)}].`,
   );
 }
 
