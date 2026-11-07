@@ -38,6 +38,24 @@ export function signalDir(log: (m: string) => void = () => {}): string | undefin
   }
 }
 
+let orphanCheck: ReturnType<typeof setInterval> | null = null;
+
+/** A monitor must not outlive its Claude Code session: exit when re-parented
+ * (the session died) so an orphan never keeps long-polls open. Started once;
+ * also while `watch` is still waiting for a key or a claim, before any
+ * router runs. */
+export function exitWhenOrphaned(log: (m: string) => void = () => {}): void {
+  if (orphanCheck) return;
+  const parent = process.ppid;
+  orphanCheck = setInterval(() => {
+    if (process.ppid !== parent) {
+      log('parent session ended; exiting');
+      process.exit(0);
+    }
+  }, 5_000);
+  orphanCheck.unref();
+}
+
 /** Builds a one-agent router that talks to Tilori directly with the agent's key. */
 export function directRouter(opts: NotifyLinesOptions): Router {
   const settings = opts.config.agents?.[opts.agent] ?? {};
@@ -75,16 +93,7 @@ export function directRouter(opts: NotifyLinesOptions): Router {
  */
 export async function runNotifyLines(opts: NotifyLinesOptions): Promise<void> {
   const log = opts.logger ?? (() => {});
-  // A monitor must not outlive its Claude Code session: stop when re-parented
-  // (the session died) so an orphan never keeps long-polls open.
-  const parent = process.ppid;
-  const orphanCheck = setInterval(() => {
-    if (process.ppid !== parent) {
-      log('parent session ended; exiting');
-      process.exit(0);
-    }
-  }, 5_000);
-  orphanCheck.unref();
+  exitWhenOrphaned(log);
   const injector =
     opts.injector ??
     new NotifyLinesInjector(process.stdout, () => {

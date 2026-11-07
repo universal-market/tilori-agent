@@ -1,6 +1,6 @@
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { assertPrivate, ensurePrivateDir, tiloriHome, validateHandle } from './keys.ts';
+import { assertPrivate, ensurePrivateDir, tiloriHome, validateHandle, writePrivateFile } from './keys.ts';
 import type {
   AgentSubscription,
   EventFilterInput,
@@ -321,9 +321,7 @@ export function loadConfig(path = configPath()): TiloriConfig {
 
 export function saveConfig(config: TiloriConfig, path = configPath()): void {
   ensurePrivateDir(tiloriHome());
-  const tmp = `${path}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(config, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
-  renameSync(tmp, path);
+  writePrivateFile(path, JSON.stringify(config, null, 2) + '\n');
 }
 
 /** The agent this process acts for: explicit flag, then TILORI_AGENT, then default_agent. */

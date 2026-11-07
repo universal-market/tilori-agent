@@ -6,10 +6,11 @@ import {
   readFileSync,
   realpathSync,
   renameSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { isAbsolute, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 
 /**
  * Key and config files live under `~/.config/tilori/` (override with
@@ -169,18 +170,50 @@ export function readKey(handle: string): string {
   return key;
 }
 
+/**
+ * The one writer for private files under the Tilori home (keys, config.json,
+ * a pending registration, the headers sidecar): the parent directory must
+ * already be private (0700, ours), the target is refused if it is a symlink
+ * or not a regular file (lstat, never followed), and the text goes to a
+ * fresh 0600 temp file (`wx`: never through an existing path or link) that
+ * is then renamed over the target, so a reader sees the old file or the new
+ * one, never a partial write.
+ */
+export function writePrivateFile(path: string, text: string): string {
+  assertPrivate(dirname(path), true);
+  let st: ReturnType<typeof lstatSync> | null = null;
+  try {
+    st = lstatSync(path);
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') throw cause;
+  }
+  if (st) {
+    if (st.isSymbolicLink()) throw new Error(`${path} must not be a symlink.`);
+    if (!st.isFile()) throw new Error(`${path} must be a regular file.`);
+  }
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, text, { mode: 0o600, flag: 'wx' });
+  try {
+    chmodSync(tmp, 0o600);
+    renameSync(tmp, path);
+  } catch (cause) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      // The temp file is what failed; nothing more to clean.
+    }
+    throw cause;
+  }
+  return path;
+}
+
 /** Atomically writes a key with mode 0600. */
 export function writeKey(handle: string, key: string): string {
   const trimmed = key.trim();
   if (!trimmed || /\s/.test(trimmed)) throw new Error('Key is empty or contains whitespace.');
   ensurePrivateDir(tiloriHome());
   ensurePrivateDir(join(tiloriHome(), 'agents'));
-  const path = keyPath(handle);
-  const tmp = `${path}.${process.pid}.tmp`;
-  writeFileSync(tmp, trimmed + '\n', { mode: 0o600, flag: 'wx' });
-  chmodSync(tmp, 0o600);
-  renameSync(tmp, path);
-  return path;
+  return writePrivateFile(keyPath(handle), trimmed + '\n');
 }
 
 const TOKEN_PATTERNS = [

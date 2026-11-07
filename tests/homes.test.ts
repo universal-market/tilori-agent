@@ -312,7 +312,7 @@ describe('the homes allow-list (Don, 11-07)', () => {
     expect(p.exitCode).toBe(0);
     const out = p.stdout.toString();
     expect(out).toContain(`No agents on this machine yet: no keys in ${join(home, '.config', 'tilori', 'agents')}.`);
-    expect(out).toContain('Run tilori-agent init --agent <handle> --url https://<deployment>.convex.site/mcp/tilori/v1');
+    expect(out).toContain('Run tilori-agent setup [<handle>] to create and connect one, or tilori-agent init --agent <handle> --url <tilori-mcp-url>');
     expect(p.stderr.toString()).toBe('');
   });
 

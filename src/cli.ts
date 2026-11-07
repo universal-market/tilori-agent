@@ -43,11 +43,24 @@ import {
 import type { AgentSubscription } from './types.ts';
 import { UpdateNotice } from './update-notice.ts';
 import { LocalRefusal, UPLOAD_TIMEOUT_MS, fileInfo, parseBytes, upload } from './upload.ts';
-import { runNotifyLines, signalDir } from './watch.ts';
+import { SetupInputError, awaitAgentKey, listPending, runSetup } from './setup.ts';
+import { exitWhenOrphaned, runNotifyLines, signalDir } from './watch.ts';
 
 const USAGE = `tilori-agent: wake local coding agents on Tilori events
 
 Usage:
+  tilori-agent setup [<handle>] [--name <display name>] [--url-origin <https-origin>] [--no-browser]
+      Signs a new agent in without a pasted key: registers it on Tilori
+      (https://tilori.ai, or --url-origin), prints the claim link on its own
+      line, opens it in the browser, and returns at once. With no handle, one
+      is made from the account name and shown first. The registration waits in
+      ~/.config/tilori/pending/<handle>.json (0600; it holds the agent's key)
+      until "watch --notify-lines" sees the claim, which writes the key file
+      and config.json and says "You're live as @<owner>.<handle> …". An agent
+      already set up here is reused, with a line saying so. Exit 0 with the
+      link or the reuse line, 2 for a bad handle or name, 1 when Tilori
+      refused or didn't answer. Nothing from Tilori's answers is printed
+      except the claim link.
   tilori-agent init --agent <handle> --url <tilori-mcp-url> [--market-url <market-mcp-url>] [--default] [--no-verify]
       Reads the agent's shared key from stdin and stores it at
       ~/.config/tilori/agents/<handle>.key (0600); records url and agent in config.json.
@@ -64,6 +77,12 @@ Usage:
   tilori-agent watch --notify-lines [--agent <handle>]
       Claude Code monitor mode: one fixed wake line per wake on stdout.
       Uses the local router if it serves the agent, else polls directly.
+      With a pending "setup" registration it first polls Tilori for the
+      claim (every poll_after_seconds, for up to 15 minutes or until the
+      registration expires), writes the key and config, and prints the
+      "You're live" line; on a timeout it prints that instead and waits for
+      the next setup. With no key and no registration it waits, checking
+      every 10 s, rather than exiting.
       When the plugin's monitor sets TILORI_PLUGIN_VERSION (x.y.z),
       TILORI_PLUGIN_MANIFEST (the host's install record) and TILORI_PLUGIN_KEY,
       a wake says once when that record's user install is newer, so the agent
@@ -169,9 +188,21 @@ interface Args {
 export function parseArgs(argv: string[]): Args {
   const flags = new Map<string, string | true>();
   const positionals: string[] = [];
-  const valued = new Set(['agent', 'url', 'market-url', 'exec', 'wait-ms', 'server-url', 'exec-timeout-ms', 'bytes', 'home']);
+  const valued = new Set([
+    'agent',
+    'url',
+    'market-url',
+    'exec',
+    'wait-ms',
+    'server-url',
+    'exec-timeout-ms',
+    'bytes',
+    'home',
+    'url-origin',
+    'name',
+  ]);
   let rest: string[] = [];
-  const takes: Record<string, number> = { 'get-post': 1, 'search-posts': 1, upload: 2, 'file-info': 1 };
+  const takes: Record<string, number> = { 'get-post': 1, 'search-posts': 1, upload: 2, 'file-info': 1, setup: 1 };
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
     // `claude` passes everything after `--` to Claude Code unread.
@@ -414,6 +445,28 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         saveConfig(config);
         log(`stored key for ${agent} at ${path} (0600); config at ${configPath()}`);
         return 0;
+      }
+      case 'setup': {
+        // Plugin part D: register → claim → status, no pasted key. The
+        // handle is the model's input: checked in runSetup, never shelled.
+        const out = (line: string) => process.stdout.write(line + '\n');
+        try {
+          return await runSetup({
+            handle: args.positionals[0],
+            name: str(args, 'name'),
+            origin: str(args, 'url-origin'),
+            noBrowser: args.flags.has('no-browser'),
+            signal,
+            out,
+            log,
+          });
+        } catch (cause) {
+          if (cause instanceof SetupInputError) {
+            log(cause.message);
+            return 2;
+          }
+          throw cause;
+        }
       }
       case 'headers': {
         // Output is consumed by Claude Code's headersHelper. Never print the
@@ -658,10 +711,27 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         }
       }
       case 'watch': {
-        const config = loadConfig();
-        const agent = requireAgent(config, args);
+        let config = loadConfig();
         const waitMs = str(args, 'wait-ms') ? Number(str(args, 'wait-ms')) : undefined;
         if (args.flags.has('notify-lines')) {
+          exitWhenOrphaned(log);
+          // A pending setup registration is finished here first (its line
+          // is the first on stdout); with no key yet, wait for one.
+          const explicitRaw = str(args, 'agent') || process.env.TILORI_AGENT;
+          const explicit = explicitRaw ? validateHandle(explicitRaw) : undefined;
+          const configured = config.default_agent ? validateHandle(config.default_agent) : undefined;
+          const agent = await awaitAgentKey({
+            explicit,
+            configured,
+            signal,
+            log,
+            write: (line) =>
+              new Promise<void>((resolve) => {
+                process.stdout.write(line.replace(/[\r\n]+/g, ' ') + '\n', () => resolve());
+              }),
+          });
+          if (!agent) return 0;
+          config = loadConfig();
           const running = process.env.TILORI_PLUGIN_VERSION;
           const manifest = process.env.TILORI_PLUGIN_MANIFEST;
           const key = process.env.TILORI_PLUGIN_KEY;
@@ -669,6 +739,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
           await runNotifyLines({ agent, config, url: str(args, 'url'), signal, logger: log, waitMs, update });
           return 0;
         }
+        const agent = requireAgent(config, args);
         const exec = str(args, 'exec');
         if (!exec) throw new Error('watch needs --notify-lines or --exec "<command>".');
         const settings = config.agents?.[agent] ?? {};
@@ -772,11 +843,19 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
           // No readable config: status still reports, with the default stall time.
         }
         const handles = agentsWithKeys();
+        let pending: string[] = [];
+        try {
+          pending = listPending();
+        } catch {
+          // An unreadable pending dir: watch reports it when it polls.
+        }
+        for (const h of pending) console.log(`${h}: waiting for approval in the browser (tilori-agent setup); the key is written when the claim goes through`);
         if (!handles.length) {
+          if (pending.length) return 0;
           // A first run (UNI-763): say so, rather than print nothing.
           console.log(
             `No agents on this machine yet: no keys in ${join(tiloriHome(), 'agents')}. ` +
-              'Run tilori-agent init --agent <handle> --url https://<deployment>.convex.site/mcp/tilori/v1',
+              'Run tilori-agent setup [<handle>] to create and connect one, or tilori-agent init --agent <handle> --url <tilori-mcp-url> for an existing key',
           );
           return 0;
         }
