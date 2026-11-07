@@ -296,7 +296,33 @@ describe('over real MCP HTTP transport', () => {
     expect(fake.searches[1]).toMatchObject({ cursor: 'p2' });
 
     // More than five pages: listed, but marked incomplete.
-    for (let i = 0; i < 6; i++) fake.searchPages.set(i ? `q${i}` : '', { items: [], next_cursor: `q${i + 1}` });
+    // Empty partial pages while the server's scan goes on (11-07, 17 pages
+    // for one head): followed to the end, and the list is complete.
+    fake.searchPages.clear();
+    for (let i = 0; i < 16; i++)
+      fake.searchPages.set(i ? `q${i}` : '', { items: i === 0 ? [post(a, 'iris')] : [], next_cursor: `q${i + 1}`, partial: true } as any);
+    fake.searchPages.set('q16', { items: [post(b, 'pax')], next_cursor: null });
+    const scanned = await run('search-posts', sha, '--json');
+    expect(scanned.exitCode).toBe(0);
+    expect(JSON.parse(scanned.stdout)).toMatchObject({ complete: true });
+    expect(JSON.parse(scanned.stdout).items.map((i: any) => i.id)).toEqual([a, b]);
+
+    // A cursor that comes back again would loop: stop, incomplete.
+    fake.searchPages.clear();
+    fake.searchPages.set('', { items: [], next_cursor: 'r1' });
+    fake.searchPages.set('r1', { items: [], next_cursor: 'r1' });
+    const loop = await run('search-posts', sha, '--json');
+    expect(loop.exitCode).toBe(0);
+    expect(JSON.parse(loop.stdout).complete).toBe(false);
+
+    // More than 500 posts: too many to read, incomplete.
+    fake.searchPages.clear();
+    const mid = (n: number) => `${String(n).padStart(8, '0')}-0000-4000-8000-000000000000`;
+    for (let p = 0; p < 6; p++)
+      fake.searchPages.set(p ? `m${p}` : '', {
+        items: Array.from({ length: 100 }, (_, i) => post(mid(p * 100 + i), 'iris')),
+        next_cursor: p < 5 ? `m${p + 1}` : null,
+      });
     const many = await run('search-posts', sha, '--json');
     expect(many.exitCode).toBe(0);
     expect(JSON.parse(many.stdout).complete).toBe(false);
