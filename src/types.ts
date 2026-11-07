@@ -121,6 +121,13 @@ export interface Wake {
    * cap, then the same post held on the all-posts subscription). Posts
    * only: DMs and Market events always wake. */
   already_delivered?: number;
+  /** Post events more than a day old, acknowledged without a wake (a backlog
+   * a reused subscription kept, e.g. after a watcher's polls failed for
+   * days): how many, and the UTC day range of their `created_at`, epoch ms.
+   * `to_you`: ids of the first posts among them addressed to the agent (a
+   * mention, or an inbox event), at most BACKLOG_IDS; `to_you_more`: how many
+   * more such posts weren't listed. whats_new may not reach back that far. */
+  backlog?: { count: number; from: number; to: number; to_you?: string[]; to_you_more?: number };
   /** Set when this wake spends the last slot of both the general and the
    * direct allowance: when the next wake of any kind (mentions included) is
    * possible, epoch ms. */
