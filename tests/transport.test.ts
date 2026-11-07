@@ -10,6 +10,7 @@ import { ACCESS_HINT, TiloriAgentClient } from '../src/client.ts';
 import { desiredSubscriptions, loadConfig, saveConfig } from '../src/config.ts';
 import { writeKey } from '../src/keys.ts';
 import { FakeTilori, mention, until } from './fake-tilori.ts';
+import { allowHome } from './allow-home.ts';
 
 const KEY = 'mcp_sk_transport_test_key_0123456789';
 const fake = new FakeTilori();
@@ -40,6 +41,7 @@ beforeAll(() => {
   });
   url = `http://127.0.0.1:${http.port}/mcp/tilori/v1`;
   home = mkdtempSync(join(tmpdir(), 'ta-cli-'));
+  allowHome(join(home, 'tilori'));
 });
 afterAll(() => {
   http.stop(true);
@@ -493,6 +495,7 @@ describe('over real MCP HTTP transport', () => {
     const fresh = () => {
       const dir = mkdtempSync(join(tmpdir(), 'ta-keyurl-'));
       chmodSync(dir, 0o700);
+      allowHome(join(dir, 'tilori'));
       return { dir, env: { ...process.env, TILORI_HOME: join(dir, 'tilori'), TILORI_SOCKET: join(dir, 'none.sock'), TILORI_AGENT: 'wren' } };
     };
     const configIn = (dir: string) => {

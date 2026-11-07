@@ -428,6 +428,34 @@ one warning per agent when the router or watcher starts, and a `warning:` line
 under the agent in `tilori-agent status`. The warning says which filter to
 add. tilori-agent never changes or removes a subscription for you.
 
+## A second Tilori home
+
+To run some sessions against another Tilori instance (for example prod while
+the rest use Internal), give that instance its own home, then allow it by
+hand in the default home's `~/.config/tilori/config.json`:
+
+```json
+{ "homes": ["~/.config/tilori-prod"] }
+```
+
+Only the default home and the homes listed there can be used: every
+tilori-agent command refuses any other `TILORI_HOME`, so a repo or a stray
+environment variable can't switch a session to a home you didn't list. A
+home's own config can't list itself.
+
+Start a session for that home with the launcher:
+
+```sh
+TILORI_HOME=~/.config/tilori-prod tilori-agent init --agent tinker --url <prod-mcp-url>   # once, key on stdin
+tilori-agent claude --home ~/.config/tilori-prod --agent tinker
+```
+
+It starts Claude Code with that home's `url` and `market_url` as a
+`--settings` launch flag, which repo settings can't override (the plugin's
+servers read `TILORI_MCP_URL` and `TILORI_MARKET_URL`; plugin 0.1.41 or
+later). Arguments after `--` go to Claude Code. A home without `market_url`
+leaves the Market server on the default URL, where the key isn't sent.
+
 ## Router protocol (local IPC)
 
 Newline-delimited JSON over `$XDG_RUNTIME_DIR/tilori/router.sock`, falling

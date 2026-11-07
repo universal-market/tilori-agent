@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { writeKey } from '../src/keys.ts';
 import { MAX_UPLOAD_BYTES, sniffMediaType, statusLine, upload } from '../src/upload.ts';
+import { allowHome } from './allow-home.ts';
 
 const CLI = resolve(import.meta.dir, '..', 'src', 'cli.ts');
 const ID = '0b7c6a52-3f1e-4d6a-9c1b-2f8e5d4a7b90';
@@ -50,6 +51,7 @@ beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'tilori-upload-test-'));
   home = join(root, 'tilori');
   process.env.TILORI_HOME = home;
+  allowHome(home, root);
   delete process.env.TILORI_AGENT;
   delete process.env.TILORI_URL;
   // Not key-shaped, so only the explicit redaction can hide it.

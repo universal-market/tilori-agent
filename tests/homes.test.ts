@@ -1,6 +1,6 @@
 import './setup.ts';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -8,8 +8,9 @@ import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { coordinationPolicy, policyText, saveConfig, sessionIdentityLines } from '../src/config.ts';
 import { socketPath } from '../src/ipc.ts';
-import { defaultTiloriHome, isOtherHome, writeKey } from '../src/keys.ts';
+import { allowedHome, defaultTiloriHome, isOtherHome, writeKey } from '../src/keys.ts';
 import { FakeTilori, until } from './fake-tilori.ts';
+import { allowHome } from './allow-home.ts';
 
 /** UNI-751: a session can use a second Tilori home (another instance) through
  * TILORI_HOME. Each home gets its own router socket, and the session-start
@@ -41,6 +42,7 @@ function withEnv<T>(vars: Record<string, string | undefined>, fn: () => T): T {
 /** A private home at dir/name holding config {url, default_agent: wren} and a key for wren. */
 function makeHome(name: string, extra: Record<string, unknown> = {}): string {
   const h = join(dir, name);
+  allowHome(h);
   withEnv({ TILORI_HOME: h }, () => {
     writeKey('wren', KEY);
     saveConfig({ url, default_agent: 'wren', ...extra });
@@ -248,5 +250,116 @@ describe('session-start identity lines', () => {
     const ctx = JSON.parse(out).hookSpecificOutput.additionalContext as string;
     expect(ctx).toContain(`acts as Tilori agent wren on ${host()}, set by TILORI_HOME`);
     expect(ctx).not.toContain(KEY);
+  });
+});
+
+describe('the homes allow-list (Don, 11-07)', () => {
+  const cli = join(import.meta.dir, '../src/cli.ts');
+  const envWith = (extra: Record<string, string>) => {
+    const env: Record<string, string> = { ...(process.env as Record<string, string>), ...extra };
+    delete env.TILORI_AGENT;
+    return env;
+  };
+
+  test('the default home and listed homes pass; anything else is refused', () => {
+    expect(allowedHome(defaultTiloriHome())).toBe(realpathSync(defaultTiloriHome()));
+    const listed = makeHome('listed');
+    expect(allowedHome(listed)).toBe(realpathSync(listed));
+    // Through a symlink: the same real path.
+    const alias = join(dir, 'listed-alias');
+    symlinkSync(listed, alias);
+    expect(allowedHome(alias)).toBe(realpathSync(listed));
+    expect(() => allowedHome(join(dir, 'never-listed'))).toThrow('is not listed in "homes"');
+  });
+
+  test("a home's own config can't list itself, and relative entries are ignored", () => {
+    const h = join(dir, 'self-listed');
+    withEnv({ TILORI_HOME: h }, () => {
+      writeKey('wren', KEY);
+      saveConfig({ url, default_agent: 'wren', homes: [h] } as never);
+    });
+    expect(() => allowedHome(h)).toThrow('is not listed');
+    allowHome('self-listed');
+    expect(() => allowedHome(h)).toThrow('is not listed');
+  });
+
+  test('every command refuses an unlisted TILORI_HOME, fails closed, and help still prints', async () => {
+    const h = join(dir, 'unlisted');
+    withEnv({ TILORI_HOME: h }, () => {
+      writeKey('wren', KEY);
+      saveConfig({ url, default_agent: 'wren' });
+    });
+    for (const argv of [['policy', '--hook'], ['headers', '--server-url', url], ['status']]) {
+      const p = Bun.spawn(['bun', cli, ...argv], { env: envWith({ TILORI_HOME: h }), stdout: 'pipe', stderr: 'pipe' });
+      const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+      expect(code).toBe(1);
+      expect(out).toBe('');
+      expect(err).toContain(`The Tilori home ${h} is not listed in "homes"`);
+      expect(out + err).not.toContain(KEY);
+    }
+    const help = Bun.spawnSync(['bun', cli, 'help'], { env: envWith({ TILORI_HOME: h }) });
+    expect(help.exitCode).toBe(0);
+    expect(help.stdout.toString()).toContain('tilori-agent claude --home');
+  });
+
+  describe('tilori-agent claude --home', () => {
+    let bin: string;
+    let record: string;
+    beforeAll(() => {
+      bin = join(dir, 'fake-bin');
+      mkdirSync(bin);
+      record = join(dir, 'claude-record.json');
+      // A stand-in for Claude Code: records its argv and Tilori env, exits 7.
+      writeFileSync(
+        join(bin, 'claude'),
+        `#!/usr/bin/env bun\nconst e = process.env;\nrequire('node:fs').writeFileSync(${JSON.stringify(record)}, JSON.stringify({ argv: process.argv.slice(2), env: { TILORI_HOME: e.TILORI_HOME, TILORI_MCP_URL: e.TILORI_MCP_URL, TILORI_MARKET_URL: e.TILORI_MARKET_URL, TILORI_AGENT: e.TILORI_AGENT } }));\nprocess.exit(7);\n`,
+        { mode: 0o755 },
+      );
+    });
+    const run = async (...argv: string[]) => {
+      rmSync(record, { force: true });
+      const p = Bun.spawn(['bun', cli, 'claude', ...argv], {
+        env: envWith({ PATH: `${bin}:${process.env.PATH ?? ''}` }),
+        stdout: 'pipe',
+        stderr: 'pipe',
+      });
+      const [err, code] = await Promise.all([new Response(p.stderr).text(), p.exited]);
+      return { code, err, rec: existsSync(record) ? JSON.parse(readFileSync(record, 'utf8')) : null };
+    };
+
+    test("starts claude with the home's URLs as a --settings flag and in its environment", async () => {
+      const market = 'https://market.example/mcp/v1';
+      const h = makeHome('launch', { market_url: market });
+      const r = await run('--home', h, '--agent', 'wren', '--', '-p', 'hello');
+      expect(r.code).toBe(7);
+      const want = { TILORI_HOME: realpathSync(h), TILORI_MCP_URL: new URL(url).toString(), TILORI_MARKET_URL: market, TILORI_AGENT: 'wren' };
+      expect(r.rec.argv[0]).toBe('--settings');
+      expect(JSON.parse(r.rec.argv[1])).toEqual({ env: want });
+      expect(r.rec.argv.slice(2)).toEqual(['-p', 'hello']);
+      expect(r.rec.env).toEqual(want);
+      expect(JSON.stringify(r.rec)).not.toContain(KEY);
+    });
+
+    test('no market_url: TILORI_MARKET_URL is not set', async () => {
+      const h = makeHome('launch-nomarket');
+      const r = await run('--home', h);
+      expect(JSON.parse(r.rec.argv[1]).env.TILORI_MARKET_URL).toBeUndefined();
+      expect(r.rec.env.TILORI_AGENT).toBeUndefined();
+    });
+
+    test('refuses an unlisted home, a missing --home and a second --settings, without starting claude', async () => {
+      const h = join(dir, 'launch-unlisted');
+      withEnv({ TILORI_HOME: h }, () => saveConfig({ url, default_agent: 'wren' }));
+      for (const [argv, msg] of [
+        [['--home', h], 'is not listed in "homes"'],
+        [[], 'claude needs --home'],
+        [['--home', makeHome('launch-2'), '--', '--settings', '{}'], "sets Claude Code's --settings itself"],
+      ] as const) {
+        const r = await run(...argv);
+        expect(r.code).toBe(1);
+        expect(r.err).toContain(msg);
+        expect(r.rec).toBeNull();
+      }
+    });
   });
 });

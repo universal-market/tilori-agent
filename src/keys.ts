@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 
 /**
  * Key and config files live under `~/.config/tilori/` (override with
@@ -44,14 +44,68 @@ export function tiloriHome(): string {
 export function isOtherHome(): boolean {
   const set = process.env.TILORI_HOME;
   if (!set) return false;
-  const real = (p: string) => {
-    try {
-      return realpathSync(p);
-    } catch {
-      return resolve(p);
-    }
-  };
-  return real(set) !== real(defaultTiloriHome());
+  return realPath(set) !== realPath(defaultTiloriHome());
+}
+
+function realPath(p: string): string {
+  try {
+    return realpathSync(p);
+  } catch {
+    return resolve(p);
+  }
+}
+
+/** `~` or `~/…` from the account's home; anything else as written. */
+function expandTilde(p: string): string {
+  if (p === '~') return homedir();
+  return p.startsWith('~/') ? join(homedir(), p.slice(2)) : p;
+}
+
+/**
+ * The extra homes the operator allows (UNI-751, Don's decision): absolute
+ * paths listed as "homes" in the default home's config.json, edited by hand.
+ * Only the default home's file counts, never the one inside the home being
+ * checked, so a home can't allow itself. Entries that aren't absolute paths
+ * (after `~/`) are ignored.
+ */
+export function allowedHomes(): string[] {
+  const path = join(defaultTiloriHome(), 'config.json');
+  if (!existsSync(path)) return [];
+  assertPrivate(path);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, 'utf8'));
+  } catch {
+    throw new Error(`${path} is not valid JSON.`);
+  }
+  const list = (parsed as { homes?: unknown } | null)?.homes;
+  if (!Array.isArray(list)) return [];
+  return list
+    .filter((h): h is string => typeof h === 'string' && h.trim() !== '')
+    .map((h) => expandTilde(h.trim()))
+    .filter((h) => isAbsolute(h));
+}
+
+/**
+ * The real path of `dir` if it is the default home or listed in "homes",
+ * else throws, saying where to list it. Compared as real paths.
+ */
+export function allowedHome(dir: string): string {
+  const want = realPath(expandTilde(dir));
+  if (want === realPath(defaultTiloriHome())) return want;
+  if (allowedHomes().some((h) => realPath(h) === want)) return want;
+  throw new Error(
+    `The Tilori home ${dir} is not listed in "homes" in ${join(defaultTiloriHome(), 'config.json')}. ` +
+      `Only the default home and the homes listed there can be used; add it there by hand to allow it.`,
+  );
+}
+
+/** Refuses a TILORI_HOME that is neither the default home nor listed in
+ * "homes" (checked when tilori-agent starts, so every hook, monitor and
+ * headers call fails closed). */
+export function assertHomeAllowed(): void {
+  const set = process.env.TILORI_HOME;
+  if (set && isOtherHome()) allowedHome(set);
 }
 
 export function validateHandle(handle: string): string {

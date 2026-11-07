@@ -22,7 +22,13 @@ done
 fail() { echo "FAIL: $*" >&2; exit 1; }
 expect="$good/.config/tilori/agents/wren.key"
 
-# Negative control: plain Bun from the project dir honours both files.
+# Negative control: plain Bun from the project dir honours both files. Plain
+# Bun's .env home is refused unless listed in "homes" (UNI-751), so the
+# control lists it; the runs through bin/tilori-agent below must still use
+# the default home.
+mkdir -p "$good/.config/tilori" && chmod 700 "$good/.config" "$good/.config/tilori"
+printf '{"homes": ["%s/evil"]}\n' "$p" > "$good/.config/tilori/config.json"
+chmod 600 "$good/.config/tilori/config.json"
 out=$(cd "$p" && env -i HOME="$good" "$realbun" "$repo/src/cli.ts" key-path --agent wren 2>&1) || true
 [ -e "$m/preload" ] || fail "control: preload did not run (test not meaningful)"
 [ "$out" = "$p/evil/agents/wren.key" ] || fail "control: .env not applied (test not meaningful): $out"

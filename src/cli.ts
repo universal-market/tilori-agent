@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { spawn } from 'node:child_process';
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { activityDir, promptSignal, readPushSignal, stallMinutes, statusLine, watchSignal } from './activity.ts';
@@ -26,7 +27,7 @@ import {
 } from './config.ts';
 import { ExecInjector } from './injectors/exec.ts';
 import { routerUsage, serveRouter, socketIdentity, socketPath } from './ipc.ts';
-import { keyPath, readKey, redact, tiloriHome, validateHandle, writeKey } from './keys.ts';
+import { allowedHome, assertHomeAllowed, keyPath, readKey, redact, tiloriHome, validateHandle, writeKey } from './keys.ts';
 import { Router, type RouterAgentConfig } from './router.ts';
 import {
   SETTABLE,
@@ -55,6 +56,11 @@ Usage:
       one other server the key may go to; --market-url none removes it. A new
       --url without --market-url also removes it, so a key never follows an
       old deployment's Market URL.
+  tilori-agent claude --home <dir> [--agent <handle>] [-- <claude args>]
+      Starts Claude Code for that Tilori home, with its "url" and
+      "market_url" passed as launch flags. The home must be the default one
+      or listed in "homes" in ~/.config/tilori/config.json, edited by hand:
+      every command refuses a TILORI_HOME that isn't.
   tilori-agent watch --notify-lines [--agent <handle>]
       Claude Code monitor mode: one fixed wake line per wake on stdout.
       Uses the local router if it serves the agent, else polls directly.
@@ -155,15 +161,23 @@ interface Args {
    * `upload` takes the attachment id and file; `file-info` the file;
    * `search-posts` the commit SHA. */
   positionals: string[];
+  /** `claude`: the arguments after `--`, for Claude Code. */
+  rest: string[];
 }
 
 export function parseArgs(argv: string[]): Args {
   const flags = new Map<string, string | true>();
   const positionals: string[] = [];
-  const valued = new Set(['agent', 'url', 'market-url', 'exec', 'wait-ms', 'server-url', 'exec-timeout-ms', 'bytes']);
+  const valued = new Set(['agent', 'url', 'market-url', 'exec', 'wait-ms', 'server-url', 'exec-timeout-ms', 'bytes', 'home']);
+  let rest: string[] = [];
   const takes: Record<string, number> = { 'get-post': 1, 'search-posts': 1, upload: 2, 'file-info': 1 };
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
+    // `claude` passes everything after `--` to Claude Code unread.
+    if (a === '--' && argv[0] === 'claude') {
+      rest = argv.slice(i + 1);
+      break;
+    }
     if (!a.startsWith('--')) {
       if (positionals.length < (takes[argv[0]] ?? 0) || argv[0] === 'config') {
         positionals.push(a);
@@ -180,7 +194,7 @@ export function parseArgs(argv: string[]): Args {
       flags.set(name, v);
     } else flags.set(name, true);
   }
-  return { cmd: argv[0] ?? 'help', flags, positionals };
+  return { cmd: argv[0] ?? 'help', flags, positionals, rest };
 }
 
 const POST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -263,6 +277,40 @@ function requireAgent(config: TiloriConfig, a: Args): string {
   return agent;
 }
 
+/** Commands that never read a Tilori home, so a refused TILORI_HOME doesn't
+ * hide the usage text. */
+const HOMELESS = new Set(['help', '--help', '-h']);
+
+/**
+ * `tilori-agent claude --home <dir>`: starts Claude Code for a second Tilori
+ * home (UNI-751, Don's decision). The home must be the default one or listed
+ * in "homes". Its URLs go to Claude Code both in the environment and as a
+ * `--settings` launch flag, which outranks repo settings, so a repo can't
+ * point the plugin elsewhere; the plugin's .mcp.json reads TILORI_MCP_URL and
+ * TILORI_MARKET_URL.
+ */
+async function launchClaude(args: Args): Promise<number> {
+  const dir = str(args, 'home');
+  if (!dir) throw new Error('claude needs --home <dir>: the default Tilori home or one listed in "homes".');
+  for (const a of args.rest)
+    if (a === '--settings' || a.startsWith('--settings='))
+      throw new Error("claude sets Claude Code's --settings itself; pass other settings in a settings file instead.");
+  const home = allowedHome(dir);
+  const config = loadConfig(join(home, 'config.json'));
+  const env: Record<string, string> = { TILORI_HOME: home, TILORI_MCP_URL: buildMcpUrl(config.url).toString() };
+  if (config.market_url) env.TILORI_MARKET_URL = buildMarketUrl(config.market_url).toString();
+  const agent = str(args, 'agent');
+  if (agent) env.TILORI_AGENT = validateHandle(agent);
+  const child = spawn('claude', ['--settings', JSON.stringify({ env }), ...args.rest], {
+    stdio: 'inherit',
+    env: { ...process.env, ...env },
+  });
+  return await new Promise<number>((done, fail) => {
+    child.once('error', (cause) => fail(new Error(`Could not start claude: ${cause.message}`)));
+    child.once('exit', (code, sig) => done(code ?? (sig ? 1 : 0)));
+  });
+}
+
 export async function main(argv = process.argv.slice(2)): Promise<number> {
   const log = (m: string) => process.stderr.write(`tilori-agent: ${redact(m)}\n`);
   let args: Args;
@@ -281,7 +329,10 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   const signal = controller.signal;
 
   try {
+    if (!HOMELESS.has(args.cmd)) assertHomeAllowed();
     switch (args.cmd) {
+      case 'claude':
+        return await launchClaude(args);
       case 'init': {
         const agent = validateHandle(str(args, 'agent') ?? '');
         const config = loadConfig();

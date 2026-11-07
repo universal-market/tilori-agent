@@ -24,11 +24,13 @@ import { WakeLimiter } from '../src/ratelimit.ts';
 import { installedVersion, newerVersion, UpdateNotice } from '../src/update-notice.ts';
 import { buildWake, dedupeRefs, sanitizeWake, wakeText } from '../src/wake.ts';
 import { dm, FakeTilori, mention } from './fake-tilori.ts';
+import { allowHome } from './allow-home.ts';
 
 let home: string;
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), 'tilori-agent-test-'));
   process.env.TILORI_HOME = join(home, 'tilori');
+  allowHome(process.env.TILORI_HOME);
   delete process.env.TILORI_AGENT;
   delete process.env.TILORI_URL;
 });
