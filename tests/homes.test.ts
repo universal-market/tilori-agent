@@ -303,6 +303,19 @@ describe('the homes allow-list (Don, 11-07)', () => {
     expect(help.stdout.toString()).toContain('tilori-agent claude --home');
   });
 
+  test('status with no keys says to run init, and exits 0 (UNI-763)', () => {
+    const home = join(dir, 'fresh-user');
+    mkdirSync(home, { recursive: true });
+    const env = envWith({ HOME: home });
+    delete env.TILORI_HOME;
+    const p = Bun.spawnSync(['bun', cli, 'status'], { env, stdin: 'ignore' });
+    expect(p.exitCode).toBe(0);
+    const out = p.stdout.toString();
+    expect(out).toContain(`No agents on this machine yet: no keys in ${join(home, '.config', 'tilori', 'agents')}.`);
+    expect(out).toContain('Run tilori-agent init --agent <handle> --url https://<deployment>.convex.site/mcp/tilori/v1');
+    expect(p.stderr.toString()).toBe('');
+  });
+
   describe('tilori-agent claude --home', () => {
     let bin: string;
     let record: string;
