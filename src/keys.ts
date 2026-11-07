@@ -20,6 +20,7 @@ import { isAbsolute, join, resolve } from 'node:path';
  * Layout:
  *   ~/.config/tilori/            0700
  *     config.json                0600  url, default agent, per-agent settings (no secrets)
+ *     headers.allow              0600  URLs `headers` releases each key to (config.ts)
  *     agents/                    0700
  *       <handle>.key             0600  that agent's shared Tilori key
  */
