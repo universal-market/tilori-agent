@@ -431,7 +431,10 @@ add. tilori-agent never changes or removes a subscription for you.
 ## Router protocol (local IPC)
 
 Newline-delimited JSON over `$XDG_RUNTIME_DIR/tilori/router.sock`, falling
-back to `~/.config/tilori/run/router.sock`:
+back to `~/.config/tilori/run/router.sock`. When `TILORI_HOME` names a home
+other than `~/.config/tilori` (a second instance), the socket is
+`$TILORI_HOME/run/router.sock`, so each home has its own router and run
+files:
 
 ```
 injector → router  {"op":"register","v":1,"agent":"wren","injector":"notify-lines"}

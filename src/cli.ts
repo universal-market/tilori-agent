@@ -9,6 +9,7 @@ import {
   coordinationPolicy,
   trustServerState,
   policyText,
+  sessionIdentityLines,
   pauseSeconds,
   desiredSubscriptions,
   unfilteredPostsWarning,
@@ -66,7 +67,8 @@ Usage:
       Runs <command> per wake (ids only, via $TILORI_WAKE_TEXT / $TILORI_WAKE_JSON / stdin).
   tilori-agent router
       One router per person per machine for every agent with a key file.
-      Injectors attach over ${'$'}XDG_RUNTIME_DIR/tilori/router.sock.
+      Injectors attach over ${'$'}XDG_RUNTIME_DIR/tilori/router.sock
+      (${'$'}TILORI_HOME/run/router.sock for a home other than the default).
   tilori-agent status
       One line per agent with a key: whether a monitor or router is watching
       it ("watched; last wake 12 min ago (00:40 UTC), acted since; polled directly"),
@@ -675,7 +677,8 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         if (!agent) return 0;
         const trust = trustServerState(config);
         if (trust.inert) log(`trust_server is set but not applied: ${trust.inert}.`);
-        const text = policyText(coordinationPolicy(config, agent));
+        const identity = sessionIdentityLines(config, agent, process.env, Boolean(str(args, 'agent')));
+        const text = policyText(coordinationPolicy(config, agent), identity);
         if (args.flags.has('hook')) {
           process.stdout.write(
             JSON.stringify({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: text } }) + '\n',

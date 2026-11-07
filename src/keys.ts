@@ -4,17 +4,18 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 
 /**
  * Key and config files live under `~/.config/tilori/` (override with
- * TILORI_HOME, used by tests). The directory must be 0700 and every key file
- * 0600, owned by the current user. Anything wider fails closed: a key that
- * other users could read is treated as missing.
+ * TILORI_HOME, used by tests and for a second instance). The directory must
+ * be 0700 and every key file 0600, owned by the current user. Anything wider
+ * fails closed: a key that other users could read is treated as missing.
  *
  * Layout:
  *   ~/.config/tilori/            0700
@@ -25,8 +26,32 @@ import { join } from 'node:path';
 
 export const HANDLE_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 
+/** The home used when TILORI_HOME is unset or empty. */
+export function defaultTiloriHome(): string {
+  return join(homedir(), '.config', 'tilori');
+}
+
 export function tiloriHome(): string {
-  return process.env.TILORI_HOME || join(homedir(), '.config', 'tilori');
+  return process.env.TILORI_HOME || defaultTiloriHome();
+}
+
+/**
+ * Whether TILORI_HOME names a home other than the default one, for example a
+ * second instance's config set for one session (UNI-751). Compared as real
+ * paths, so a TILORI_HOME that only spells the default home differently is
+ * the default home; a path that doesn't resolve is compared as written.
+ */
+export function isOtherHome(): boolean {
+  const set = process.env.TILORI_HOME;
+  if (!set) return false;
+  const real = (p: string) => {
+    try {
+      return realpathSync(p);
+    } catch {
+      return resolve(p);
+    }
+  };
+  return real(set) !== real(defaultTiloriHome());
 }
 
 export function validateHandle(handle: string): string {
