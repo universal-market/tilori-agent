@@ -370,6 +370,26 @@ describe('router', () => {
     await done;
   });
 
+  test('an old Market event or an old resync batch still wakes, and is not counted as backlog', async () => {
+    const { fake, router, ac, done } = setup();
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => fake.subs.length === 2);
+    const old = { created_at: new Date(Date.now() - 50 * 3600_000).toISOString() };
+    const tx = randomUUID();
+    fake.push('inbox', [mention(tx, { kind: 'transaction.updated', entity_type: 'transaction' as const, ...old })]);
+    await until(() => inj.wakes.length === 1);
+    expect(inj.wakes[0].events.map((e) => e.entity_id)).toEqual([tx]);
+    expect(inj.wakes[0].backlog).toBeUndefined();
+    const p = randomUUID();
+    fake.push('inbox', [mention(p, old)], { resync: true });
+    await until(() => inj.wakes.length === 2);
+    expect(inj.wakes[1].resync_required).toBe(true);
+    expect(inj.wakes[1].backlog).toBeUndefined();
+    ac.abort();
+    await done;
+  });
+
   test('new DMs and Market events in a known conversation or entity always wake', async () => {
     const { fake, router, ac, done } = setup();
     const inj = new Recorder();

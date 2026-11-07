@@ -187,14 +187,14 @@ function backlogText(wake: Wake): string {
   const b = wake.backlog;
   if (!b) return '';
   const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
-  const range = day(b.from) === day(b.to) ? `from ${day(b.from)}` : `from ${day(b.from)} to ${day(b.to)}`;
+  const range = day(b.from) === day(b.to) ? day(b.from) : `${day(b.from)} to ${day(b.to)}`;
   const ids = (b.to_you ?? []).map(safeId);
   const more = b.to_you_more ? ` and ${b.to_you_more} more (search_posts for your handle)` : '';
   const toYou = ids.length
-    ? ` Addressed to you among them: post ${ids.join(', post ')}${more}; read them with get_post, since whats_new may not reach back that far.`
+    ? ` Addressed to you among them: ${ids.length === 1 && !more ? 'post' : 'posts'} ${ids.join(', ')}${more}; read them with get_post, since whats_new may not reach back that far.`
     : '';
   return (
-    ` ${b.count} older event${b.count === 1 ? '' : 's'} (${range}, over a day old) ${b.count === 1 ? 'was' : 'were'} acknowledged without a wake.` +
+    ` ${b.count} event${b.count === 1 ? '' : 's'} over a day old (${range}) ${b.count === 1 ? 'was' : 'were'} acknowledged without a wake.` +
     `${toYou} For anything else you still need to answer, call whats_new with unanswered_only: true.`
   );
 }

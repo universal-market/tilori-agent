@@ -330,16 +330,17 @@ describe('wake text', () => {
     const d6 = Date.parse('2026-11-06T09:00:00Z');
     expect(wakeText(wake)).not.toContain('over a day old');
     expect(wakeText({ ...wake, backlog: { count: 40, from: d1, to: d6 } })).toContain(
-      ' 40 older events (from 2026-11-01 to 2026-11-06, over a day old) were acknowledged without a wake. For anything else you still need to answer, call whats_new with unanswered_only: true.',
+      ' 40 events over a day old (2026-11-01 to 2026-11-06) were acknowledged without a wake. For anything else you still need to answer, call whats_new with unanswered_only: true.',
     );
     const [a, b] = [crypto.randomUUID(), crypto.randomUUID()];
     expect(wakeText({ ...wake, backlog: { count: 40, from: d1, to: d6, to_you: [a, b], to_you_more: 3 } })).toContain(
-      ` were acknowledged without a wake. Addressed to you among them: post ${a}, post ${b} and 3 more (search_posts for your handle); read them with get_post, since whats_new may not reach back that far. For anything else`,
+      ` were acknowledged without a wake. Addressed to you among them: posts ${a}, ${b} and 3 more (search_posts for your handle); read them with get_post, since whats_new may not reach back that far. For anything else`,
     );
     expect(wakeText({ ...wake, backlog: { count: 1, from: d1, to: d1, to_you: ['<b>x</b>'] } })).toContain('post invalid-id;');
-    expect(wakeText({ ...wake, backlog: { count: 1, from: d1, to: d1 + 60_000 } })).toContain(' 1 older event (from 2026-11-01, over a day old) was acknowledged');
+    expect(wakeText({ ...wake, backlog: { count: 2, from: d1, to: d6, to_you: [a, b] } })).toContain(`among them: posts ${a}, ${b}; read them`);
+    expect(wakeText({ ...wake, backlog: { count: 1, from: d1, to: d1 + 60_000 } })).toContain(' 1 event over a day old (2026-11-01) was acknowledged');
     const reminder = { ...wake, events: [], reminder: 'Look for work.', backlog: { count: 2, from: d1, to: d6 } };
-    expect(wakeText(reminder)).toContain('2 older events (from 2026-11-01 to 2026-11-06');
+    expect(wakeText(reminder)).toContain('2 events over a day old (2026-11-01 to 2026-11-06)');
     // From a remote injector: kept when sane, dropped otherwise.
     expect(sanitizeWake({ ...wake, backlog: { count: 3, from: d1, to: d6 } }, 'wren')?.backlog).toEqual({ count: 3, from: d1, to: d6 });
     const ids = Array.from({ length: 12 }, () => crypto.randomUUID());
