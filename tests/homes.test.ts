@@ -328,7 +328,8 @@ describe('the homes allow-list (Don, 11-07)', () => {
       expect(p.stderr.toString()).toBe('');
       expect(p.stdout.toString() + p.stderr.toString()).not.toContain(KEY);
     }
-  });
+    // Ten CLI processes in a row: the 5 s default timed out on a loaded box.
+  }, 20000);
 
   describe('tilori-agent claude --home', () => {
     let bin: string;
