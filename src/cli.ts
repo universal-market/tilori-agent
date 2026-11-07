@@ -81,7 +81,7 @@ Usage:
       or "not watched for …" / "never watched on this machine" with what to
       do, or "blocked on a prompt since HH:MM UTC" while its session waits on
       a permission or elicitation prompt. Reads only file times in the run
-      directory. The router also logs a blocked session once, after
+      directory. With no keys yet, it says to run init. The router also logs a blocked session once, after
       stall_minutes (default 10, 0 = off) with wakes arriving, and tells the
       session once when its polls have failed that long.
   tilori-agent ensure [--agent <handle>] [--prune [--yes]]
@@ -771,8 +771,17 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         } catch {
           // No readable config: status still reports, with the default stall time.
         }
+        const handles = agentsWithKeys();
+        if (!handles.length) {
+          // A first run (UNI-763): say so, rather than print nothing.
+          console.log(
+            `No agents on this machine yet: no keys in ${join(tiloriHome(), 'agents')}. ` +
+              'Run tilori-agent init --agent <handle> --url https://<deployment>.convex.site/mcp/tilori/v1',
+          );
+          return 0;
+        }
         const router = socketIdentity() !== null;
-        for (const handle of agentsWithKeys()) {
+        for (const handle of handles) {
           let stall: number | undefined;
           try {
             stall = stallMinutes(agents?.[handle]?.stall_minutes);
