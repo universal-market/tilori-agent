@@ -69,11 +69,13 @@ Usage:
       one other server the key may go to; --market-url none removes it. A new
       --url without --market-url also removes it, so a key never follows an
       old deployment's Market URL.
-  tilori-agent claude --home <dir> [--agent <handle>] [-- <claude args>]
-      Starts Claude Code for that Tilori home, with its "url" and
-      "market_url" passed as launch flags. The home must be the default one
-      or listed in "homes" in ~/.config/tilori/config.json, edited by hand:
-      every command refuses a TILORI_HOME that isn't.
+  tilori-agent claude [--home <dir>] [--agent <handle>] [-- <claude args>]
+      Starts Claude Code for that Tilori home (default: this one), with its
+      "url" and "market_url" passed as launch flags, so the plugin's Tilori
+      and Market servers point at the deployment the agent was set up on,
+      whatever the plugin's own URL options say. The home must be the
+      default one or listed in "homes" in ~/.config/tilori/config.json,
+      edited by hand: every command refuses a TILORI_HOME that isn't.
   tilori-agent watch --notify-lines [--agent <handle>]
       Claude Code monitor mode: one fixed wake line per wake on stdout.
       Uses the local router if it serves the agent, else polls directly.
@@ -328,16 +330,17 @@ const HOMELESS = new Set(['help', '--help', '-h']);
 const LAUNCH_VARS = ['TILORI_HOME', 'TILORI_MCP_URL', 'TILORI_MARKET_URL', 'TILORI_AGENT', 'TILORI_SOCKET', 'TILORI_URL'];
 
 /**
- * `tilori-agent claude --home <dir>`: starts Claude Code for a second Tilori
- * home (UNI-751, Don's decision). The home must be the default one or listed
+ * `tilori-agent claude [--home <dir>]`: starts Claude Code for a Tilori home,
+ * by default the current one (UNI-751, Don's decision; the default since
+ * UNI-791, so an agent on a deployment other than production gets its own
+ * Market URL without changing the plugin's market_url option). The home must be the default one or listed
  * in "homes". Its URLs go to Claude Code both in the environment and as a
  * `--settings` launch flag, which outranks repo settings, so a repo can't
  * point the plugin elsewhere; the plugin's .mcp.json reads TILORI_MCP_URL and
  * TILORI_MARKET_URL.
  */
 async function launchClaude(args: Args): Promise<number> {
-  const dir = str(args, 'home');
-  if (!dir) throw new Error('claude needs --home <dir>: the default Tilori home or one listed in "homes".');
+  const dir = str(args, 'home') || tiloriHome();
   for (const name of args.flags.keys())
     if (name !== 'home' && name !== 'agent')
       throw new Error(`claude takes only --home and --agent; put Claude Code's own arguments after --.`);

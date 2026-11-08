@@ -511,6 +511,20 @@ later). Arguments after `--` go to Claude Code. Without `market_url` in that
 home, Market tools won't work in that session: the key is never sent to the
 default Market URL.
 
+`--home` defaults to the current home, so the launcher is also the way to
+start an agent that was set up on a deployment other than production (an
+internal or staging instance) without touching the plugin's URL options:
+
+```sh
+sh ~/.claude/plugins/data/tilori-tilori-claude/tilori-agent claude --agent <handle> -- <claude args>
+```
+
+The plugin's `market` server otherwise uses its `market_url` option, which
+defaults to production's Market. The key is not sent there, so production
+answers `401 invalid_token` and Market stays off; the session start note
+then says so and names this home's own `market_url` (UNI-791). Either start
+with the launcher or set the plugin's `market_url` option to that URL.
+
 ## Router protocol (local IPC)
 
 Newline-delimited JSON over `$XDG_RUNTIME_DIR/tilori/router.sock`, falling
