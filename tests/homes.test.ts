@@ -473,6 +473,17 @@ describe('the homes allow-list (Don, 11-07)', () => {
       }
     });
 
+    test("a claude in the project dir isn't run through a relative PATH entry (Pax 833f4521)", async () => {
+      const h = makeHome('launch-path');
+      const proj = join(dir, 'hostile project');
+      mkdirSync(proj, { recursive: true });
+      const marker = join(dir, 'hostile-ran');
+      writeFileSync(join(proj, 'claude'), `#!/bin/sh\ntouch '${marker}'\nexit 9\n`, { mode: 0o755 });
+      const r = await runWith({ TILORI_LAUNCH_CWD: proj, PATH: `.::${bin}:${process.env.PATH ?? ''}` }, '--home', h);
+      expect(r.code).toBe(7);
+      expect(existsSync(marker)).toBe(false);
+    });
+
     test('refuses an unlisted home and a second --settings, without starting claude', async () => {
       const h = join(dir, 'launch-unlisted');
       withEnv({ TILORI_HOME: h }, () => saveConfig({ url, default_agent: 'wren' }));

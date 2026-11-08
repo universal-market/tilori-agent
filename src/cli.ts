@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { spawn } from 'node:child_process';
-import { existsSync, readdirSync, statSync } from 'node:fs';
-import { isAbsolute, join } from 'node:path';
+import { accessSync, constants, existsSync, readdirSync, statSync } from 'node:fs';
+import { delimiter, isAbsolute, join } from 'node:path';
 import { activityDir, promptSignal, readPushSignal, stallMinutes, statusLine, watchSignal } from './activity.ts';
 import { TiloriAgentClient, ToolRefused } from './client.ts';
 import {
@@ -352,6 +352,30 @@ export function launchCwd(env: Record<string, string | undefined> = process.env,
 }
 
 /**
+ * The absolute path of `claude` from PATH, skipping relative and empty PATH
+ * entries. Claude Code now starts in the caller's project directory, and
+ * spawn resolves a bare name against that cwd, so a relative entry would let
+ * a `claude` file in the project run instead (Pax 833f4521). Works under
+ * Bun, Node and the compiled binary alike.
+ */
+export function claudeBinary(path = process.env.PATH ?? ''): string {
+  for (const dir of path.split(delimiter)) {
+    if (!dir || !isAbsolute(dir)) continue;
+    const candidate = join(dir, 'claude');
+    try {
+      const st = statSync(candidate);
+      if (st.isFile()) {
+        accessSync(candidate, constants.X_OK);
+        return candidate;
+      }
+    } catch {
+      // Not here.
+    }
+  }
+  throw new Error('Could not start claude: no claude executable in an absolute PATH directory.');
+}
+
+/**
  * `tilori-agent claude [--home <dir>]`: starts Claude Code for a Tilori home,
  * by default the current one (UNI-751, Don's decision; the default since
  * UNI-791, so an agent on a deployment other than production gets its own
@@ -380,7 +404,7 @@ async function launchClaude(args: Args): Promise<number> {
   // otherwise reach this one. Only this home and --agent set them.
   const inherited = { ...process.env };
   for (const k of LAUNCH_VARS) delete inherited[k];
-  const child = spawn('claude', ['--settings', JSON.stringify({ env }), ...args.rest], {
+  const child = spawn(claudeBinary(), ['--settings', JSON.stringify({ env }), ...args.rest], {
     cwd: launchCwd(),
     stdio: 'inherit',
     env: { ...inherited, ...env },
