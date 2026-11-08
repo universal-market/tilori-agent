@@ -405,7 +405,7 @@ describe('the homes allow-list (Don, 11-07)', () => {
       // A stand-in for Claude Code: records its argv and Tilori env, exits 7.
       writeFileSync(
         join(bin, 'claude'),
-        `#!/usr/bin/env bun\nconst e = process.env;\nrequire('node:fs').writeFileSync(${JSON.stringify(record)}, JSON.stringify({ argv: process.argv.slice(2), env: { TILORI_HOME: e.TILORI_HOME, TILORI_MCP_URL: e.TILORI_MCP_URL, TILORI_MARKET_URL: e.TILORI_MARKET_URL, TILORI_AGENT: e.TILORI_AGENT } }));\nprocess.exit(7);\n`,
+        `#!/usr/bin/env bun\nconst e = process.env;\nrequire('node:fs').writeFileSync(${JSON.stringify(record)}, JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd(), launchCwd: e.TILORI_LAUNCH_CWD ?? null, env: { TILORI_HOME: e.TILORI_HOME, TILORI_MCP_URL: e.TILORI_MCP_URL, TILORI_MARKET_URL: e.TILORI_MARKET_URL, TILORI_AGENT: e.TILORI_AGENT } }));\nprocess.exit(7);\n`,
         { mode: 0o755 },
       );
     });
@@ -456,6 +456,32 @@ describe('the homes allow-list (Don, 11-07)', () => {
       expect(r.rec.env.TILORI_HOME).toBe(realpathSync(h));
       expect(r.rec.env.TILORI_MARKET_URL).toBe(market);
       expect(JSON.parse(r.rec.argv[1]).env.TILORI_MARKET_URL).toBe(market);
+    });
+
+    test("starts claude in TILORI_LAUNCH_CWD (run-agent.sh's caller), not its own cwd, and doesn't pass it on (UNI-795)", async () => {
+      const h = makeHome('launch-cwd');
+      const proj = join(dir, 'a project dir');
+      mkdirSync(proj, { recursive: true });
+      const r = await runWith({ TILORI_LAUNCH_CWD: proj }, '--home', h);
+      expect(r.code).toBe(7);
+      expect(realpathSync(r.rec.cwd)).toBe(realpathSync(proj));
+      expect(r.rec.launchCwd).toBeNull();
+      for (const bad of ['relative/dir', join(dir, 'no-such-dir'), join(proj, '..', 'claude-record.json')]) {
+        const b = await runWith({ TILORI_LAUNCH_CWD: bad }, '--home', h);
+        expect(b.code).toBe(7);
+        expect(realpathSync(b.rec.cwd)).toBe(realpathSync(process.cwd()));
+      }
+    });
+
+    test("a claude in the project dir isn't run through a relative PATH entry (Pax 833f4521)", async () => {
+      const h = makeHome('launch-path');
+      const proj = join(dir, 'hostile project');
+      mkdirSync(proj, { recursive: true });
+      const marker = join(dir, 'hostile-ran');
+      writeFileSync(join(proj, 'claude'), `#!/bin/sh\ntouch '${marker}'\nexit 9\n`, { mode: 0o755 });
+      const r = await runWith({ TILORI_LAUNCH_CWD: proj, PATH: `.::${bin}:${process.env.PATH ?? ''}` }, '--home', h);
+      expect(r.code).toBe(7);
+      expect(existsSync(marker)).toBe(false);
     });
 
     test('refuses an unlisted home and a second --settings, without starting claude', async () => {
