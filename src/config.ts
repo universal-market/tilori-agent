@@ -337,9 +337,12 @@ export const HEADERS_ALLOW = 'headers.allow';
  * `<agent> <server-url>` line for each agent with a key file and each URL
  * `headers` would release that key to. Those URLs are "url" and
  * "market_url", both as written and normalized (Claude Code passes the URL
- * as the plugin config spells it). The helper only does exact string
- * matches, so it can never release more widely than `releasedEndpoint`.
- * The file holds no secrets: handles and URLs only.
+ * as the plugin config spells it), each kept only if `releasedEndpoint`
+ * accepts it: a bare market origin, which `buildMarketUrl` completes but the
+ * asked-URL check reads as a Tilori URL, is left out (Pax a89e3b48, Bastion
+ * fdbaf264). The helper only does exact string matches against this list,
+ * so it can never release more widely than `releasedEndpoint`. The file
+ * holds no secrets: handles and URLs only.
  */
 export function headersAllowText(config: TiloriConfig, agents: string[]): string {
   const urls = new Set<string>();
@@ -351,7 +354,16 @@ export function headersAllowText(config: TiloriConfig, agents: string[]): string
     } catch {
       return; // `headers` would refuse it too.
     }
-    for (const u of [raw, href]) if (/^https?:\/\/[^\s]+$/.test(u)) urls.add(u);
+    for (const u of [raw, href]) if (/^https?:\/\/[^\s]+$/.test(u) && released(u)) urls.add(u);
+  };
+  // `releasedEndpoint` throws on an unusable config URL, where `headers`
+  // refuses too: nothing is listed for it, and saveConfig never fails here.
+  const released = (u: string) => {
+    try {
+      return releasedEndpoint(config, u) !== null;
+    } catch {
+      return false;
+    }
   };
   add(config.url, buildMcpUrl);
   add(config.market_url, buildMarketUrl);

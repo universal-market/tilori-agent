@@ -68,6 +68,48 @@ describe('headers.allow', () => {
     for (const u of urls) expect(releasedEndpoint(config, u)).not.toBeNull();
   });
 
+  test('a bare market origin lists only its completed endpoint (Pax a89e3b48, Bastion fdbaf264)', () => {
+    const config = { url: 'https://t.example/mcp/tilori/v1', market_url: 'https://m.example', default_agent: 'a' };
+    expect(headersAllowText(config, ['a'])).toBe(
+      ['default a', 'a https://t.example/mcp/tilori/v1', 'a https://m.example/mcp/v1', ''].join('\n'),
+    );
+  });
+
+  test('every line it writes is a URL releasedEndpoint accepts, across URL spellings', () => {
+    const spellings = [
+      'https://t.example',
+      'https://t.example/',
+      'https://t.example/mcp/tilori/v1',
+      'https://t.example/mcp/tilori/v1/',
+      'HTTPS://T.EXAMPLE:443/mcp/tilori/v1',
+      'https://t.example/mcp/tilori/v1?x=1#f',
+      'https://m.example',
+      'https://m.example/',
+      'https://m.example.convex.site',
+      'https://m.example/mcp/v1',
+      'https://m.example/mcp/v1/',
+      'HTTPS://M.EXAMPLE:443/mcp/v1',
+      'https://m.example/mcp/v1?x=1#f',
+      'http://127.0.0.1:3210',
+      'http://localhost:3210/mcp/v1',
+      'http://t.example/mcp/tilori/v1',
+      'https://user:pw@t.example/mcp/tilori/v1',
+      'https://m.example/other',
+    ];
+    let lines = 0;
+    for (const url of spellings)
+      for (const market_url of [undefined, ...spellings]) {
+        const config = { url, market_url, default_agent: 'a' };
+        for (const line of headersAllowText(config, ['a', 'b']).trim().split('\n')) {
+          if (!line || line.startsWith('default ')) continue;
+          const u = line.split(' ')[1]!;
+          expect([u, releasedEndpoint(config, u)]).not.toEqual([u, null]);
+          lines++;
+        }
+      }
+    expect(lines).toBeGreaterThan(100);
+  });
+
   test('a URL headers would refuse is left out', () => {
     const text = headersAllowText(
       { url: 'http://tilori.example/mcp/tilori/v1', market_url: 'https://market.example/other', default_agent: 'wren' },
