@@ -507,6 +507,20 @@ describe('watch: polling the claim', () => {
     expect(existsSync(pendingPath('wren'))).toBe(false);
   });
 
+  test('a claimed handle that already has a key keeps that key (Bastion, tilori-agent#92)', async () => {
+    state.claimedHandle = 'bastion';
+    state.profile = { username: 'don-zheng', handle: 'bastion' };
+    writeKey('bastion', 'mcp_sk_existing-working-key');
+    await registered('newagent');
+    const { outcome, lines } = await poll('newagent');
+    expect(outcome).toEqual({ result: 'kept-existing' });
+    expect(lines).toEqual([LINES.keyExists('bastion')]);
+    expect(readFileSync(keyPath('bastion'), 'utf8')).toBe('mcp_sk_existing-working-key\n');
+    expect(existsSync(pendingPath('newagent'))).toBe(false);
+    expect(loadConfig().agents?.bastion).toBeUndefined();
+    expect(lines[0]).not.toContain(KEY);
+  });
+
   test('when the owner cannot be read, the line says so instead of inventing one', async () => {
     await registered();
     state.profile = { username: 'Not A Username; rm -rf', handle: 'wren' };

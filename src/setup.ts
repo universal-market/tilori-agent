@@ -458,6 +458,9 @@ export const LINES = {
     " This machine's Tilori config points at another server, so url and market_url in config.json were left as they were; edit them by hand to use this agent.",
   timeout: "Didn't see an approval in 15 minutes. Run /tilori:setup again.",
   expired: (handle: string) => `The sign-in link for @${handle} expired or was already used. Run /tilori:setup again.`,
+  /** The claimed handle already has a key here: it is never replaced (Bastion, tilori-agent#92). */
+  keyExists: (handle: string) =>
+    `@${handle} already has a key here, so the new one wasn't saved. Remove it first or run /tilori:setup with another handle.`,
   unusable: (handle: string, why: string) => `Tilori's answer for @${handle} couldn't be used (${why}). Run /tilori:setup again.`,
 } as const;
 
@@ -557,7 +560,7 @@ export interface PollClaimOptions extends HttpOptions {
 
 export type PollClaimOutcome =
   | { result: 'claimed'; handle: string }
-  | { result: 'timeout' | 'expired' | 'unusable' | 'cancelled' | 'no-file' };
+  | { result: 'timeout' | 'expired' | 'unusable' | 'cancelled' | 'no-file' | 'kept-existing' };
 
 export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
@@ -600,6 +603,14 @@ export async function pollClaim(o: PollClaimOptions): Promise<PollClaimOutcome> 
     const ans = await checkStatus(p, o);
     if (o.signal?.aborted) break;
     if (ans.kind === 'claimed') {
+      // The claimed handle comes from Tilori's answer and may differ from the
+      // one asked for. An existing key is never replaced: it may be a working
+      // credential for another account or server.
+      if (existsSync(keyPath(ans.handle))) {
+        deletePending(p.handle);
+        await o.write(LINES.keyExists(ans.handle));
+        return { result: 'kept-existing' };
+      }
       const line = await finishClaim(p, ans, { ...o, log });
       deletePending(p.handle);
       await o.write(line);
