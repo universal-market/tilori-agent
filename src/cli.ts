@@ -837,8 +837,14 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       }
       case 'status': {
         let agents: TiloriConfig['agents'] = {};
+        let serverLine: string | null = null;
         try {
-          agents = loadConfig().agents ?? {};
+          const cfg = loadConfig();
+          agents = cfg.agents ?? {};
+          // Where a key may go (the only two URLs `headers` releases it to), so
+          // a mismatched pair, such as a prod Market URL on an Internal home,
+          // shows up here (Bastion 2ca643c7).
+          serverLine = `keys are sent only to: Tilori ${cfg.url ?? '(url not set)'}; Market ${cfg.market_url ?? '(market_url not set)'}`;
         } catch {
           // No readable config: status still reports, with the default stall time.
         }
@@ -859,6 +865,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
           );
           return 0;
         }
+        if (serverLine) console.log(serverLine);
         const router = socketIdentity() !== null;
         for (const handle of handles) {
           let stall: number | undefined;
