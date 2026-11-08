@@ -1,6 +1,6 @@
-import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { assertPrivate, ensurePrivateDir, tiloriHome, validateHandle, writePrivateFile } from './keys.ts';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { assertPrivate, ensurePrivateDir, HANDLE_RE, tiloriHome, validateHandle, writePrivateFile } from './keys.ts';
 import type {
   AgentSubscription,
   EventFilterInput,
@@ -322,6 +322,68 @@ export function loadConfig(path = configPath()): TiloriConfig {
 export function saveConfig(config: TiloriConfig, path = configPath()): void {
   ensurePrivateDir(tiloriHome());
   writePrivateFile(path, JSON.stringify(config, null, 2) + '\n');
+  // After config.json, so the sidecar is never older than the config it
+  // was made from (the plugin's helper checks that).
+  writeHeadersAllow(config, dirname(path));
+}
+
+/** The sidecar the plugin's sh-only headersHelper reads (UNI-769). */
+export const HEADERS_ALLOW = 'headers.allow';
+
+/**
+ * The text of `headers.allow`: a `default <agent>` line, then one
+ * `<agent> <server-url>` line for each agent with a key file and each URL
+ * `headers` would release that key to. Those URLs are "url" and
+ * "market_url", both as written and normalized (Claude Code passes the URL
+ * as the plugin config spells it), each kept only if `releasedEndpoint`
+ * accepts it: a bare market origin, which `buildMarketUrl` completes but the
+ * asked-URL check reads as a Tilori URL, is left out (Pax a89e3b48, Bastion
+ * fdbaf264). The helper only does exact string matches against this list,
+ * so it can never release more widely than `releasedEndpoint`. The file
+ * holds no secrets: handles and URLs only.
+ */
+export function headersAllowText(config: TiloriConfig, agents: string[]): string {
+  const urls = new Set<string>();
+  const add = (raw: string | undefined, norm: (r: string) => URL) => {
+    if (!raw) return;
+    let href: string;
+    try {
+      href = norm(raw).href;
+    } catch {
+      return; // `headers` would refuse it too.
+    }
+    for (const u of [raw, href]) if (/^https?:\/\/[^\s]+$/.test(u) && released(u)) urls.add(u);
+  };
+  // `releasedEndpoint` throws on an unusable config URL, where `headers`
+  // refuses too: nothing is listed for it, and saveConfig never fails here.
+  const released = (u: string) => {
+    try {
+      return releasedEndpoint(config, u) !== null;
+    } catch {
+      return false;
+    }
+  };
+  add(config.url, buildMcpUrl);
+  add(config.market_url, buildMarketUrl);
+  const lines: string[] = [];
+  const def = config.default_agent?.trim().toLowerCase();
+  if (def && HANDLE_RE.test(def)) lines.push(`default ${def}`);
+  for (const a of [...agents].sort()) for (const u of urls) lines.push(`${a} ${u}`);
+  return lines.join('\n') + (lines.length ? '\n' : '');
+}
+
+/** Rewrites `<home>/headers.allow` atomically at 0600 from `config` and the
+ * key files in `<home>/agents`. */
+export function writeHeadersAllow(config: TiloriConfig, home: string): void {
+  const dir = join(home, 'agents');
+  let agents: string[] = [];
+  if (existsSync(dir)) {
+    agents = readdirSync(dir)
+      .filter((f) => f.endsWith('.key'))
+      .map((f) => f.slice(0, -'.key'.length))
+      .filter((h) => HANDLE_RE.test(h));
+  }
+  writePrivateFile(join(home, HEADERS_ALLOW), headersAllowText(config, agents));
 }
 
 /** The agent this process acts for: explicit flag, then TILORI_AGENT, then default_agent. */

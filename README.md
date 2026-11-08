@@ -183,6 +183,7 @@ is a symlink, or is owned by another user):
 ```
 ~/.config/tilori/            0700
   config.json                0600   url, default_agent, per-agent settings (no secrets)
+  headers.allow              0600   written with config.json: `default <agent>` and `<agent> <url>` lines (no secrets)
   agents/<handle>.key        0600   that agent's shared key, one line
   pending/<handle>.json      0600   a `setup` registration waiting for its claim: the agent's
                                     key and the status URL; deleted once watch finishes it
@@ -191,6 +192,13 @@ is a symlink, or is owned by another user):
 Every write goes through one writer: the directory must be private, a
 symlink or non-file at the target is refused (lstat), and the text goes to a
 fresh 0600 temp file that is renamed over the target.
+
+`headers.allow` lists, for each agent with a key, every URL `headers` would
+release that key to (`url` and `market_url`, as written and normalized). The
+Claude plugin's sh-only helper releases a key only on an exact line match
+there, so MCP auth needs no runtime (UNI-769). tilori-agent rewrites the file
+whenever it saves config.json; after a hand edit of config.json the plugin
+falls back to `headers` until the next save.
 
 The same key file serves the router and the host's MCP connection. The Claude
 plugin reads it through a `headersHelper`, so the key never appears in
@@ -202,7 +210,7 @@ Requires [Bun](https://bun.sh) ≥ 1.1 and GitHub access to this private repo.
 Clone a release tag and link it:
 
 ```sh
-gh repo clone universal-market/tilori-agent ~/.local/share/tilori-agent -- --branch v0.1.30
+gh repo clone universal-market/tilori-agent ~/.local/share/tilori-agent -- --branch v0.1.31
 cd ~/.local/share/tilori-agent && bun install --frozen-lockfile && bun link
 # tilori-agent is now on PATH (~/.bun/bin). To upgrade: git fetch --tags && git checkout <new tag> && bun install && bun link
 ```
@@ -210,6 +218,11 @@ cd ~/.local/share/tilori-agent && bun install --frozen-lockfile && bun link
 Use the newest release tag. `bun install -g
 github:universal-market/tilori-agent` does **not** work for the private repo:
 it returns 404 even with a token (Pax confirmed).
+
+> The repo is now public, so the "private repo" wording above is stale; the
+> install docs are being rewritten separately. From the first tag after the
+> `release-binaries` workflow lands, releases also carry compiled executables
+> that need no Bun or Node (see [Release binaries](#release-binaries)).
 
 Then sign an agent in. No key to paste: `setup` uses Tilori's public
 register → claim → status flow (`docs/public-api.md` in universal_market):
@@ -588,6 +601,79 @@ is on `main`; and that SOURCE matches.
 
 For a tag pushed before the workflow existed, dispatch it on main:
 `gh workflow run release-hash.yml -R universal-market/tilori-agent --ref main -f tag=v0.1.6`.
+
+## Release binaries
+
+On every `v*` tag, the `release-binaries` workflow also builds the CLI as
+compiled single-file executables (`bun build --compile`, Bun 1.4.3), which
+run without Bun or Node, and attaches each with a `.sha256` file:
+
+| Asset | Platform |
+| --- | --- |
+| `tilori-agent-linux-x64` | Linux x86-64, glibc (Bun's baseline build: no AVX2 needed) |
+| `tilori-agent-linux-arm64` | Linux arm64, glibc |
+| `tilori-agent-darwin-x64` | macOS Intel (baseline build) |
+| `tilori-agent-darwin-arm64` | macOS Apple silicon |
+
+Download URL:
+`https://github.com/universal-market/tilori-agent/releases/download/<tag>/<asset>`,
+and `<asset>.sha256` beside it. Each `.sha256` file has the same `key=value`
+lines as `tilori-agent.js.sha256`, plus the asset name:
+
+```
+repo=universal-market/tilori-agent
+tag=v0.1.31
+commit=<40-hex commit of the tag>
+bun=1.4.3
+asset=tilori-agent-linux-x64
+sha256=<64-hex sha256 of the executable>
+```
+
+Each executable is cross-compiled on Linux against Bun's runtime for its
+target, downloaded from Bun's release and checked against sha256s pinned in
+the workflow. It ignores `.env`, `bunfig.toml`, `tsconfig.json` and
+`package.json` in the current directory (`--no-compile-autoload-*`), as the
+source launcher does by starting from `/` with `--no-env-file`. Before
+publishing, each one runs on a runner of its own platform: `--help` from `/`
+with a temp `HOME`, and a check that a hostile current directory (a
+`bunfig.toml` preload, a `.env` moving `TILORI_HOME`) has no effect. The
+macOS executables are not notarized; a browser download gets the quarantine
+flag, which `curl` and `gh` don't set.
+
+As with the bundle hash, an asset alone proves nothing. Check a release with
+the read-only script, which needs only `gh`:
+
+```sh
+sh scripts/verify-release-binaries.sh v0.1.31                                  # the .sha256 assets
+sh scripts/verify-release-binaries.sh v0.1.31 ./tilori-agent-darwin-arm64       # and a file you downloaded
+```
+
+It checks that `github-actions[bot]` uploaded each executable and `.sha256`;
+that GitHub's digest of each uploaded executable equals its `.sha256`; that a
+successful `release-binaries` run on the tag push, or a dispatch on `main`,
+logged the same tag, commit and sha256s; that the commit is the tag's and is
+on `main`; and that any file you pass matches its asset.
+
+The build is reproducible: the same commit, Bun version and runtime zips give
+byte-identical executables, whatever the checkout path. To rebuild one
+yourself, take the runtime zip and sha256 from the workflow, then from a
+checkout of the tag:
+
+```sh
+bun install --frozen-lockfile --ignore-scripts
+bun build src/cli.ts --compile --target=bun-darwin-arm64 \
+  --compile-executable-path path/to/bun-darwin-aarch64/bun \
+  --no-compile-autoload-dotenv --no-compile-autoload-bunfig \
+  --no-compile-autoload-tsconfig --no-compile-autoload-package-json \
+  --outfile tilori-agent-darwin-arm64
+```
+
+The output file name is part of the bytes, so keep the asset's name.
+
+For a tag pushed before the workflow existed, dispatch it on main:
+`gh workflow run release-binaries.yml -R universal-market/tilori-agent --ref main -f tag=v0.1.31`.
+A pull request that changes the workflow runs its build and smoke jobs, and
+never publishes.
 
 ## Measured (local `env:local` stack, 2026-10-27)
 
