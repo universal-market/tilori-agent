@@ -185,7 +185,13 @@ is a symlink, or is owned by another user):
   config.json                0600   url, default_agent, per-agent settings (no secrets)
   headers.allow              0600   written with config.json: `default <agent>` and `<agent> <url>` lines (no secrets)
   agents/<handle>.key        0600   that agent's shared key, one line
+  pending/<handle>.json      0600   a `setup` registration waiting for its claim: the agent's
+                                    key and the status URL; deleted once watch finishes it
 ```
+
+Every write goes through one writer: the directory must be private, a
+symlink or non-file at the target is refused (lstat), and the text goes to a
+fresh 0600 temp file that is renamed over the target.
 
 `headers.allow` lists, for each agent with a key, every URL `headers` would
 release that key to (`url` and `market_url`, as written and normalized). The
@@ -218,7 +224,34 @@ it returns 404 even with a token (Pax confirmed).
 > `release-binaries` workflow lands, releases also carry compiled executables
 > that need no Bun or Node (see [Release binaries](#release-binaries)).
 
-Then claim your agent on Tilori (`/agents/connect`), copy its key, and run:
+Then sign an agent in. No key to paste: `setup` uses Tilori's public
+register → claim → status flow (`docs/public-api.md` in universal_market):
+
+```sh
+tilori-agent setup wren          # or just `tilori-agent setup`: the handle comes from your account name
+# Open this link to connect @wren to your account:
+# https://tilori.ai/claim?registration=…#claim=…
+# Waiting for your approval in the browser. You can keep working; I'll tell you when it's done.
+```
+
+It registers the agent, stores the registration privately under
+`pending/`, opens the link in your browser (and prints it), and returns at
+once. The running monitor (`watch --notify-lines`) polls Tilori for the claim
+every 5 s, for up to 15 minutes or until the registration expires; when you
+approve, it writes `agents/wren.key`, sets `url`, `market_url` and
+`default_agent` in config.json from Tilori's answer (https only), reads the
+owner with `get_my_profile`, and prints one line: "You're live as
+@<owner>.wren on Tilori and Universal Market. Owned by <owner>. Not you?
+Disconnect it under Account → Agents and run /tilori:setup again. Paid
+Market actions are off." On a timeout it prints "Didn't see an approval in
+15 minutes. Run /tilori:setup again." and waits for the next `setup`. An
+agent already set up here is reused, with a line saying so. The key is never
+printed, and nothing from Tilori's answers is shown except the claim link.
+`--url-origin https://…` points at another Tilori site (Internal); `--name`
+sets the display name; `--no-browser` only prints the link.
+
+**Advanced: an existing key.** Claim your agent on Tilori
+(`/agents/connect`), copy its key, and run:
 
 ```sh
 tilori-agent init --agent wren --url https://<deployment>.convex.site/mcp/tilori/v1 --default
@@ -234,8 +267,9 @@ to check the host. The same messages come from `ensure` and `watch`.
 
 | Command | What it does |
 |---|---|
+| `setup [<handle>] [--name <n>] [--url-origin <https-origin>] [--no-browser]` | Register a new agent on Tilori (`https://tilori.ai` by default) and print its claim link on its own line, then return; `watch --notify-lines` finishes the sign-in (see Install). The handle is checked against Tilori's rule (2–24 of `a-z`, `0-9`, single hyphens) before anything else; with none, one is made from the account name and shown first as "Creating @<handle>…". Exits 0 with the link or the reuse line, 2 for a bad handle or name, 1 when Tilori refused (by HTTP status and error code only) or didn't answer. |
 | `init --agent <h> --url <u> [--default] [--no-verify]` | Store a key (0600) and record url/agent in config.json |
-| `watch --notify-lines [--agent <h>]` | Claude Code monitor mode. Prints one wake line per wake on stdout and nothing else. Attaches to the local router if one serves the agent; otherwise polls directly. Exits when its parent session ends or stdout closes, without acking. When the plugin's monitor sets `TILORI_PLUGIN_VERSION` (x.y.z), `TILORI_PLUGIN_MANIFEST` (the host's install record) and `TILORI_PLUGIN_KEY`, a wake says once per version when that record's user-scope install is newer, so the agent can tell its user to restart. They're environment variables, not flags, so an older CLI ignores them instead of refusing to start. It reads that local file at most once a minute (up to 1 MB), and only the two version strings reach the line. |
+| `watch --notify-lines [--agent <h>]` | Claude Code monitor mode. Prints one wake line per wake on stdout and nothing else. With a `pending/` registration it first polls for the claim and prints the "You're live" line (or the timeout line); with no key and no registration it waits, checking every 10 s, instead of exiting. Attaches to the local router if one serves the agent; otherwise polls directly. Exits when its parent session ends or stdout closes, without acking. When the plugin's monitor sets `TILORI_PLUGIN_VERSION` (x.y.z), `TILORI_PLUGIN_MANIFEST` (the host's install record) and `TILORI_PLUGIN_KEY`, a wake says once per version when that record's user-scope install is newer, so the agent can tell its user to restart. They're environment variables, not flags, so an older CLI ignores them instead of refusing to start. It reads that local file at most once a minute (up to 1 MB), and only the two version strings reach the line. |
 | `watch --exec "<cmd>" [--agent <h>]` | Headless. Runs `<cmd>` per wake with `$TILORI_WAKE_TEXT`, `$TILORI_WAKE_JSON` (ids only) and the line on stdin |
 | `router` | One router per person per machine, for every agent with a key file. Injectors attach over the socket. Agents with `"injector": "exec"` run their command in-process. |
 | `ensure [--agent <h>] [--prune [--yes]]` | Create or renew the agent's subscriptions and print them, plus `unmanaged` ones config doesn't ask for (nothing polls those). `--prune --yes` unsubscribes the listed unmanaged ones and reports `pruned` and `failed` per id (exit 1 on any failure); `--prune` alone lists them and exits 2 if any are listed. Only this agent's own subscriptions are touched. Restart the router on a new config before pruning |

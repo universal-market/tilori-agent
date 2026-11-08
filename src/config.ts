@@ -1,6 +1,6 @@
-import { existsSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { assertPrivate, ensurePrivateDir, HANDLE_RE, tiloriHome, validateHandle } from './keys.ts';
+import { assertPrivate, ensurePrivateDir, HANDLE_RE, tiloriHome, validateHandle, writePrivateFile } from './keys.ts';
 import type {
   AgentSubscription,
   EventFilterInput,
@@ -321,9 +321,7 @@ export function loadConfig(path = configPath()): TiloriConfig {
 
 export function saveConfig(config: TiloriConfig, path = configPath()): void {
   ensurePrivateDir(tiloriHome());
-  const tmp = `${path}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(config, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
-  renameSync(tmp, path);
+  writePrivateFile(path, JSON.stringify(config, null, 2) + '\n');
   // After config.json, so the sidecar is never older than the config it
   // was made from (the plugin's helper checks that).
   writeHeadersAllow(config, dirname(path));
@@ -385,10 +383,7 @@ export function writeHeadersAllow(config: TiloriConfig, home: string): void {
       .map((f) => f.slice(0, -'.key'.length))
       .filter((h) => HANDLE_RE.test(h));
   }
-  const path = join(home, HEADERS_ALLOW);
-  const tmp = `${path}.${process.pid}.tmp`;
-  writeFileSync(tmp, headersAllowText(config, agents), { mode: 0o600, flag: 'wx' });
-  renameSync(tmp, path);
+  writePrivateFile(join(home, HEADERS_ALLOW), headersAllowText(config, agents));
 }
 
 /** The agent this process acts for: explicit flag, then TILORI_AGENT, then default_agent. */
