@@ -247,8 +247,23 @@ describe('session-start identity lines', () => {
       expect(sessionIdentityLines(config(), 'wren', { CLAUDE_PLUGIN_OPTION_MARKET_URL: own })).toEqual([]);
       expect(sessionIdentityLines(config(), 'wren', { CLAUDE_PLUGIN_OPTION_MARKET_URL: `${own}/` })).toEqual([]);
       expect(sessionIdentityLines(config(), 'wren', { CLAUDE_PLUGIN_OPTION_MARKET_URL: ' ' })).toEqual([]);
-      expect(sessionIdentityLines({ url, default_agent: 'wren' }, 'wren', { CLAUDE_PLUGIN_OPTION_MARKET_URL: 'https://prod-market.example.test/mcp/v1' })).toEqual([]);
     });
+    test('no market_url in the home: says Market is off; names the exact entry only for a convex.site Tilori URL', () => {
+      const opt = { CLAUDE_PLUGIN_OPTION_MARKET_URL: 'https://prod-market.example.test/mcp/v1?q=secretish' };
+      const convex = sessionIdentityLines({ url: 'https://happy-otter-123.convex.site/mcp/tilori/v1?agent=x', default_agent: 'wren' }, 'wren', opt);
+      expect(convex).toHaveLength(1);
+      expect(convex[0]).toContain('this home has no "market_url" in ');
+      expect(convex[0]).toContain('add "market_url": "https://happy-otter-123.convex.site/mcp/v1" to that file by hand');
+      const other = sessionIdentityLines({ url: 'https://tilori.example.test/mcp/tilori/v1', default_agent: 'wren' }, 'wren', opt);
+      expect(other[0]).toContain(`add a "market_url" entry with their instance's Universal Market MCP URL (it ends in /mcp/v1)`);
+      expect(other[0]).not.toContain('tilori.example.test');
+      for (const l of [...convex, ...other]) {
+        expect(l).not.toContain('prod-market');
+        expect(l).not.toContain('secretish');
+        expect(l).not.toContain('agent=x');
+      }
+    });
+
     test('TILORI_MARKET_URL set: the option is not in use, so only the variable is reported', () => {
       const lines = sessionIdentityLines(config(), 'wren', { TILORI_MARKET_URL: own, CLAUDE_PLUGIN_OPTION_MARKET_URL: 'https://prod-market.example.test/mcp/v1' });
       expect(lines.join('\n')).not.toContain('Universal Market tools are off');

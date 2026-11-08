@@ -288,7 +288,8 @@ export function sessionIdentityLines(
 function marketOptionLine(config: TiloriConfig, agent: string, env: Record<string, string | undefined>): string | null {
   if (env.TILORI_MARKET_URL !== undefined) return null; // reported above
   const option = env.CLAUDE_PLUGIN_OPTION_MARKET_URL;
-  if (!option?.trim() || !config.market_url) return null;
+  if (!option?.trim()) return null;
+  if (!config.market_url) return missingMarketLine(config);
   let own: string;
   try {
     own = buildMarketUrl(config.market_url).toString();
@@ -299,6 +300,28 @@ function marketOptionLine(config: TiloriConfig, agent: string, env: Record<strin
   return (
     `- The Universal Market tools are off in this session: the plugin's market_url option names another deployment than this agent's Market (${own}, "market_url" in ${configPath()}), so the agent key is not sent there and that server answers 401 invalid_token. ` +
     `If the user wants Market, tell them to start this agent's sessions in their own terminal with \`sh ~/.claude/plugins/data/tilori-tilori-claude/tilori-agent claude --agent ${agent}\` (it passes this home's URLs to Claude Code; Claude Code's own arguments go after --), or to set the tilori plugin's market_url option to ${own} (/plugin, tilori, configure options) and restart. Don't change plugin settings yourself.`
+  );
+}
+
+/**
+ * No market_url in this home: the key goes to no Market, so the plugin's
+ * Market server gets the placeholder and answers 401. A Tilori URL on a
+ * Convex site has its Market on the same origin at /mcp/v1 (the server's
+ * resourceFor), so the line can name the exact entry; elsewhere (a public
+ * Tilori origin such as tilori.ai) the Market is on another host and the line
+ * only says what kind of URL to add. Only config.json's url is used.
+ */
+function missingMarketLine(config: TiloriConfig): string {
+  let entry = `a "market_url" entry with their instance's Universal Market MCP URL (it ends in ${MARKET_MCP_PATH})`;
+  try {
+    const tilori = buildMcpUrl(config.url);
+    if (tilori.hostname.endsWith('.convex.site')) entry = `"market_url": "${tilori.origin}${MARKET_MCP_PATH}"`;
+  } catch {
+    // No usable url: the generic wording.
+  }
+  return (
+    `- The Universal Market tools are off in this session: this home has no "market_url" in ${configPath()}, and the agent key is only sent to a Market URL recorded there, so the Market server gets no key and answers 401 invalid_token. ` +
+    `If the user wants Market, tell them to add ${entry} to that file by hand in their own terminal, then restart. Don't edit files under the Tilori home yourself.`
   );
 }
 

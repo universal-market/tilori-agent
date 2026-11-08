@@ -523,7 +523,10 @@ The plugin's `market` server otherwise uses its `market_url` option, which
 defaults to production's Market. The key is not sent there, so production
 answers `401 invalid_token` and Market stays off; the session start note
 then says so and names this home's own `market_url` (UNI-791). Either start
-with the launcher or set the plugin's `market_url` option to that URL.
+with the launcher or set the plugin's `market_url` option to that URL. A
+home with no `market_url` sends the key to no Market at all; the note then
+says what to add to `config.json` (for a Tilori URL on a `*.convex.site`
+origin, the same origin with `/mcp/v1`).
 
 ## Router protocol (local IPC)
 
