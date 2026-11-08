@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { spawn } from 'node:child_process';
-import { existsSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readdirSync, statSync } from 'node:fs';
+import { isAbsolute, join } from 'node:path';
 import { activityDir, promptSignal, readPushSignal, stallMinutes, statusLine, watchSignal } from './activity.ts';
 import { TiloriAgentClient, ToolRefused } from './client.ts';
 import {
@@ -73,7 +73,9 @@ Usage:
       Starts Claude Code for that Tilori home (default: this one), with its
       "url" and "market_url" passed as launch flags, so the plugin's Tilori
       and Market servers point at the deployment the agent was set up on,
-      whatever the plugin's own URL options say. The home must be the
+      whatever the plugin's own URL options say. Claude Code starts in the
+      directory this was run from ($TILORI_LAUNCH_CWD when the plugin's
+      run-agent.sh passes it). The home must be the
       default one or listed in "homes" in ~/.config/tilori/config.json,
       edited by hand: every command refuses a TILORI_HOME that isn't.
   tilori-agent watch --notify-lines [--agent <handle>]
@@ -327,7 +329,27 @@ function requireAgent(config: TiloriConfig, a: Args): string {
 const HOMELESS = new Set(['help', '--help', '-h']);
 
 /** The variables `claude` sets; any inherited value is dropped first. */
-const LAUNCH_VARS = ['TILORI_HOME', 'TILORI_MCP_URL', 'TILORI_MARKET_URL', 'TILORI_AGENT', 'TILORI_SOCKET', 'TILORI_URL'];
+const LAUNCH_VARS = ['TILORI_HOME', 'TILORI_MCP_URL', 'TILORI_MARKET_URL', 'TILORI_AGENT', 'TILORI_SOCKET', 'TILORI_URL', 'TILORI_LAUNCH_CWD'];
+
+/**
+ * The directory Claude Code starts in. The plugin's run-agent.sh does `cd /`
+ * before running this CLI (no project bunfig or .env may load), so it passes
+ * the caller's directory as TILORI_LAUNCH_CWD; without it, claude would start
+ * in `/`, ask to trust `/`, and `--resume` would look in the wrong project
+ * (UNI-795). Used only when it names an existing absolute directory;
+ * otherwise this process's own directory, as before.
+ */
+export function launchCwd(env: Record<string, string | undefined> = process.env, fallback = process.cwd()): string {
+  const want = env.TILORI_LAUNCH_CWD;
+  if (want && isAbsolute(want)) {
+    try {
+      if (statSync(want).isDirectory()) return want;
+    } catch {
+      // Gone or unreadable: fall back.
+    }
+  }
+  return fallback;
+}
 
 /**
  * `tilori-agent claude [--home <dir>]`: starts Claude Code for a Tilori home,
@@ -359,6 +381,7 @@ async function launchClaude(args: Args): Promise<number> {
   const inherited = { ...process.env };
   for (const k of LAUNCH_VARS) delete inherited[k];
   const child = spawn('claude', ['--settings', JSON.stringify({ env }), ...args.rest], {
+    cwd: launchCwd(),
     stdio: 'inherit',
     env: { ...inherited, ...env },
   });
