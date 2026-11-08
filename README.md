@@ -183,8 +183,16 @@ is a symlink, or is owned by another user):
 ```
 ~/.config/tilori/            0700
   config.json                0600   url, default_agent, per-agent settings (no secrets)
+  headers.allow              0600   written with config.json: `default <agent>` and `<agent> <url>` lines (no secrets)
   agents/<handle>.key        0600   that agent's shared key, one line
 ```
+
+`headers.allow` lists, for each agent with a key, every URL `headers` would
+release that key to (`url` and `market_url`, as written and normalized). The
+Claude plugin's sh-only helper releases a key only on an exact line match
+there, so MCP auth needs no runtime (UNI-769). tilori-agent rewrites the file
+whenever it saves config.json; after a hand edit of config.json the plugin
+falls back to `headers` until the next save.
 
 The same key file serves the router and the host's MCP connection. The Claude
 plugin reads it through a `headersHelper`, so the key never appears in
