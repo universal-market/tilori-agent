@@ -388,10 +388,11 @@ describe('watch: polling the claim', () => {
     await registered();
     const { outcome, lines, logs } = await poll('wren');
     expect(outcome).toEqual({ result: 'claimed', handle: 'wren' });
-    expect(lines).toEqual([LINES.live('don-zheng', 'wren')]);
+    expect(lines).toEqual([LINES.live('don-zheng', 'wren') + LINES.server(new URL(origin).host)]);
     expect(lines[0]).toBe(
       "You're live as @don-zheng.wren on Tilori and Universal Market. Owned by don-zheng. " +
-        'Not you? Disconnect it under Account → Agents and run /tilori:setup again. Paid Market actions are off.',
+        'Not you? Disconnect it under Account → Agents and run /tilori:setup again. Paid Market actions are off.' +
+        ` Server: ${new URL(origin).host}.`,
     );
     expect(state.statusCalls).toBe(3);
     expect(state.statusAuth.every((a) => a === `Bearer ${KEY}`)).toBe(true);
@@ -500,7 +501,7 @@ describe('watch: polling the claim', () => {
     await registered('wren');
     const { outcome, lines } = await poll('wren');
     expect(outcome).toEqual({ result: 'claimed', handle: 'wren2' });
-    expect(lines).toEqual([LINES.live('don-zheng', 'wren2')]);
+    expect(lines).toEqual([LINES.live('don-zheng', 'wren2') + LINES.server(new URL(origin).host)]);
     expect(existsSync(keyPath('wren2'))).toBe(true);
     expect(existsSync(keyPath('wren'))).toBe(false);
     expect(loadConfig().default_agent).toBe('wren2');
@@ -525,13 +526,13 @@ describe('watch: polling the claim', () => {
     await registered();
     state.profile = { username: 'Not A Username; rm -rf', handle: 'wren' };
     const a = await poll('wren');
-    expect(a.lines).toEqual([LINES.connected('wren')]);
+    expect(a.lines).toEqual([LINES.connected('wren') + LINES.server(new URL(origin).host)]);
     expect(a.lines[0]).not.toContain('rm -rf');
     rmSync(keyPath('wren'));
     await registered();
     state.profile = { username: 'don-zheng', handle: 'someone-else' };
     const b = await poll('wren');
-    expect(b.lines).toEqual([LINES.connected('wren')]);
+    expect(b.lines).toEqual([LINES.connected('wren') + LINES.server(new URL(origin).host)]);
     expect(existsSync(keyPath('wren'))).toBe(true);
   });
 
@@ -540,7 +541,7 @@ describe('watch: polling the claim', () => {
     await registered();
     const { outcome, lines } = await poll('wren');
     expect(outcome.result).toBe('claimed');
-    expect(lines[0]).toBe(LINES.live('don-zheng', 'wren') + LINES.otherServer);
+    expect(lines[0]).toBe(LINES.live('don-zheng', 'wren') + LINES.server(new URL(origin).host) + LINES.otherServer);
     expect(loadConfig()).toEqual({
       url: 'https://internal.example/mcp/tilori/v1',
       market_url: 'https://internal.example/mcp/v1',
@@ -617,7 +618,7 @@ describe('watch: waiting for a key', () => {
       },
     });
     expect(await agent).toBe('wren');
-    expect(lines).toEqual([LINES.live('don-zheng', 'wren')]);
+    expect(lines).toEqual([LINES.live('don-zheng', 'wren') + LINES.server(new URL(origin).host)]);
     expect(logs.filter((l) => /waiting for tilori-agent setup/.test(l))).toHaveLength(1);
     noSecret(lines.join('\n'), logs.join('\n'));
   });
@@ -690,7 +691,7 @@ describe('watch: waiting for a key', () => {
     p.kill();
     await p.exited;
     const err = await new Response(p.stderr).text();
-    expect(got.split('\n')[0]).toBe(LINES.live('don-zheng', 'wren'));
+    expect(got.split('\n')[0]).toBe(LINES.live('don-zheng', 'wren') + LINES.server(new URL(origin).host));
     noSecret(got, err);
     expect(readFileSync(keyPath('wren'), 'utf8')).toBe(KEY + '\n');
     expect(err).toContain('watching Tilori directly for wren');

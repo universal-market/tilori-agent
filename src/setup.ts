@@ -461,6 +461,8 @@ export const LINES = {
   /** The claimed handle already has a key here: it is never replaced (Bastion, tilori-agent#92). */
   keyExists: (handle: string) =>
     `@${handle} already has a key here, so the new one wasn't saved. Remove it first or run /tilori:setup with another handle.`,
+  /** Appended when the claim was on a server other than tilori.ai, so an unexpected one is visible (Bastion, tilori-agent#92). */
+  server: (host: string) => ` Server: ${host}.`,
   unusable: (handle: string, why: string) => `Tilori's answer for @${handle} couldn't be used (${why}). Run /tilori:setup again.`,
 } as const;
 
@@ -692,7 +694,8 @@ async function finishClaim(
   saveConfig(config);
   // Name the owner (Bastion's must-have 3): a hijacked claim shows here.
   const owner = await readOwner(ans.tilori, p.api_key, ans.handle, o);
-  return (owner ? LINES.live(owner, ans.handle) : LINES.connected(ans.handle)) + (sameServer ? '' : LINES.otherServer);
+  const host = ans.tilori.host === new URL(DEFAULT_ORIGIN).host ? '' : LINES.server(ans.tilori.host);
+  return (owner ? LINES.live(owner, ans.handle) : LINES.connected(ans.handle)) + host + (sameServer ? '' : LINES.otherServer);
 }
 
 async function readOwner(
