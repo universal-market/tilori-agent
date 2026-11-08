@@ -231,6 +231,45 @@ describe('session-start identity lines', () => {
     expect(lines.some((l) => l.startsWith('- TILORI_MARKET_URL is set but empty, so the market MCP server has no URL'))).toBe(true);
   });
 
+  describe('the plugin market_url option (UNI-791)', () => {
+    const own = 'https://market.example.test/mcp/v1';
+    test("production's default while this agent's Market is elsewhere: one line naming config.json's URL only", () => {
+      const lines = sessionIdentityLines(config(), 'wren', { CLAUDE_PLUGIN_OPTION_MARKET_URL: 'https://prod-market.example.test/mcp/v1?q=secretish' });
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('The Universal Market tools are off in this session');
+      expect(lines[0]).toContain(`(${own}, "market_url" in `);
+      expect(lines[0]).toContain('tilori-agent claude --agent wren');
+      expect(lines[0]).toContain(`set the tilori plugin's market_url option to ${own}`);
+      expect(lines[0]).not.toContain('prod-market');
+      expect(lines[0]).not.toContain('secretish');
+    });
+    test('the option matching market_url, an empty option, or no market_url: no line', () => {
+      expect(sessionIdentityLines(config(), 'wren', { CLAUDE_PLUGIN_OPTION_MARKET_URL: own })).toEqual([]);
+      expect(sessionIdentityLines(config(), 'wren', { CLAUDE_PLUGIN_OPTION_MARKET_URL: `${own}/` })).toEqual([]);
+      expect(sessionIdentityLines(config(), 'wren', { CLAUDE_PLUGIN_OPTION_MARKET_URL: ' ' })).toEqual([]);
+    });
+    test('no market_url in the home: says Market is off; names the exact entry only for a convex.site Tilori URL', () => {
+      const opt = { CLAUDE_PLUGIN_OPTION_MARKET_URL: 'https://prod-market.example.test/mcp/v1?q=secretish' };
+      const convex = sessionIdentityLines({ url: 'https://happy-otter-123.convex.site/mcp/tilori/v1?agent=x', default_agent: 'wren' }, 'wren', opt);
+      expect(convex).toHaveLength(1);
+      expect(convex[0]).toContain('this home has no "market_url" in ');
+      expect(convex[0]).toContain('add "market_url": "https://happy-otter-123.convex.site/mcp/v1" to that file by hand');
+      const other = sessionIdentityLines({ url: 'https://tilori.example.test/mcp/tilori/v1', default_agent: 'wren' }, 'wren', opt);
+      expect(other[0]).toContain(`add a "market_url" entry with their instance's Universal Market MCP URL (it ends in /mcp/v1)`);
+      expect(other[0]).not.toContain('tilori.example.test');
+      for (const l of [...convex, ...other]) {
+        expect(l).not.toContain('prod-market');
+        expect(l).not.toContain('secretish');
+        expect(l).not.toContain('agent=x');
+      }
+    });
+
+    test('TILORI_MARKET_URL set: the option is not in use, so only the variable is reported', () => {
+      const lines = sessionIdentityLines(config(), 'wren', { TILORI_MARKET_URL: own, CLAUDE_PLUGIN_OPTION_MARKET_URL: 'https://prod-market.example.test/mcp/v1' });
+      expect(lines.join('\n')).not.toContain('Universal Market tools are off');
+    });
+  });
+
   test('the lines never carry the key', () => {
     const h = makeHome('home-nokey');
     withEnv({ TILORI_HOME: h }, () => {
@@ -300,7 +339,7 @@ describe('the homes allow-list (Don, 11-07)', () => {
     }
     const help = Bun.spawnSync(['bun', cli, 'help'], { env: envWith({ TILORI_HOME: h }) });
     expect(help.exitCode).toBe(0);
-    expect(help.stdout.toString()).toContain('tilori-agent claude --home');
+    expect(help.stdout.toString()).toContain('tilori-agent claude [--home <dir>]');
   });
 
   test('status with no keys says to run init, and exits 0 (UNI-763)', () => {
@@ -409,12 +448,21 @@ describe('the homes allow-list (Don, 11-07)', () => {
       expect(r.rec.env.TILORI_AGENT).toBeUndefined();
     });
 
-    test('refuses an unlisted home, a missing --home and a second --settings, without starting claude', async () => {
+    test('without --home it uses the current home and passes its Market URL (UNI-791)', async () => {
+      const market = 'https://market.example/mcp/v1';
+      const h = makeHome('launch-default', { market_url: market });
+      const r = await runWith({ TILORI_HOME: h }, '--agent', 'wren');
+      expect(r.code).toBe(7);
+      expect(r.rec.env.TILORI_HOME).toBe(realpathSync(h));
+      expect(r.rec.env.TILORI_MARKET_URL).toBe(market);
+      expect(JSON.parse(r.rec.argv[1]).env.TILORI_MARKET_URL).toBe(market);
+    });
+
+    test('refuses an unlisted home and a second --settings, without starting claude', async () => {
       const h = join(dir, 'launch-unlisted');
       withEnv({ TILORI_HOME: h }, () => saveConfig({ url, default_agent: 'wren' }));
       for (const [argv, msg] of [
         [['--home', h], 'is not listed in "homes"'],
-        [[], 'claude needs --home'],
         [['--home', makeHome('launch-2'), '--', '--settings', '{}'], "sets Claude Code's --settings itself"],
         [['--home', makeHome('launch-3'), '--settings={}'], 'claude takes only --home and --agent'],
       ] as const) {

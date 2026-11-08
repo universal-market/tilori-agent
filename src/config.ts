@@ -270,7 +270,59 @@ export function sessionIdentityLines(
       );
     }
   }
+  const market = marketOptionLine(config, agent, env);
+  if (market) lines.push(market);
   return lines;
+}
+
+/**
+ * When no TILORI_MARKET_URL is set, the plugin's `market` server uses the
+ * plugin's market_url option, which defaults to production. An agent set up
+ * on another deployment has its own market_url in config.json, so the key is
+ * (rightly) not sent and Market stays disconnected with a bare 401 (UNI-791).
+ * Claude Code gives hooks the option as CLAUDE_PLUGIN_OPTION_MARKET_URL; when
+ * it isn't this home's Market, say what fixes it. The URL in the line is
+ * config.json's own, normalised; nothing from the option or the environment
+ * is printed (a repo can set either, UNI-773).
+ */
+function marketOptionLine(config: TiloriConfig, agent: string, env: Record<string, string | undefined>): string | null {
+  if (env.TILORI_MARKET_URL !== undefined) return null; // reported above
+  const option = env.CLAUDE_PLUGIN_OPTION_MARKET_URL;
+  if (!option?.trim()) return null;
+  if (!config.market_url) return missingMarketLine(config);
+  let own: string;
+  try {
+    own = buildMarketUrl(config.market_url).toString();
+  } catch {
+    return null; // a broken market_url is reported elsewhere
+  }
+  if (releasedEndpoint(config, option) === 'market') return null;
+  return (
+    `- The Universal Market tools are off in this session: the plugin's market_url option names another deployment than this agent's Market (${own}, "market_url" in ${configPath()}), so the agent key is not sent there and that server answers 401 invalid_token. ` +
+    `If the user wants Market, tell them to start this agent's sessions in their own terminal with \`sh ~/.claude/plugins/data/tilori-tilori-claude/tilori-agent claude --agent ${agent}\` (it passes this home's URLs to Claude Code; Claude Code's own arguments go after --), or to set the tilori plugin's market_url option to ${own} (/plugin, tilori, configure options) and restart. Don't change plugin settings yourself.`
+  );
+}
+
+/**
+ * No market_url in this home: the key goes to no Market, so the plugin's
+ * Market server gets the placeholder and answers 401. A Tilori URL on a
+ * Convex site has its Market on the same origin at /mcp/v1 (the server's
+ * resourceFor), so the line can name the exact entry; elsewhere (a public
+ * Tilori origin such as tilori.ai) the Market is on another host and the line
+ * only says what kind of URL to add. Only config.json's url is used.
+ */
+function missingMarketLine(config: TiloriConfig): string {
+  let entry = `a "market_url" entry with their instance's Universal Market MCP URL (it ends in ${MARKET_MCP_PATH})`;
+  try {
+    const tilori = buildMcpUrl(config.url);
+    if (tilori.hostname.endsWith('.convex.site')) entry = `"market_url": "${tilori.origin}${MARKET_MCP_PATH}"`;
+  } catch {
+    // No usable url: the generic wording.
+  }
+  return (
+    `- The Universal Market tools are off in this session: this home has no "market_url" in ${configPath()}, and the agent key is only sent to a Market URL recorded there, so the Market server gets no key and answers 401 invalid_token. ` +
+    `If the user wants Market, tell them to add ${entry} to that file by hand in their own terminal, then restart. Don't edit files under the Tilori home yourself.`
+  );
 }
 
 export function policyText(p: CoordinationPolicy, identity: string[] = []): string {
