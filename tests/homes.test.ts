@@ -316,6 +316,18 @@ describe('the homes allow-list (Don, 11-07)', () => {
     expect(p.stderr.toString()).toBe('');
   });
 
+  test('status names the two URLs a key may go to, so a mismatched pair shows (Bastion 2ca643c7)', () => {
+    const prodMarket = 'https://prod.example/mcp/v1';
+    const withMarket = makeHome('status-urls', { market_url: prodMarket });
+    const a = Bun.spawnSync(['bun', cli, 'status'], { env: envWith({ TILORI_HOME: withMarket }), stdin: 'ignore' });
+    expect(a.exitCode).toBe(0);
+    expect(a.stdout.toString()).toContain(`keys are sent only to: Tilori ${url}; Market ${prodMarket}\n`);
+    const noMarket = makeHome('status-urls-none');
+    const b = Bun.spawnSync(['bun', cli, 'status'], { env: envWith({ TILORI_HOME: noMarket }), stdin: 'ignore' });
+    expect(b.stdout.toString()).toContain(`keys are sent only to: Tilori ${url}; Market (market_url not set)\n`);
+    expect(a.stdout.toString() + b.stdout.toString() + a.stderr.toString()).not.toContain(KEY);
+  });
+
   test('--help and -h print the usage from any command and read no home (UNI-762)', () => {
     // An unlisted home: anything that read it would refuse with exit 1.
     const h = join(dir, 'unlisted-help');
