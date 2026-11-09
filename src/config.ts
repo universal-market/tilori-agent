@@ -513,8 +513,8 @@ export function sameEndpoint(a: URL, b: URL): boolean {
 /**
  * The only URL an agent key may be sent to: "url" in config.json. A --url
  * flag or $TILORI_URL may only repeat it; anything else fails closed before
- * a key is read, so a stray variable can never redirect the key. `init` is
- * the one place config.url is set, and it does not use this.
+ * a key is read, so a stray variable can never redirect the key. `init` and
+ * `connect` are the only places config.url is set, and neither uses this.
  */
 export function keyUrl(config: TiloriConfig, explicit?: string): URL {
   if (!config.url) throw new Error('No "url" in config.json; run tilori-agent init --url <tilori-mcp-url>.');

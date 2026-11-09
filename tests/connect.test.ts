@@ -7,7 +7,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { main } from '../src/cli.ts';
-import { CONNECT_LINES, LAUNCHER, runConnect, type ConnectOptions } from '../src/connect.ts';
+import { CONNECT_LINES, LAUNCHER, runConnect, shellWord, type ConnectOptions } from '../src/connect.ts';
 import { HEADERS_ALLOW, loadConfig, saveConfig } from '../src/config.ts';
 import { keyPath, writeKey } from '../src/keys.ts';
 import { FakeTilori } from './fake-tilori.ts';
@@ -258,11 +258,36 @@ describe('connect', () => {
     expect(r.code).toBe(1);
     expect(r.out).toBe(
       `This computer is set up for tilori.example. To switch it to 127.0.0.1:${http.port}, run this in a terminal: ` +
-        `${LAUNCHER} connect --url ${tiloriUrl} --replace. @wren will stop getting events here.`,
+        `${LAUNCHER} connect --url ${tiloriUrl} --market-url ${marketUrl} --replace. @wren will stop getting events here.`,
     );
     expect(state.hits).toBe(0);
     expect(existsSync(keyPath('plover'))).toBe(false);
     expect(loadConfig().url).toBe('https://tilori.example/mcp/tilori/v1');
+  });
+
+  test('the same Tilori address with another Market address is a switch too: refused without --replace, sends nothing (Bastion e10827a7)', async () => {
+    writeKey('wren', OLD_KEY);
+    saveConfig({ url: tiloriUrl, market_url: 'https://market.example/mcp/v1', default_agent: 'wren', agents: { wren: {} } });
+    const r = await connect();
+    expect(r.code).toBe(1);
+    expect(r.out).toBe(
+      `This computer is set up for 127.0.0.1:${http.port} with Market at market.example. To switch it to Market at 127.0.0.1:${http.port}, run this in a terminal: ` +
+        `${LAUNCHER} connect --url ${tiloriUrl} --market-url ${marketUrl} --replace. @wren will stop getting events here.`,
+    );
+    expect(state.hits).toBe(0);
+    expect(loadConfig().market_url).toBe('https://market.example/mcp/v1');
+    expect(readFileSync(join(process.env.TILORI_HOME!, HEADERS_ALLOW), 'utf8')).not.toContain(marketUrl);
+    // A home with no Market yet: adding one is a switch as well.
+    saveConfig({ url: tiloriUrl, default_agent: 'wren', agents: { wren: {} } });
+    const none = await connect();
+    expect(none.code).toBe(1);
+    expect(none.out).toContain('with no Market. To switch it to Market at');
+    expect(state.hits).toBe(0);
+    // With --replace, the old key is moved aside before the new Market gets anything.
+    const moved = await connect({ replace: true, now: () => Date.parse('2026-11-09T21:30:00Z') });
+    expect(moved.code).toBe(0);
+    expect(filesWith(OLD_KEY)).toEqual(['agents/wren.key.replaced-2026-11-09T21-30-00-000Z']);
+    expect(loadConfig().market_url).toBe(marketUrl);
   });
 
   test('--replace moves the other agents\' keys aside (not deleted), so nothing sends them to the new host', async () => {
@@ -278,6 +303,33 @@ describe('connect', () => {
     expect(config.default_agent).toBe('plover');
     expect(Object.keys(config.agents ?? {})).toEqual(['plover']);
     expect(readFileSync(join(process.env.TILORI_HOME!, HEADERS_ALLOW), 'utf8')).not.toContain('wren');
+  });
+
+  test('a switch says which trusted owners were carried over (Bastion a14a227d); a first connect says nothing', async () => {
+    expect((await connect()).out).not.toContain('Trusted owners');
+    rmSync(process.env.TILORI_HOME!, { recursive: true, force: true });
+    writeKey('wren', OLD_KEY);
+    saveConfig({ url: 'https://tilori.example/mcp/tilori/v1', default_agent: 'wren', agents: { wren: {} }, trusted_owners: ['adrian', 'sam-lee'] });
+    const r = await connect({ replace: true });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain(
+      `Trusted owners carried over: adrian, sam-lee. They may be different people on 127.0.0.1:${http.port}; edit trusted_owners in ${join(process.env.TILORI_HOME!, 'config.json')} if not.`,
+    );
+    expect(loadConfig().trusted_owners).toEqual(['adrian', 'sam-lee']);
+  });
+
+  test("the printed shell lines stay one word per address, even with a ' in it (Pax 79689db1)", async () => {
+    expect(shellWord('https://x.example/mcp/tilori/v1')).toBe('https://x.example/mcp/tilori/v1');
+    expect(shellWord("https://x.example/a'b")).toBe(`'https://x.example/a'\\''b'`);
+    const odd = `${tiloriUrl}#a'b c`;
+    writeKey('wren', OLD_KEY);
+    saveConfig({ url: 'https://tilori.example/mcp/tilori/v1', default_agent: 'wren' });
+    const r = await connect({ url: odd });
+    expect(r.code).toBe(1);
+    // The words after the launcher (whose ~ the shell would expand).
+    const line = r.out.slice(r.out.indexOf(LAUNCHER) + LAUNCHER.length + 1);
+    const argv = Bun.spawnSync(['sh', '-c', `set -- ${line.replace(/\. @wren.*$/, '')}; printf '%s\\n' "$@"`]).stdout.toString().trim().split('\n');
+    expect(argv).toEqual(['connect', '--url', new URL(odd).href, '--market-url', marketUrl, '--replace']);
   });
 
   test('the same deployment again needs no --replace (a new key for the agent)', async () => {

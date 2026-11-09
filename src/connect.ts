@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, readdirSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { isUnauthorized, KeyRejected, TiloriAgentClient } from './client.ts';
-import { buildMarketUrl, buildMcpUrl, loadConfig, sameEndpoint, saveConfig } from './config.ts';
+import { buildMarketUrl, buildMcpUrl, configPath, coordinationPolicy, loadConfig, sameEndpoint, saveConfig } from './config.ts';
 import { tiloriHome, validateHandle, writeKey } from './keys.ts';
 
 /**
@@ -20,6 +20,10 @@ import { tiloriHome, validateHandle, writeKey } from './keys.ts';
  *   body or header.
  * - A home already set up for another deployment is refused unless
  *   --replace (terminal only: the plugin's slash command never passes it).
+ *   Another deployment means another Tilori address or another Market
+ *   address (including a Market where none was set): the header helper
+ *   releases every agent's key here to both, so either is a trust anchor
+ *   (Bastion e10827a7).
  *   On --replace, the other agents' key files are moved aside, not deleted,
  *   so neither the router nor the header helper sends them to the new host.
  * - The plugin is told only the two addresses, through
@@ -53,19 +57,27 @@ export interface ConnectOptions {
   out: (line: string) => void;
 }
 
+/** One shell word: bare when it's plain URL characters, else single-quoted
+ * (Pax 79689db1: the printed lines are pasted into a shell). */
+export function shellWord(v: string): string {
+  return /^[A-Za-z0-9._~:/%@+=,-]+$/.test(v) ? v : `'${v.replaceAll("'", `'\\''`)}'`;
+}
+
 export const CONNECT_LINES = {
   noKey:
     'No agent key on stdin. Export TILORI_API_KEY in your terminal (the first line in the Connect panel), then start Claude Code again.',
   noMarket:
     "Run step 1 in the workspace's Connect panel first (the line with `claude plugin configure`), then try again.",
-  refuseOther: (current: string, wanted: string, url: string, old: string | undefined) =>
+  refuseOther: (current: string, wanted: string, url: string, market: string, old: string | undefined) =>
     `This computer is set up for ${current}. To switch it to ${wanted}, run this in a terminal: ` +
-    `${LAUNCHER} connect --url ${url} --replace` +
+    `${LAUNCHER} connect --url ${shellWord(url)} --market-url ${shellWord(market)} --replace` +
     (old ? `. @${old} will stop getting events here.` : '.'),
   connected: (tag: string, where: string) => `✓ Connected ${tag} to ${where}.`,
+  trustedCarried: (names: string[], host: string, path: string) =>
+    `Trusted owners carried over: ${names.join(', ')}. They may be different people on ${host}; edit trusted_owners in ${path} if not.`,
   restart: ['Quit Claude Code, then start it again without the key:', '  unset TILORI_API_KEY', '  claude'],
   configureByHand: (values: { tilori_url: string; market_url: string }) =>
-    `Couldn't set the plugin's addresses. Run this in a terminal, then start Claude Code again:\n  echo '${JSON.stringify(values)}' | claude plugin configure ${PLUGIN_ID} --values-stdin`,
+    `Couldn't set the plugin's addresses. Run this in a terminal, then start Claude Code again:\n  echo ${shellWord(JSON.stringify(values))} | claude plugin configure ${PLUGIN_ID} --values-stdin`,
 };
 
 /** Why a key check failed, naming only the host and the kind of failure. */
@@ -123,9 +135,22 @@ export async function runConnect(o: ConnectOptions): Promise<number> {
     try {
       current = buildMcpUrl(config.url);
     } catch {}
+    let currentMarket: URL | null = null;
+    try {
+      if (config.market_url) currentMarket = buildMarketUrl(config.market_url);
+    } catch {}
+    let from: string | null = null;
+    let to = '';
     if (!current || !sameEndpoint(current, url)) {
+      from = current?.host ?? config.url;
+      to = url.host;
+    } else if (!currentMarket || !sameEndpoint(currentMarket, market)) {
+      from = `${url.host} with ${currentMarket ? `Market at ${currentMarket.host}` : 'no Market'}`;
+      to = `Market at ${market.host}`;
+    }
+    if (from !== null) {
       if (!o.replace) {
-        o.out(CONNECT_LINES.refuseOther(current?.host ?? config.url, url.host, url.href, config.default_agent));
+        o.out(CONNECT_LINES.refuseOther(from, to, url.href, market.href, config.default_agent));
         return 1;
       }
       moving = true;
@@ -180,6 +205,10 @@ export async function runConnect(o: ConnectOptions): Promise<number> {
   const values = { tilori_url: url.href, market_url: market.href };
   const problem = o.configurePlugin ? await o.configurePlugin(values) : null;
   o.out(CONNECT_LINES.connected(username ? `@${username}.${handle}` : `@${handle}`, url.host));
+  // A switch keeps trusted_owners; usernames are per instance, so say so
+  // (Bastion a14a227d). Clearing them would be a trust-rule change (Don).
+  const trusted = coordinationPolicy(config, null).trusted_owners;
+  if (moving && trusted.length) o.out(CONNECT_LINES.trustedCarried(trusted, url.host, configPath()));
   if (problem) o.out(CONNECT_LINES.configureByHand(values));
   for (const line of CONNECT_LINES.restart) o.out(line);
   return 0;
