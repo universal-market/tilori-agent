@@ -44,6 +44,7 @@ import type { AgentSubscription } from './types.ts';
 import { UpdateNotice } from './update-notice.ts';
 import { LocalRefusal, UPLOAD_TIMEOUT_MS, fileInfo, parseBytes, upload } from './upload.ts';
 import { SetupInputError, awaitAgentKey, listPending, runSetup } from './setup.ts';
+import { configurePluginWithClaude, readPluginConfigFromClaude, runConnect } from './connect.ts';
 import { exitWhenOrphaned, runNotifyLines, signalDir } from './watch.ts';
 
 const USAGE = `tilori-agent: wake local coding agents on Tilori events
@@ -69,6 +70,17 @@ Usage:
       one other server the key may go to; --market-url none removes it. A new
       --url without --market-url also removes it, so a key never follows an
       old deployment's Market URL.
+  tilori-agent connect --url <tilori-mcp-url> [--market-url <market-mcp-url>] [--replace]
+      Sets this machine up for the agent whose key is on stdin, on that
+      deployment (such as a workspace), for plain \`claude\` with the tilori
+      plugin. The Market address comes from --market-url, else from the
+      plugin's market_url option when it isn't the production default. Both
+      are checked with the key before anything is written; then the key is
+      stored like init's, url and market_url are recorded, and the plugin's
+      tilori_url and market_url options are set (addresses only). A home set
+      up for another deployment is refused unless --replace, which moves its
+      other agents' key files aside (not deleted). The key is read only from
+      stdin, never from argv or an existing key file.
   tilori-agent claude [--home <dir>] [--agent <handle>] [-- <claude args>]
       Starts Claude Code for that Tilori home (default: this one), with its
       "url" and "market_url" passed as launch flags, so the plugin's Tilori
@@ -495,6 +507,21 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         saveConfig(config);
         log(`stored key for ${agent} at ${path} (0600); config at ${configPath()}`);
         return 0;
+      }
+      case 'connect': {
+        // UNI-818: one agent on one deployment (such as a workspace), from
+        // its key on stdin. The key is never taken from argv or a key file.
+        const key = await readSecretFromStdin('Agent key: ');
+        return await runConnect({
+          url: str(args, 'url'),
+          marketUrl: str(args, 'market-url'),
+          replace: args.flags.has('replace'),
+          key,
+          signal,
+          readPluginConfig: readPluginConfigFromClaude,
+          configurePlugin: configurePluginWithClaude,
+          out: (line) => process.stdout.write(line + '\n'),
+        });
       }
       case 'setup': {
         // Plugin part D: register → claim → status, no pasted key. The
