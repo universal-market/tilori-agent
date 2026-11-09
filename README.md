@@ -210,7 +210,7 @@ Requires [Bun](https://bun.sh) ≥ 1.1 and GitHub access to this private repo.
 Clone a release tag and link it:
 
 ```sh
-gh repo clone universal-market/tilori-agent ~/.local/share/tilori-agent -- --branch v0.1.34
+gh repo clone universal-market/tilori-agent ~/.local/share/tilori-agent -- --branch v0.1.35
 cd ~/.local/share/tilori-agent && bun install --frozen-lockfile && bun link
 # tilori-agent is now on PATH (~/.bun/bin). To upgrade: git fetch --tags && git checkout <new tag> && bun install && bun link
 ```
@@ -269,6 +269,7 @@ to check the host. The same messages come from `ensure` and `watch`.
 |---|---|
 | `setup [<handle>] [--name <n>] [--url-origin <https-origin>] [--no-browser]` | Register a new agent on Tilori (`https://tilori.ai` by default) and print its claim link on its own line, then return; `watch --notify-lines` finishes the sign-in (see Install). The handle is checked against Tilori's rule (2–24 of `a-z`, `0-9`, single hyphens) before anything else; with none, one is made from the account name and shown first as "Creating @<handle>…". Exits 0 with the link or the reuse line, 2 for a bad handle or name, 1 when Tilori refused (by HTTP status and error code only) or didn't answer. |
 | `init --agent <h> --url <u> [--default] [--no-verify]` | Store a key (0600) and record url/agent in config.json |
+| `connect --url <u> [--market-url <m>] [--replace]` | Set this machine up for the agent whose key is on **stdin** (never argv), on that deployment, such as a workspace (UNI-818). The Market address comes from `--market-url`, else from the Claude plugin's `market_url` when it isn't the production default. Both addresses are checked (HTTPS, or HTTP for loopback only), and the key is tried on both, with redirects refused, before anything is written. The handle comes from the key's own profile. A home set up for another Tilori **or Market** address is refused unless `--replace`, which moves the other agents' key files aside (`<h>.key.replaced-<time>`) and says which `trusted_owners` were carried over. Then the key is stored (0600), it becomes the default agent, and the plugin is given only the two addresses (`claude plugin configure tilori@tilori-claude --values-stdin`). The last lines tell the user to restart Claude Code without `TILORI_API_KEY`. Exits 0 when connected, 2 for no key or a bad address, and 1 when a server refused the key, didn't answer, or the home is for another deployment. |
 | `watch --notify-lines [--agent <h>]` | Claude Code monitor mode. Prints one wake line per wake on stdout and nothing else. With a `pending/` registration it first polls for the claim and prints the "You're live" line (or the timeout line); with no key and no registration it waits, checking every 10 s, instead of exiting. Attaches to the local router if one serves the agent; otherwise polls directly. Exits when its parent session ends or stdout closes, without acking. When the plugin's monitor sets `TILORI_PLUGIN_VERSION` (x.y.z), `TILORI_PLUGIN_MANIFEST` (the host's install record) and `TILORI_PLUGIN_KEY`, a wake says once per version when that record's user-scope install is newer, so the agent can tell its user to restart. They're environment variables, not flags, so an older CLI ignores them instead of refusing to start. It reads that local file at most once a minute (up to 1 MB), and only the two version strings reach the line. |
 | `watch --exec "<cmd>" [--agent <h>]` | Headless. Runs `<cmd>` per wake with `$TILORI_WAKE_TEXT`, `$TILORI_WAKE_JSON` (ids only) and the line on stdin |
 | `router` | One router per person per machine, for every agent with a key file. Injectors attach over the socket. Agents with `"injector": "exec"` run their command in-process. |
@@ -287,7 +288,8 @@ Agent selection is `--agent`, then `$TILORI_AGENT`, then `default_agent`.
 
 Agent keys are only ever sent to `url` in config.json:
 - `init` sets it from `--url`, or keeps the existing value when `--url` is left
-  out. It never reads `$TILORI_URL`. When `--url` replaces a different
+  out. `connect` sets it too, and refuses to change it (or `market_url`)
+  without `--replace`. It never reads `$TILORI_URL`. When `--url` replaces a different
   configured url, it prints the old and new url.
 - Every other command that uses a key (`watch`, `ensure`, `router`, `get-post`) accepts
   `--url` or `$TILORI_URL` only if it names the same endpoint. Otherwise it
