@@ -114,11 +114,33 @@ export function refKey(ref: EventRef): string {
   return `${ref.entity_type}:${ref.conversation_id ?? ref.entity_id}`;
 }
 
+/** A ref addressed to the agent: a mention, a DM or a reply to it. */
+const ADDRESSED_KINDS = new Set(['mention', 'dm.request', 'dm.message', 'dm.accepted']);
+
+/** Where a ref goes in a wake: addressed refs first, then the thread labels
+ * by THREAD_RANK (your turn, in your thread, a thread you're on), then the
+ * rest. A line names only the first MAX_REFS_IN_LINE, so a mention eleventh
+ * in a burst would otherwise be acknowledged unnamed (UNI-850; Lark
+ * 140bf917, Keel ee2f287c). */
+function wakeGroup(ref: EventRef): number {
+  if (ref.to_you || ADDRESSED_KINDS.has(ref.kind)) return 0;
+  if (ref.thread) return 4 - THREAD_RANK[ref.thread];
+  return 4;
+}
+
+/** A stable sort by wakeGroup: arrival order stands within each group. */
+export function wakeOrder(refs: EventRef[]): EventRef[] {
+  return refs
+    .map((ref, i) => ({ ref, i, g: wakeGroup(ref) }))
+    .sort((a, b) => a.g - b.g || a.i - b.i)
+    .map(({ ref }) => ref);
+}
+
 export function buildWake(agent: string, deliveries: AgentDelivery[], wakeId: string, direct?: ReadonlySet<string>): Wake {
   const wake: Wake = {
     wake_id: wakeId,
     agent,
-    events: dedupeRefs(toRefs(deliveries, direct)),
+    events: wakeOrder(dedupeRefs(toRefs(deliveries, direct))),
     resync_required: deliveries.some((d) => d.resync_required),
   };
   // Each delivery counts since the same mark: the highest stands for all.

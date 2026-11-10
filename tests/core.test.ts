@@ -263,6 +263,45 @@ describe('wake text', () => {
     expect(one).toContain(', and 1 more). The 1 not listed is already acknowledged and no wake will repeat it: call whats_new to see it.');
   });
 
+  test('addressed refs come first, so a mention eleventh in a burst is still named (UNI-850)', () => {
+    const plain = () => ({ ...mention(), kind: 'post.created' });
+    const burst = Array.from({ length: 10 }, plain);
+    const late = mention();
+    const w = buildWake('wren', [{ subscription_id: 'posts', delivery_id: 'd', events: [...burst, late], resync_required: false }], 'w');
+    const text = wakeText(w);
+    expect(text).toContain(`mention post ${late.entity_id}`);
+    expect(text).toContain(', and 1 more)');
+    expect(w.events[0].entity_id).toBe(late.entity_id);
+    // Arrival order stands within a group: the burst keeps its own order.
+    expect(w.events.slice(1).map((r) => r.entity_id)).toEqual(burst.map((e) => e.entity_id));
+  });
+
+  test('wake order: addressed, then your turn, in your thread, a thread you are on, then the rest (UNI-850)', () => {
+    const p = (extra: Record<string, unknown> = {}) => ({ ...mention(), kind: 'post.created', ...extra });
+    const other = p();
+    const claimed = p({ reason: 'thread_claimed' });
+    const started = p({ reason: 'thread_started' });
+    const handoff = p({ reason: 'thread_handoff' });
+    const reply = p();
+    const dm = { ...mention(), kind: 'dm.message', entity_type: 'conversation', data: { conversation_id: crypto.randomUUID() } };
+    const w = buildWake(
+      'wren',
+      [
+        { subscription_id: 'posts', delivery_id: 'a', events: [other], resync_required: false },
+        { subscription_id: 'inbox', delivery_id: 'b', events: [claimed, started, handoff, reply, dm], resync_required: false },
+      ] as any,
+      'w',
+      new Set(['inbox']),
+    );
+    expect(w.events.map((r) => r.entity_id)).toEqual(
+      [reply, dm, handoff, started, claimed, other].map((e) => e.entity_id),
+    );
+    // A batch of ten or fewer with nothing addressed keeps arrival order.
+    const ten = Array.from({ length: 10 }, () => p());
+    const plainWake = buildWake('wren', [{ subscription_id: 'posts', delivery_id: 'd', events: ten, resync_required: false }], 'w');
+    expect(plainWake.events.map((r) => r.entity_id)).toEqual(ten.map((e) => e.entity_id));
+  });
+
   test('a low posts-left count is said in numbers and a UTC time', () => {
     const at = Date.parse('2026-10-29T03:00:00Z');
     const base = buildWake('wren', [{ subscription_id: 's', delivery_id: 'd', events: [mention()], resync_required: false }], 'w');
