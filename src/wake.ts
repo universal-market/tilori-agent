@@ -1,6 +1,6 @@
 import { validReminderPrompt } from './config.ts';
 import { POLL_FAIL_REASONS } from './types.ts';
-import type { AgentDelivery, EventRef, PollFailReason, Wake } from './types.ts';
+import type { AgentDelivery, EventRef, PollFailReason, ThreadLabel, Wake } from './types.ts';
 
 /** Tilori public ids are UUIDs. Anything else is replaced, so a wake line can
  * never carry text an author controls. */
@@ -16,10 +16,14 @@ export const MAX_REFS_IN_LINE = 10;
 
 /** The server's `reason` on a thread copy, matched exactly (Bastion): any
  * other value, near-misses included, gives no label. */
-const THREAD_REASONS: Record<string, 'started' | 'claimed'> = {
+const THREAD_REASONS: Record<string, ThreadLabel> = {
   thread_started: 'started',
   thread_claimed: 'claimed',
+  thread_handoff: 'handoff',
 };
+/** Higher wins when one post carries several thread labels. */
+const THREAD_RANK: Record<ThreadLabel, number> = { started: 3, claimed: 2, handoff: 1 };
+const isThreadLabel = (v: unknown): v is ThreadLabel => typeof v === 'string' && Object.hasOwn(THREAD_RANK, v);
 /** The server's `quiet_since_mark` cap: 10 means 10 or more. */
 export const QUIET_CAP = 10;
 
@@ -91,12 +95,13 @@ export function dedupeRefs(refs: EventRef[]): EventRef[] {
   }
   // The same post on the public stream and in the inbox: whichever copy
   // stands keeps the inbox copy's label, the strongest one only (Juniper):
-  // reply to you, then in your thread, then in a thread you're on.
+  // reply to you, then in your thread, then in a thread you're on, then
+  // your turn.
   for (const ref of refs) {
     const kept = byEntity.get(refKey(ref))!;
     if (kept.kind !== 'post.created') continue;
     if (ref.to_you) kept.to_you = true;
-    else if (ref.thread === 'started' || (ref.thread === 'claimed' && !kept.thread)) kept.thread = ref.thread;
+    else if (ref.thread && (!kept.thread || THREAD_RANK[ref.thread] > THREAD_RANK[kept.thread])) kept.thread = ref.thread;
   }
   for (const ref of byEntity.values()) if (ref.to_you) delete ref.thread;
   return refs.filter((ref) => byEntity.get(refKey(ref)) === ref);
@@ -120,7 +125,7 @@ export function buildWake(agent: string, deliveries: AgentDelivery[], wakeId: st
   return wake;
 }
 
-const THREAD_LABEL = { started: 'in your thread', claimed: "in a thread you're on" } as const;
+const THREAD_LABEL: Record<ThreadLabel, string> = { started: 'in your thread', claimed: "in a thread you're on", handoff: 'your turn' };
 
 function describe(ref: EventRef): string {
   if (ref.entity_type === 'conversation') return `${ref.kind} conversation ${ref.conversation_id ?? ref.entity_id}`;
@@ -305,7 +310,7 @@ export function sanitizeWake(raw: any, agent: string): Wake | null {
     if (e?.conversation_id !== undefined) ref.conversation_id = safeId(e.conversation_id);
     if (ref.kind === 'post.created' && ref.entity_type === 'post') {
       if (e?.to_you === true) ref.to_you = true;
-      else if (e?.thread === 'started' || e?.thread === 'claimed') ref.thread = e.thread;
+      else if (isThreadLabel(e?.thread)) ref.thread = e.thread;
     }
     return ref;
   });
