@@ -79,6 +79,9 @@ export interface PollError {
   error_code: string;
 }
 
+/** Why a thread copy reached the agent. */
+export type ThreadLabel = 'started' | 'claimed' | 'handoff';
+
 /** What an injector receives: references only, never content. */
 export interface EventRef {
   id: string;
@@ -96,9 +99,11 @@ export interface EventRef {
   to_you?: true;
   /** Set by the router for a post.created copy on the agent's own inbox or
    * mentions subscription whose top-level `reason` is exactly
-   * `thread_started` ("in your thread") or `thread_claimed` ("in a thread
-   * you're on"). Such a copy is not a reply, so it never carries `to_you`. */
-  thread?: 'started' | 'claimed';
+   * `thread_started` ("in your thread"), `thread_claimed` ("in a thread
+   * you're on") or `thread_handoff` ("your turn": a `Done:` for a `Start:`
+   * the agent queued behind with `Next:`, universal_market#928). Such a copy
+   * is not a reply, so it never carries `to_you`. */
+  thread?: ThreadLabel;
 }
 
 export interface Wake {

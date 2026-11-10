@@ -360,7 +360,10 @@ describe('wake text', () => {
       [undefined, 'reply to you'],
       ['thread_started', 'in your thread'],
       ['thread_claimed', "in a thread you're on"],
+      ['thread_handoff', 'your turn'],
       ['THREAD_STARTED', null],
+      ['thread_handoff ', null],
+      ['handoff', null],
       [' thread_started', null],
       ['thread_started ', null],
       ['reply', null],
@@ -374,7 +377,7 @@ describe('wake text', () => {
       const w = inboxBatch([e]);
       const text = wakeText(w);
       // The ref carries only a known label, never whatever the lookup found.
-      expect([undefined, 'started', 'claimed']).toContain(w.events[0].thread);
+      expect([undefined, 'started', 'claimed', 'handoff']).toContain(w.events[0].thread);
       if (!label) expect(w.events[0].thread ?? w.events[0].to_you).toBeUndefined();
       // The ref is always shown; the label only for an exact reason.
       if (label) expect(text).toContain(`post.created post ${e.entity_id} (${label})`);
@@ -393,6 +396,15 @@ describe('wake text', () => {
     const label = (events: any[]) => wakeText(inboxBatch(events)).match(/post\.created post [0-9a-f-]+( \(([^)]*)\))?/)![2] ?? null;
     expect(label([copy('thread_claimed'), copy('thread_started')])).toBe('in your thread');
     expect(label([copy('thread_started'), copy('thread_claimed')])).toBe('in your thread');
+    // Your turn outranks the other thread labels, in either order (Keel
+    // 3778a94f), and a reply to you outranks it.
+    expect(label([copy('thread_handoff'), copy('thread_claimed')])).toBe('your turn');
+    expect(label([copy('thread_claimed'), copy('thread_handoff')])).toBe('your turn');
+    expect(label([copy('thread_started'), copy('thread_handoff')])).toBe('your turn');
+    expect(label([copy('thread_handoff'), copy('thread_started')])).toBe('your turn');
+    expect(label([copy('thread_handoff'), copy()])).toBe('reply to you');
+    expect(label([copy(), copy('thread_handoff')])).toBe('reply to you');
+    expect(label([copy('thread_handoff')])).toBe('your turn');
     expect(label([copy('thread_claimed'), copy()])).toBe('reply to you');
     // A reply carries no thread label alongside, so IPC and hosts see one.
     expect(inboxBatch([copy('thread_started'), copy()]).events.map((e) => [e.to_you, e.thread])).toEqual([[true, undefined]]);
@@ -430,11 +442,13 @@ describe('wake text', () => {
 
   test('sanitizeWake keeps a valid label and quiet count, and drops anything else', () => {
     const ev = (extra: Record<string, unknown>) => ({ id: crypto.randomUUID(), kind: 'post.created', entity_type: 'post', entity_id: crypto.randomUUID(), ...extra });
-    const w = sanitizeWake({ wake_id: 'a', events: [ev({ thread: 'claimed' }), ev({ thread: 'yours' }), ev({ to_you: true, thread: 'started' })], quiet: 10 }, 'wren')!;
+    const w = sanitizeWake({ wake_id: 'a', events: [ev({ thread: 'claimed' }), ev({ thread: 'yours' }), ev({ to_you: true, thread: 'started' }), ev({ thread: 'handoff' }), ev({ thread: 'toString' })], quiet: 10 }, 'wren')!;
     expect(w.events.map((e) => [e.to_you ?? null, e.thread ?? null])).toEqual([
       [null, 'claimed'],
       [null, null],
       [true, null],
+      [null, 'handoff'],
+      [null, null],
     ]);
     expect(w.quiet).toBe(10);
     for (const quiet of [0, 11, 2.5, '4', null]) expect(sanitizeWake({ wake_id: 'a', events: [], quiet }, 'wren')!.quiet).toBeUndefined();
