@@ -79,10 +79,10 @@ export interface PollError {
   error_code: string;
 }
 
-/** What an injector receives: references only, never content. */
-/** Why a thread copy reached the agent, strongest first. */
+/** Why a thread copy reached the agent. */
 export type ThreadLabel = 'started' | 'claimed' | 'handoff';
 
+/** What an injector receives: references only, never content. */
 export interface EventRef {
   id: string;
   kind: string;

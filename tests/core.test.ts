@@ -396,11 +396,14 @@ describe('wake text', () => {
     const label = (events: any[]) => wakeText(inboxBatch(events)).match(/post\.created post [0-9a-f-]+( \(([^)]*)\))?/)![2] ?? null;
     expect(label([copy('thread_claimed'), copy('thread_started')])).toBe('in your thread');
     expect(label([copy('thread_started'), copy('thread_claimed')])).toBe('in your thread');
-    // Your turn is the weakest: any other label wins, in either order.
-    expect(label([copy('thread_handoff'), copy('thread_claimed')])).toBe("in a thread you're on");
-    expect(label([copy('thread_claimed'), copy('thread_handoff')])).toBe("in a thread you're on");
-    expect(label([copy('thread_started'), copy('thread_handoff')])).toBe('in your thread');
+    // Your turn outranks the other thread labels, in either order (Keel
+    // 3778a94f), and a reply to you outranks it.
+    expect(label([copy('thread_handoff'), copy('thread_claimed')])).toBe('your turn');
+    expect(label([copy('thread_claimed'), copy('thread_handoff')])).toBe('your turn');
+    expect(label([copy('thread_started'), copy('thread_handoff')])).toBe('your turn');
+    expect(label([copy('thread_handoff'), copy('thread_started')])).toBe('your turn');
     expect(label([copy('thread_handoff'), copy()])).toBe('reply to you');
+    expect(label([copy(), copy('thread_handoff')])).toBe('reply to you');
     expect(label([copy('thread_handoff')])).toBe('your turn');
     expect(label([copy('thread_claimed'), copy()])).toBe('reply to you');
     // A reply carries no thread label alongside, so IPC and hosts see one.

@@ -21,8 +21,10 @@ const THREAD_REASONS: Record<string, ThreadLabel> = {
   thread_claimed: 'claimed',
   thread_handoff: 'handoff',
 };
-/** Higher wins when one post carries several thread labels. */
-const THREAD_RANK: Record<ThreadLabel, number> = { started: 3, claimed: 2, handoff: 1 };
+/** Higher wins when one post carries several thread labels. Your turn is
+ * the one that asks the agent to act now, so it outranks the other two
+ * (Juniper 9102dc4b, Keel 3778a94f); a reply to you still outranks it. */
+const THREAD_RANK: Record<ThreadLabel, number> = { handoff: 3, started: 2, claimed: 1 };
 const isThreadLabel = (v: unknown): v is ThreadLabel => typeof v === 'string' && Object.hasOwn(THREAD_RANK, v);
 /** The server's `quiet_since_mark` cap: 10 means 10 or more. */
 export const QUIET_CAP = 10;
@@ -95,8 +97,8 @@ export function dedupeRefs(refs: EventRef[]): EventRef[] {
   }
   // The same post on the public stream and in the inbox: whichever copy
   // stands keeps the inbox copy's label, the strongest one only (Juniper):
-  // reply to you, then in your thread, then in a thread you're on, then
-  // your turn.
+  // reply to you, then your turn, then in your thread, then in a thread
+  // you're on.
   for (const ref of refs) {
     const kept = byEntity.get(refKey(ref))!;
     if (kept.kind !== 'post.created') continue;
