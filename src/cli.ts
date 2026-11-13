@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { spawn } from 'node:child_process';
-import { accessSync, constants, existsSync, readdirSync, statSync } from 'node:fs';
-import { delimiter, isAbsolute, join } from 'node:path';
+import { existsSync, readdirSync, statSync } from 'node:fs';
+import { isAbsolute, join } from 'node:path';
 import { activityDir, promptSignal, readPushSignal, stallMinutes, statusLine, watchSignal } from './activity.ts';
 import { TiloriAgentClient, ToolRefused } from './client.ts';
 import {
@@ -45,6 +45,9 @@ import { UpdateNotice } from './update-notice.ts';
 import { LocalRefusal, UPLOAD_TIMEOUT_MS, fileInfo, parseBytes, upload } from './upload.ts';
 import { SetupInputError, awaitAgentKey, listPending, runSetup } from './setup.ts';
 import { configurePluginWithClaude, readPluginConfigFromClaude, runConnect } from './connect.ts';
+import { claudeBinary, syncPlugin, syncPluginAfterSave } from './plugin-sync.ts';
+
+export { claudeBinary } from './plugin-sync.ts';
 import { exitWhenOrphaned, runNotifyLines, signalDir } from './watch.ts';
 
 const USAGE = `tilori-agent: wake local coding agents on Tilori events
@@ -81,6 +84,13 @@ Usage:
       up for another deployment is refused unless --replace, which moves its
       other agents' key files aside (not deleted). The key is read only from
       stdin, never from argv or an existing key file.
+  tilori-agent sync-plugin
+      Sets the tilori plugin's tilori_url and market_url options to "url" and
+      "market_url" in config.json, so plain \`claude\` reaches this agent's
+      deployment, and prints what changed. It takes no arguments: config.json
+      is the only source. init and setup do the same when the plugin is
+      installed; this repairs options changed since. Default home only.
+      Restart Claude Code afterwards.
   tilori-agent claude [--home <dir>] [--agent <handle>] [-- <claude args>]
       Starts Claude Code for that Tilori home (default: this one), with its
       "url" and "market_url" passed as launch flags, so the plugin's Tilori
@@ -364,30 +374,6 @@ export function launchCwd(env: Record<string, string | undefined> = process.env,
 }
 
 /**
- * The absolute path of `claude` from PATH, skipping relative and empty PATH
- * entries. Claude Code now starts in the caller's project directory, and
- * spawn resolves a bare name against that cwd, so a relative entry would let
- * a `claude` file in the project run instead (Pax 833f4521). Works under
- * Bun, Node and the compiled binary alike.
- */
-export function claudeBinary(path = process.env.PATH ?? ''): string {
-  for (const dir of path.split(delimiter)) {
-    if (!dir || !isAbsolute(dir)) continue;
-    const candidate = join(dir, 'claude');
-    try {
-      const st = statSync(candidate);
-      if (st.isFile()) {
-        accessSync(candidate, constants.X_OK);
-        return candidate;
-      }
-    } catch {
-      // Not here.
-    }
-  }
-  throw new Error('Could not start claude: no claude executable in an absolute PATH directory.');
-}
-
-/**
  * `tilori-agent claude [--home <dir>]`: starts Claude Code for a Tilori home,
  * by default the current one (UNI-751, Don's decision; the default since
  * UNI-791, so an agent on a deployment other than production gets its own
@@ -506,7 +492,17 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         if (args.flags.has('default') || !config.default_agent) config.default_agent = agent;
         saveConfig(config);
         log(`stored key for ${agent} at ${path} (0600); config at ${configPath()}`);
+        // The plugin's address options follow config.json (UNI-882).
+        for (const line of await syncPluginAfterSave(config)) log(line);
         return 0;
+      }
+      case 'sync-plugin': {
+        // UNI-882: one way, from config.json only; takes no URL (Bastion e7060719).
+        if (args.positionals.length || [...args.flags.keys()].length)
+          throw new Error('sync-plugin takes no arguments: it reads the URLs from config.json.');
+        const r = await syncPlugin(loadConfig());
+        for (const line of r.lines) process.stdout.write(line + '\n');
+        return r.code;
       }
       case 'connect': {
         // UNI-818: one agent on one deployment (such as a workspace), from

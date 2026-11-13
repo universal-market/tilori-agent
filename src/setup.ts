@@ -3,6 +3,7 @@ import { existsSync, readdirSync, readFileSync, unlinkSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { join } from 'node:path';
 import { TiloriAgentClient } from './client.ts';
+import { syncPluginAfterSave } from './plugin-sync.ts';
 import {
   buildMarketUrl,
   buildMcpUrl,
@@ -695,7 +696,15 @@ async function finishClaim(
   // Name the owner (Bastion's must-have 3): a hijacked claim shows here.
   const owner = await readOwner(ans.tilori, p.api_key, ans.handle, o);
   const host = ans.tilori.host === new URL(DEFAULT_ORIGIN).host ? '' : LINES.server(ans.tilori.host);
-  return (owner ? LINES.live(owner, ans.handle) : LINES.connected(ans.handle)) + host + (sameServer ? '' : LINES.otherServer);
+  // The plugin's address options follow config.json (UNI-882). One line:
+  // the monitor flattens newlines.
+  const synced = sameServer ? await syncPluginAfterSave(config) : [];
+  return (
+    (owner ? LINES.live(owner, ans.handle) : LINES.connected(ans.handle)) +
+    host +
+    (sameServer ? '' : LINES.otherServer) +
+    (synced.length ? ' ' + synced.join(' ') : '')
+  );
 }
 
 async function readOwner(

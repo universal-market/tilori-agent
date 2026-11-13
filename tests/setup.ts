@@ -57,3 +57,9 @@ if (bad.length) {
     `Refusing to run tests: ${bad.join('; ')}, so a test could overwrite your real Tilori config and keys. Run \`bun run test\` (or sh scripts/check.sh), which uses a temp HOME.`,
   );
 }
+
+// No test runs the real `claude plugin configure` (UNI-882): by default the
+// plugin reads as not installed, so init and setup stay quiet. Tests that
+// need it install their own with setPluginIO.
+const { setPluginIO } = await import('../src/plugin-sync.ts');
+setPluginIO({ read: async () => null, configure: async () => 'not in tests' });
