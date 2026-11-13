@@ -1,9 +1,11 @@
-import { spawn } from 'node:child_process';
 import { existsSync, readdirSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { isUnauthorized, KeyRejected, TiloriAgentClient } from './client.ts';
 import { buildMarketUrl, buildMcpUrl, configPath, coordinationPolicy, loadConfig, sameEndpoint, saveConfig } from './config.ts';
 import { tiloriHome, validateHandle, writeKey } from './keys.ts';
+import { LAUNCHER, PLUGIN_ID, type PluginConfig } from './plugin-sync.ts';
+
+export { configurePluginWithClaude, LAUNCHER, PLUGIN_ID, readPluginConfigFromClaude, type PluginConfig } from './plugin-sync.ts';
 
 /**
  * `connect` (UNI-818): sets this machine up for one agent on a given
@@ -29,17 +31,6 @@ import { tiloriHome, validateHandle, writeKey } from './keys.ts';
  * - The plugin is told only the two addresses, through
  *   `claude plugin configure … --values-stdin`.
  */
-
-export const PLUGIN_ID = 'tilori@tilori-claude';
-/** The plugin's stable launcher, written at session start (write-launcher.sh). */
-export const LAUNCHER = '~/.claude/plugins/data/tilori-tilori-claude/tilori-agent';
-
-export interface PluginConfig {
-  /** The plugin's configured market_url, if set. */
-  market_url?: string;
-  /** The plugin's default market_url (production). */
-  market_default?: string;
-}
 
 export interface ConnectOptions {
   url: string | undefined;
@@ -213,44 +204,3 @@ export async function runConnect(o: ConnectOptions): Promise<number> {
   for (const line of CONNECT_LINES.restart) o.out(line);
   return 0;
 }
-
-/** Runs `claude plugin configure` with `input` on stdin; resolves to its
- * stdout, or null when it can't run or fails. Nothing secret is passed. */
-function claudePlugin(args: string[], input?: string): Promise<string | null> {
-  return new Promise((resolve) => {
-    let out = '';
-    let child;
-    try {
-      child = spawn('claude', ['plugin', 'configure', PLUGIN_ID, ...args], { stdio: ['pipe', 'pipe', 'ignore'], cwd: '/' });
-    } catch {
-      return resolve(null);
-    }
-    const timer = setTimeout(() => child.kill(), 30_000);
-    child.on('error', () => resolve(null));
-    child.stdout.on('data', (c) => (out += c));
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      resolve(code === 0 ? out : null);
-    });
-    child.stdin.end(input ?? '');
-  });
-}
-
-export async function readPluginConfigFromClaude(): Promise<PluginConfig | null> {
-  const raw = await claudePlugin(['--json']);
-  if (!raw) return null;
-  try {
-    const j = JSON.parse(raw);
-    const set = j?.inputs?.market_url;
-    const def = j?.schema?.market_url?.default;
-    return { market_url: typeof set === 'string' ? set : undefined, market_default: typeof def === 'string' ? def : undefined };
-  } catch {
-    return null;
-  }
-}
-
-export async function configurePluginWithClaude(values: { tilori_url: string; market_url: string }): Promise<string | null> {
-  const ok = await claudePlugin(['--values-stdin'], JSON.stringify(values));
-  return ok === null ? 'failed' : null;
-}
-

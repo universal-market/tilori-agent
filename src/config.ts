@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { assertPrivate, ensurePrivateDir, HANDLE_RE, tiloriHome, validateHandle, writePrivateFile } from './keys.ts';
+import { assertPrivate, ensurePrivateDir, HANDLE_RE, isOtherHome, tiloriHome, validateHandle, writePrivateFile } from './keys.ts';
 import type {
   AgentSubscription,
   EventFilterInput,
@@ -270,37 +270,51 @@ export function sessionIdentityLines(
       );
     }
   }
-  const market = marketOptionLine(config, agent, env);
-  if (market) lines.push(market);
+  lines.push(...optionLines(config, agent, env));
   return lines;
 }
 
 /**
- * When no TILORI_MARKET_URL is set, the plugin's `market` server uses the
- * plugin's market_url option, which defaults to production. An agent set up
- * on another deployment has its own market_url in config.json, so the key is
- * (rightly) not sent and Market stays disconnected with a bare 401 (UNI-791).
- * Claude Code gives hooks the option as CLAUDE_PLUGIN_OPTION_MARKET_URL; when
- * it isn't this home's Market, say what fixes it. The URL in the line is
- * config.json's own, normalised; nothing from the option or the environment
- * is printed (a repo can set either, UNI-773).
+ * When no TILORI_MCP_URL / TILORI_MARKET_URL is set, the plugin's servers use
+ * its tilori_url / market_url options. Claude Code gives hooks those as
+ * CLAUDE_PLUGIN_OPTION_TILORI_URL / _MARKET_URL. An option that isn't this
+ * home's own URL means that server gets no key and answers 401 (UNI-791), so
+ * say so and name the one command that fixes it (UNI-882; Juniper e1c06b90,
+ * 794a2c07): `sync-plugin` in the default home, the launcher in another.
+ * Nothing from the option or the environment is printed (a repo can set
+ * either, UNI-773); the URL shown is config.json's own, normalised.
  */
-function marketOptionLine(config: TiloriConfig, agent: string, env: Record<string, string | undefined>): string | null {
-  if (env.TILORI_MARKET_URL !== undefined) return null; // reported above
-  const option = env.CLAUDE_PLUGIN_OPTION_MARKET_URL;
-  if (!option?.trim()) return null;
-  if (!config.market_url) return missingMarketLine(config);
-  let own: string;
-  try {
-    own = buildMarketUrl(config.market_url).toString();
-  } catch {
-    return null; // a broken market_url is reported elsewhere
+function optionLines(config: TiloriConfig, agent: string, env: Record<string, string | undefined>): string[] {
+  const lines: string[] = [];
+  const servers = [
+    ['TILORI_MCP_URL', 'CLAUDE_PLUGIN_OPTION_TILORI_URL', 'tilori', 'tilori_url', 'url', 'Tilori'],
+    ['TILORI_MARKET_URL', 'CLAUDE_PLUGIN_OPTION_MARKET_URL', 'market', 'market_url', 'market_url', 'Universal Market'],
+  ] as const;
+  for (const [envName, optName, server, option, field, label] of servers) {
+    if (env[envName] !== undefined) continue; // reported above
+    const value = env[optName];
+    if (!value?.trim()) continue;
+    if (server === 'market' && !config.market_url) {
+      lines.push(missingMarketLine(config));
+      continue;
+    }
+    let own: string;
+    try {
+      own = (server === 'market' ? buildMarketUrl(config.market_url) : buildMcpUrl(config.url)).toString();
+    } catch {
+      continue; // a broken url is reported elsewhere
+    }
+    if (releasedEndpoint(config, value) === server) continue;
+    const fix = isOtherHome()
+      ? `start this agent's sessions in their own terminal with \`sh ~/.claude/plugins/data/tilori-tilori-claude/tilori-agent claude --home ${tiloriHome()} --agent ${agent}\` (it passes this home's URLs to Claude Code; Claude Code's own arguments go after --)`
+      : `run \`sh ~/.claude/plugins/data/tilori-tilori-claude/tilori-agent sync-plugin\` in their own terminal (it sets the plugin's URL options from ${configPath()}), then restart Claude Code`;
+    lines.push(
+      `- The ${label} tools are off in this session: the tilori plugin's ${option} option names another deployment than this agent's ${label} (${own}, "${field}" in ${configPath()}). ` +
+        `The agent key is only ever sent to the URL in that file, so it is not sent there, nothing leaked, and that server answers 401 invalid_token. ` +
+        `If the user wants ${label}, tell them to ${fix}. Don't change plugin settings yourself.`,
+    );
   }
-  if (releasedEndpoint(config, option) === 'market') return null;
-  return (
-    `- The Universal Market tools are off in this session: the plugin's market_url option names another deployment than this agent's Market (${own}, "market_url" in ${configPath()}), so the agent key is not sent there and that server answers 401 invalid_token. ` +
-    `If the user wants Market, tell them to start this agent's sessions in their own terminal with \`sh ~/.claude/plugins/data/tilori-tilori-claude/tilori-agent claude --agent ${agent}\` (it passes this home's URLs to Claude Code; Claude Code's own arguments go after --), or to set the tilori plugin's market_url option to ${own} (/plugin, tilori, configure options) and restart. Don't change plugin settings yourself.`
-  );
+  return lines;
 }
 
 /**
