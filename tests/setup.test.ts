@@ -8,7 +8,8 @@ import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { main } from '../src/cli.ts';
 import { configPath, loadConfig, saveConfig } from '../src/config.ts';
-import { keyPath, writeKey } from '../src/keys.ts';
+import { defaultTiloriHome, keyPath, writeKey } from '../src/keys.ts';
+import { SYNC_LINES, setPluginIO, wantedValues, type PluginValues } from '../src/plugin-sync.ts';
 import {
   LINES,
   allowedUrl,
@@ -549,6 +550,59 @@ describe('watch: polling the claim', () => {
       agents: { sol: {}, wren: {} },
     });
     expect(existsSync(keyPath('wren'))).toBe(true);
+  });
+
+  /** Runs `body` in the default Tilori home (the test's temp HOME), where
+   * the plugin's options are synced, with a fake Claude Code whose options
+   * are the production defaults. Puts that home and the fake back after. */
+  async function inDefaultHome(body: (calls: PluginValues[]) => Promise<void>) {
+    const was = process.env.TILORI_HOME;
+    const dir = defaultTiloriHome();
+    const cfg = join(dir, 'config.json');
+    const saved = existsSync(cfg) ? readFileSync(cfg, 'utf8') : null;
+    const calls: PluginValues[] = [];
+    setPluginIO({
+      read: async () => ({ tilori_default: 'https://tilori.ai/mcp/tilori/v1', market_default: 'https://prod.example.test/mcp/v1' }),
+      configure: async (v) => {
+        calls.push(v);
+        return null;
+      },
+    });
+    process.env.TILORI_HOME = dir;
+    try {
+      await body(calls);
+    } finally {
+      setPluginIO({ read: async () => null, configure: async () => 'not in tests' });
+      process.env.TILORI_HOME = was;
+      for (const sub of ['agents', 'pending']) rmSync(join(dir, sub), { recursive: true, force: true });
+      if (saved === null) rmSync(cfg, { force: true });
+      else writeFileSync(cfg, saved, { mode: 0o600 });
+    }
+  }
+
+  test('a claim on the same server sets the plugin options from config.json, on the one line (UNI-882)', async () => {
+    await inDefaultHome(async (calls) => {
+      await registered();
+      const { outcome, lines } = await poll('wren');
+      expect(outcome.result).toBe('claimed');
+      expect(calls).toEqual([wantedValues(loadConfig())]);
+      expect(calls[0].market_url).toBe(`${origin}/mcp/v1`);
+      expect(lines).toHaveLength(1);
+      expect(lines[0].startsWith(LINES.live('don-zheng', 'wren') + LINES.server(new URL(origin).host) + ' The tilori plugin now uses these URLs: ')).toBe(true);
+      expect(lines[0]).toContain(SYNC_LINES.restart);
+      expect(lines[0]).not.toContain('\n');
+      expect(lines[0]).not.toContain(KEY);
+    });
+  });
+
+  test('a claim on another server leaves the plugin options alone (UNI-882)', async () => {
+    await inDefaultHome(async (calls) => {
+      saveConfig({ url: 'https://internal.example/mcp/tilori/v1', market_url: 'https://internal.example/mcp/v1', default_agent: 'sol', agents: { sol: {} } });
+      await registered();
+      const { lines } = await poll('wren');
+      expect(calls).toEqual([]);
+      expect(lines).toEqual([LINES.live('don-zheng', 'wren') + LINES.server(new URL(origin).host) + LINES.otherServer]);
+    });
   });
 
   test('a default agent already set is kept; the new agent is added', async () => {

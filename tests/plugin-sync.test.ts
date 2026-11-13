@@ -3,6 +3,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Readable } from 'node:stream';
 import { saveConfig, type TiloriConfig } from '../src/config.ts';
 import { main } from '../src/cli.ts';
 import {
@@ -196,6 +197,41 @@ describe('sync-plugin command', () => {
     }
     expect(calls).toEqual([{ tilori_url: TILORI, market_url: MARKET }]);
     expect(out.join('')).toContain(SYNC_LINES.restart);
+  });
+});
+
+describe('init (Pax d4ff9930 on tilori-agent#106)', () => {
+  /** Runs the CLI with `input` on a piped stdin; returns its exit code and stderr. */
+  async function withStdin(input: string, argv: string[]) {
+    const stdin = Object.getOwnPropertyDescriptor(process, 'stdin')!;
+    Object.defineProperty(process, 'stdin', { value: Readable.from([input]), configurable: true });
+    const errs: string[] = [];
+    const w = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((c: string) => (errs.push(String(c)), true)) as typeof process.stderr.write;
+    try {
+      return { code: await main(argv), err: errs.join('') };
+    } finally {
+      process.stderr.write = w;
+      Object.defineProperty(process, 'stdin', stdin);
+    }
+  }
+
+  test('init sets the plugin options from the config it saved, and says so', async () => {
+    const calls = fake({ ...prodDefaults });
+    const r = await withStdin(KEY + '\n', ['init', '--agent', 'wren', '--url', TILORI, '--market-url', MARKET, '--no-verify']);
+    expect(r.code).toBe(0);
+    expect(calls).toEqual([{ tilori_url: TILORI, market_url: MARKET }]);
+    expect(r.err).toContain('The tilori plugin now uses these URLs:');
+    expect(r.err).toContain(SYNC_LINES.restart);
+    expect(r.err).not.toContain(KEY);
+  });
+
+  test('init stays quiet when the plugin is not installed', async () => {
+    const calls = fake(null);
+    const r = await withStdin(KEY + '\n', ['init', '--agent', 'wren', '--url', TILORI, '--no-verify']);
+    expect(r.code).toBe(0);
+    expect(calls).toEqual([]);
+    expect(r.err).not.toContain('tilori plugin');
   });
 });
 
