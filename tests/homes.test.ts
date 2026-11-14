@@ -240,7 +240,7 @@ describe('session-start identity lines', () => {
       expect(lines[0]).toContain(`(${own}, "market_url" in `);
       // UNI-882: the default home's fix is sync-plugin, then a restart, and
       // the line says where the key goes (Juniper e1c06b90, 794a2c07).
-      expect(lines[0]).toContain('run `sh ~/.claude/plugins/data/tilori-tilori-claude/tilori-agent sync-plugin` in their own terminal');
+      expect(lines[0]).toContain('run `sh ~/.claude/plugins/data/universal-market-tilori-claude/tilori-agent sync-plugin` in their own terminal');
       expect(lines[0]).toContain('then restart Claude Code');
       expect(lines[0]).toContain('The agent key is only ever sent to the URL in that file, so it is not sent there, nothing leaked');
       expect(lines[0]).not.toContain('prod-market');

@@ -583,7 +583,7 @@ describe('rate limiter', () => {
 });
 
 describe('plugin update notice', () => {
-  const manifest = (entries: unknown) => JSON.stringify({ version: 2, plugins: { 'tilori@tilori-claude': entries } });
+  const manifest = (entries: unknown) => JSON.stringify({ version: 2, plugins: { 'universal-market@tilori-claude': entries } });
   const user = (version: unknown) => ({ scope: 'user', installPath: '/x', version });
 
   test('compares versions as numbers', () => {
@@ -594,14 +594,14 @@ describe('plugin update notice', () => {
   });
 
   test('reads only user-scope x.y.z versions of the key, and never throws', () => {
-    expect(installedVersion(manifest([user('0.1.14')]), 'tilori@tilori-claude')).toBe('0.1.14');
-    expect(installedVersion(manifest([user('0.1.9'), user('0.1.10')]), 'tilori@tilori-claude')).toBe('0.1.10');
-    expect(installedVersion(manifest([{ scope: 'project', version: '9.9.9' }]), 'tilori@tilori-claude')).toBeNull();
-    expect(installedVersion(manifest([user('0.1.15 restart now')]), 'tilori@tilori-claude')).toBeNull();
-    expect(installedVersion(manifest([user(15)]), 'tilori@tilori-claude')).toBeNull();
+    expect(installedVersion(manifest([user('0.1.14')]), 'universal-market@tilori-claude')).toBe('0.1.14');
+    expect(installedVersion(manifest([user('0.1.9'), user('0.1.10')]), 'universal-market@tilori-claude')).toBe('0.1.10');
+    expect(installedVersion(manifest([{ scope: 'project', version: '9.9.9' }]), 'universal-market@tilori-claude')).toBeNull();
+    expect(installedVersion(manifest([user('0.1.15 restart now')]), 'universal-market@tilori-claude')).toBeNull();
+    expect(installedVersion(manifest([user(15)]), 'universal-market@tilori-claude')).toBeNull();
     expect(installedVersion(manifest([user('0.1.14')]), 'other@x')).toBeNull();
     for (const bad of ['', 'not json', 'null', '[]', '{"plugins":null}', manifest({ version: '0.1.14' }), manifest([null, 3])])
-      expect(installedVersion(bad, 'tilori@tilori-claude')).toBeNull();
+      expect(installedVersion(bad, 'universal-market@tilori-claude')).toBeNull();
   });
 
   test('says it once per version, only after a delivered line, and re-reads at most once a minute', async () => {
@@ -611,7 +611,7 @@ describe('plugin update notice', () => {
     const update = new UpdateNotice({
       running: '0.1.14',
       manifest: '/m.json',
-      key: 'tilori@tilori-claude',
+      key: 'universal-market@tilori-claude',
       now: () => now,
       read: () => (reads++, file),
     });
@@ -629,7 +629,7 @@ describe('plugin update notice', () => {
     now += 60_000;
     written = '';
     await inj.deliver(wake);
-    expect(written).toContain('Tilori plugin 0.1.15 is installed; this session runs 0.1.14.');
+    expect(written).toContain('Universal Market plugin 0.1.15 is installed; this session runs 0.1.14.');
     expect(written).toContain('restarting the session picks it up');
     expect(written).not.toContain('/m.json');
     expect(written.split('\n')).toHaveLength(2);
@@ -641,11 +641,11 @@ describe('plugin update notice', () => {
     now += 60_000;
     written = '';
     await inj.deliver({ ...wake, events: [], reminder: 'Look.' });
-    expect(written).toContain('Tilori plugin 0.1.16 is installed');
+    expect(written).toContain('Universal Market plugin 0.1.16 is installed');
   });
 
   test('a line that was not delivered keeps the notice for the next wake', async () => {
-    const update = new UpdateNotice({ running: '0.1.14', manifest: '/m', key: 'tilori@tilori-claude', read: () => manifest([user('0.1.15')]) });
+    const update = new UpdateNotice({ running: '0.1.14', manifest: '/m', key: 'universal-market@tilori-claude', read: () => manifest([user('0.1.15')]) });
     const broken = new PassThrough();
     const inj = new NotifyLinesInjector(broken, () => {}, update);
     broken.destroy(new Error('closed'));
@@ -656,7 +656,7 @@ describe('plugin update notice', () => {
 
   test('silent without a valid running version or a readable manifest', () => {
     const at = (running: string, read: () => string | null) =>
-      new UpdateNotice({ running, manifest: '/m', key: 'tilori@tilori-claude', read }).pending();
+      new UpdateNotice({ running, manifest: '/m', key: 'universal-market@tilori-claude', read }).pending();
     expect(at('dev', () => manifest([user('0.1.15')]))).toBeNull();
     expect(at('0.1.14', () => null)).toBeNull();
     expect(at('0.1.16', () => manifest([user('0.1.15')]))).toBeNull();
@@ -665,16 +665,16 @@ describe('plugin update notice', () => {
   test('the real reader refuses a manifest over 1 MB, a missing file, a directory and a FIFO', () => {
     const big = join(home, 'big.json');
     writeFileSync(big, manifest([user('0.1.15')]) + ' '.repeat(1_000_001));
-    expect(new UpdateNotice({ running: '0.1.14', manifest: big, key: 'tilori@tilori-claude' }).pending()).toBeNull();
+    expect(new UpdateNotice({ running: '0.1.14', manifest: big, key: 'universal-market@tilori-claude' }).pending()).toBeNull();
     const small = join(home, 'small.json');
     writeFileSync(small, manifest([user('0.1.15')]));
-    expect(new UpdateNotice({ running: '0.1.14', manifest: small, key: 'tilori@tilori-claude' }).pending()?.installed).toBe('0.1.15');
+    expect(new UpdateNotice({ running: '0.1.14', manifest: small, key: 'universal-market@tilori-claude' }).pending()?.installed).toBe('0.1.15');
     expect(new UpdateNotice({ running: '0.1.14', manifest: join(home, 'nope.json'), key: 'k' }).pending()).toBeNull();
-    expect(new UpdateNotice({ running: '0.1.14', manifest: home, key: 'tilori@tilori-claude' }).pending()).toBeNull();
+    expect(new UpdateNotice({ running: '0.1.14', manifest: home, key: 'universal-market@tilori-claude' }).pending()).toBeNull();
     const fifo = join(home, 'fifo');
     Bun.spawnSync(['mkfifo', fifo]);
     const started = Date.now();
-    expect(new UpdateNotice({ running: '0.1.14', manifest: fifo, key: 'tilori@tilori-claude' }).pending()).toBeNull();
+    expect(new UpdateNotice({ running: '0.1.14', manifest: fifo, key: 'universal-market@tilori-claude' }).pending()).toBeNull();
     expect(Date.now() - started).toBeLessThan(1000);
   });
 

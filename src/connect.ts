@@ -10,7 +10,7 @@ export { configurePluginWithClaude, LAUNCHER, PLUGIN_ID, readPluginConfigFromCla
 /**
  * `connect` (UNI-818): sets this machine up for one agent on a given
  * deployment, such as a workspace, from that agent's key, so plain `claude`
- * with the tilori plugin reaches it. Design 6f1f7b12; Bastion's conditions
+ * with the Universal Market plugin reaches it. Design 6f1f7b12; Bastion's conditions
  * 6b60e223 and 3a28226a; Juniper's copy d58ee772, cdc55f38 and 31f9eb9b.
  *
  * - The key comes only from stdin (the caller passes what it read), never

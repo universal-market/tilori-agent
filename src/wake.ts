@@ -257,7 +257,7 @@ function updateText(wake: Wake): string {
   const ok = (v: unknown) => typeof v === 'string' && /^\d{1,6}\.\d{1,6}\.\d{1,6}$/.test(v);
   if (!u || !ok(u.installed) || !ok(u.running)) return '';
   return (
-    ` Tilori plugin ${u.installed} is installed; this session runs ${u.running}.` +
+    ` Universal Market plugin ${u.installed} is installed; this session runs ${u.running}.` +
     ` Tell your user that restarting the session picks it up.`
   );
 }

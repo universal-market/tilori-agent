@@ -392,7 +392,7 @@ describe('watch: polling the claim', () => {
     expect(lines).toEqual([LINES.live('don-zheng', 'wren') + LINES.server(new URL(origin).host)]);
     expect(lines[0]).toBe(
       "You're live as @don-zheng.wren on Tilori and Universal Market. Owned by don-zheng. " +
-        'Not you? Disconnect it under Account → Agents and run /tilori:setup again. Paid Market actions are off.' +
+        'Not you? Disconnect it under Account → Agents and run /universal-market:setup again. Paid Market actions are off.' +
         ` Server: ${new URL(origin).host}.`,
     );
     expect(state.statusCalls).toBe(3);
@@ -446,7 +446,7 @@ describe('watch: polling the claim', () => {
     await registered();
     const { outcome, lines, logs } = await poll('wren', { deadlineMs: 60 });
     expect(outcome).toEqual({ result: 'timeout' });
-    expect(lines).toEqual(["Didn't see an approval in 15 minutes. Run /tilori:setup again."]);
+    expect(lines).toEqual(["Didn't see an approval in 15 minutes. Run /universal-market:setup again."]);
     expect(existsSync(keyPath('wren'))).toBe(false);
     expect(existsSync(pendingPath('wren'))).toBe(false);
     noSecret(lines.join('\n'), logs.join('\n'));
@@ -588,7 +588,7 @@ describe('watch: polling the claim', () => {
       expect(calls).toEqual([wantedValues(loadConfig())]);
       expect(calls[0].market_url).toBe(`${origin}/mcp/v1`);
       expect(lines).toHaveLength(1);
-      expect(lines[0].startsWith(LINES.live('don-zheng', 'wren') + LINES.server(new URL(origin).host) + ' The tilori plugin now uses these URLs: ')).toBe(true);
+      expect(lines[0].startsWith(LINES.live('don-zheng', 'wren') + LINES.server(new URL(origin).host) + ' The Universal Market plugin now uses these URLs: ')).toBe(true);
       expect(lines[0]).toContain(SYNC_LINES.restart);
       expect(lines[0]).not.toContain('\n');
       expect(lines[0]).not.toContain(KEY);

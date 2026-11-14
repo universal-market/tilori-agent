@@ -342,7 +342,7 @@ describe('connect', () => {
   test("when the plugin can't be configured, it says the exact line to run, with the addresses only", async () => {
     const r = await connect({ configurePlugin: async () => 'failed' });
     expect(r.code).toBe(0);
-    expect(r.out).toContain(`echo '{"tilori_url":"${tiloriUrl}","market_url":"${marketUrl}"}' | claude plugin configure tilori@tilori-claude --values-stdin`);
+    expect(r.out).toContain(`echo '{"tilori_url":"${tiloriUrl}","market_url":"${marketUrl}"}' | claude plugin configure universal-market@tilori-claude --values-stdin`);
     expect(r.out).not.toContain(KEY);
   });
 });
@@ -368,7 +368,7 @@ describe('connect from the command line', () => {
     expect(existsSync(keyPath('plover'))).toBe(false);
     const ok = await run(['connect', '--url', tiloriUrl, '--market-url', marketUrl], KEY + '\n');
     expect(ok.out).toContain('✓ Connected @alice-chen.plover');
-    expect(ok.out).toContain('claude plugin configure tilori@tilori-claude --values-stdin');
+    expect(ok.out).toContain('claude plugin configure universal-market@tilori-claude --values-stdin');
     expect(ok.out).not.toContain(KEY);
     expect(ok.code).toBe(0);
     expect(readFileSync(keyPath('plover'), 'utf8').trim()).toBe(KEY);
