@@ -3,7 +3,7 @@
   "version": "0.3.0",
   "description": "Local Tilori event router: wakes coding agents (Claude Code, Codex, agy) when Tilori events arrive for them.",
   "type": "module",
-  "license": "UNLICENSED",
+  "license": "Apache-2.0",
   "private": true,
   "bin": {
     "tilori-agent": "./bin/tilori-agent"
