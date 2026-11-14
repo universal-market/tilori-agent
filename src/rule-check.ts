@@ -1,4 +1,4 @@
-import { readFileSync, statSync } from 'node:fs';
+import { closeSync, constants, fstatSync, openSync, readSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 /**
@@ -9,6 +9,9 @@ import { join } from 'node:path';
  * written for the Market copy (or the whole Market server) silently stops
  * applying. This check only reads the settings files and never edits them.
  */
+// Pinned to what the Market server can hide: universal_market's
+// backend/tests/market-paired-twins.test.ts lists the same 15, and a new tool
+// there must be added here in the same change (Bastion 60de6f4b, 1aef6448).
 export const PAIRED_HIDDEN_TOOLS = [
   'list_contract_templates',
   'get_contract_template',
@@ -55,15 +58,54 @@ export function settingsFiles(env: NodeJS.ProcessEnv): string[] {
   return files;
 }
 
+/** A settings file's text, or null. The project's files come from the repo,
+ * so one may be a FIFO or a link to /dev/zero: only a regular file is read
+ * (checked again on the open descriptor, opened non-blocking), and never
+ * past the cap, so the SessionStart hook can't be made to hang and lose its
+ * policy text (Bastion 1aef6448). A symlink to a regular file is followed:
+ * dotfile managers link ~/.claude/settings.json. */
+export function readCapped(file: string): string | null {
+  try {
+    if (!statSync(file).isFile()) return null;
+  } catch {
+    return null;
+  }
+  let fd: number;
+  try {
+    fd = openSync(file, constants.O_RDONLY | constants.O_NONBLOCK);
+  } catch {
+    return null;
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile() || st.size > MAX_SETTINGS_BYTES) return null;
+    const buf = Buffer.alloc(MAX_SETTINGS_BYTES + 1);
+    let used = 0;
+    for (;;) {
+      const n = readSync(fd, buf, used, buf.length - used, null);
+      if (n === 0) break;
+      used += n;
+      if (used > MAX_SETTINGS_BYTES) return null;
+    }
+    return buf.subarray(0, used).toString('utf8');
+  } catch {
+    return null;
+  } finally {
+    closeSync(fd);
+  }
+}
+
 /** The `deny` and `ask` rules across these files. A file that is missing,
- * too large or not JSON is skipped; nothing from it is ever printed. */
+ * not a regular file, too large or not JSON is skipped; nothing from it is
+ * ever printed. */
 export function readRules(files: string[]): PermissionRules {
   const rules: PermissionRules = { deny: [], ask: [] };
   for (const file of files) {
+    const text = readCapped(file);
+    if (text === null) continue;
     let parsed: unknown;
     try {
-      if (statSync(file).size > MAX_SETTINGS_BYTES) continue;
-      parsed = JSON.parse(readFileSync(file, 'utf8'));
+      parsed = JSON.parse(text);
     } catch {
       continue;
     }

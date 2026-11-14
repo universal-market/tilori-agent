@@ -1,6 +1,6 @@
 import './setup.ts';
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { main } from '../src/cli.ts';
@@ -8,6 +8,7 @@ import { configPath } from '../src/config.ts';
 import {
   PAIRED_HIDDEN_TOOLS,
   covers,
+  readCapped,
   readRules,
   ruleWarning,
   settingsFiles,
@@ -117,6 +118,25 @@ describe('settings files', () => {
     expect(uncoveredTools(rules)).toEqual(['revoke_key']);
   });
 
+  test('/dev/zero, a link to it and a FIFO are skipped at once (Bastion 1aef6448)', () => {
+    const zero = join(dir, 'zero.json');
+    symlinkSync('/dev/zero', zero);
+    const fifo = join(dir, 'fifo.json');
+    expect(Bun.spawnSync(['mkfifo', fifo]).exitCode).toBe(0);
+    const linked = join(dir, 'linked.json');
+    const real = join(dir, 'real.json');
+    settings(real, { ask: [`${M}__get_agent`] });
+    symlinkSync(real, linked);
+    const started = Date.now();
+    expect(readCapped('/dev/zero')).toBeNull();
+    expect(readCapped(zero)).toBeNull();
+    expect(readCapped(fifo)).toBeNull();
+    expect(readCapped(dir)).toBeNull();
+    // A link to a regular file is still read (dotfile managers).
+    expect(uncoveredTools(readRules([zero, fifo, linked]))).toEqual(['get_agent']);
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
   test('a non-array or non-string entry is ignored', () => {
     const f = join(dir, 'odd.json');
     writeFileSync(f, JSON.stringify({ permissions: { ask: M, deny: [42, { rule: M }] } }));
@@ -167,5 +187,15 @@ describe('the warning', () => {
     const warned = await run();
     expect(warned.systemMessage).toBe(ruleWarning(['propose_contract']));
     expect(warned.hookSpecificOutput.additionalContext).toContain(ruleWarning(['propose_contract'])!);
+
+    // A hostile project: its settings files are a FIFO and a link to
+    // /dev/zero. The hook still returns, with its policy text.
+    rmSync(join(dir, 'project', '.claude'), { recursive: true, force: true });
+    mkdirSync(join(dir, 'project', '.claude'), { recursive: true });
+    expect(Bun.spawnSync(['mkfifo', join(dir, 'project', '.claude', 'settings.json')]).exitCode).toBe(0);
+    symlinkSync('/dev/zero', join(dir, 'project', '.claude', 'settings.local.json'));
+    const hostile = await run();
+    expect(hostile.systemMessage).toBeUndefined();
+    expect(hostile.hookSpecificOutput.additionalContext).toBe(quiet.hookSpecificOutput.additionalContext);
   });
 });
