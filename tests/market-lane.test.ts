@@ -39,7 +39,17 @@ class MarketFake extends FakeTilori {
   failAcksWithBody = 0;
   /** While set, acknowledge_events waits for it (an ack in flight). */
   ackGate: Promise<void> | null = null;
+  /** With ackGate: the server applies the ack at once and only the reply
+   * waits, so a poll during the wait serves the next batch. */
+  ackAppliedFirst = false;
   ackCalls = 0;
+  /** Delivery ids in the order poll_events served them. */
+  served: string[] = [];
+  override take(id: string) {
+    const d = super.take(id);
+    if (d) this.served.push(d.delivery_id);
+    return d;
+  }
   override async callTool(
     params: { name: string; arguments: Record<string, unknown> },
     schema?: unknown,
@@ -55,6 +65,11 @@ class MarketFake extends FakeTilori {
       throw new Error(`fetch failed: ${SECRET} Bearer ${KEY}`);
     }
     if (params.name === 'acknowledge_events') this.ackCalls++;
+    if (this.ackGate && this.ackAppliedFirst && params.name === 'acknowledge_events') {
+      const reply = await super.callTool(params, schema, options);
+      await this.ackGate;
+      return reply;
+    }
     if (this.ackGate && params.name === 'acknowledge_events') await this.ackGate;
     if (this.failAcksWithBody > 0 && params.name === 'acknowledge_events') {
       this.failAcksWithBody--;
@@ -427,21 +442,27 @@ describe('Market lane', () => {
     await stop();
   });
 
-  test('a newer batch held while an older ack is in flight is kept and wakes', async () => {
+  test('a newer batch held while an older ack is in flight is kept and wakes from that hold (Pax bff78510)', async () => {
     const { market, rec, stop } = setup({ renewEveryMs: 300 });
     await ready(market);
     let release = () => {};
+    // The server applies the first ack at once; only its reply is slow. A
+    // poll meanwhile serves the next batch as a new delivery.
+    market.ackAppliedFirst = true;
     market.ackGate = new Promise<void>((r) => (release = r));
     market.push('inbox', [ev('task.ready', 'execution')]);
     await until(() => rec.events.length === 1 && market.ackCalls === 1);
     const tx = randomUUID();
     market.push('inbox', [ev('transaction.message', 'transaction', tx)]);
-    const setups = market.calls.filter((c) => c === 'list_agent_subscriptions').length;
-    await until(() => market.calls.filter((c) => c === 'list_agent_subscriptions').length > setups);
+    const first = market.served[0];
+    await until(() => market.served.some((id) => id !== first));
+    const newer = market.served.find((id) => id !== first)!;
     await sleep(100);
     market.ackGate = null;
     release();
     await until(() => rec.events.some((w) => wakeText(w).includes(`new message, transaction ${tx}`)), 3000);
+    // Kept, not dropped and fetched again: the server served it once.
+    expect(market.served.filter((id) => id === newer)).toHaveLength(1);
     await stop();
   });
 
