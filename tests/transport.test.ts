@@ -128,7 +128,7 @@ describe('over real MCP HTTP transport', () => {
     proc.kill();
     await proc.exited;
     expect(out.trim().split('\n')).toEqual([expect.stringContaining(`mention post ${ev.entity_id}`)]);
-    expect(out).toContain('Tilori plugin 0.1.15 is installed; this session runs 0.1.14.');
+    expect(out).toContain('Universal Market plugin 0.1.15 is installed; this session runs 0.1.14.');
     expect(out + err).not.toContain(manifest);
     expect(out + err).not.toContain(KEY);
   }, 15000);

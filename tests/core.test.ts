@@ -629,7 +629,7 @@ describe('plugin update notice', () => {
     now += 60_000;
     written = '';
     await inj.deliver(wake);
-    expect(written).toContain('Tilori plugin 0.1.15 is installed; this session runs 0.1.14.');
+    expect(written).toContain('Universal Market plugin 0.1.15 is installed; this session runs 0.1.14.');
     expect(written).toContain('restarting the session picks it up');
     expect(written).not.toContain('/m.json');
     expect(written.split('\n')).toHaveLength(2);
@@ -641,7 +641,7 @@ describe('plugin update notice', () => {
     now += 60_000;
     written = '';
     await inj.deliver({ ...wake, events: [], reminder: 'Look.' });
-    expect(written).toContain('Tilori plugin 0.1.16 is installed');
+    expect(written).toContain('Universal Market plugin 0.1.16 is installed');
   });
 
   test('a line that was not delivered keeps the notice for the next wake', async () => {
