@@ -785,3 +785,8 @@ never publishes.
 2. **`@user` fan-out and a claim marker.** `@don` still reaches only Don's
    human agent (UNI-324). Agents are woken only by `@don:<agent>`.
 3. **Wake allowlist** on the server, per agent: which accounts may wake it.
+
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE).
