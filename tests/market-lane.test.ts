@@ -37,6 +37,9 @@ class MarketFake extends FakeTilori {
   failSetup: Error | null = null;
   failPolls = 0;
   failAcksWithBody = 0;
+  /** While set, acknowledge_events waits for it (an ack in flight). */
+  ackGate: Promise<void> | null = null;
+  ackCalls = 0;
   override async callTool(
     params: { name: string; arguments: Record<string, unknown> },
     schema?: unknown,
@@ -51,6 +54,8 @@ class MarketFake extends FakeTilori {
       this.calls.push(params.name);
       throw new Error(`fetch failed: ${SECRET} Bearer ${KEY}`);
     }
+    if (params.name === 'acknowledge_events') this.ackCalls++;
+    if (this.ackGate && params.name === 'acknowledge_events') await this.ackGate;
     if (this.failAcksWithBody > 0 && params.name === 'acknowledge_events') {
       this.failAcksWithBody--;
       this.calls.push(params.name);
@@ -86,6 +91,7 @@ function setup(
     marketOffMs?: number;
     stallMinutes?: number;
     waitMs?: number;
+    renewEveryMs?: number;
     market?: MarketFake;
   } = {},
 ) {
@@ -114,6 +120,7 @@ function setup(
     now: opts.now,
     marketOffMs: opts.marketOffMs ?? 0,
     pollFailMs: 0,
+    renewEveryMs: opts.renewEveryMs,
   });
   const rec = new Recorder();
   router.register('wren', rec);
@@ -218,7 +225,7 @@ describe('Market lane', () => {
     await sleep(50);
     expect(rec.wakes).toEqual([]);
     const tx = randomUUID();
-    market.push('inbox', [ev('transaction.message', 'transaction', tx)]);
+    market.push('inbox', [ev('transaction.joined', 'transaction', tx)]);
     await until(() => rec.events.length === 1);
     expect(wakeText(rec.events[0])).toStartWith(`Market: 1 new item for agent wren (Market item, transaction ${tx}).`);
     await stop();
@@ -401,6 +408,43 @@ describe('Market lane', () => {
     await stop();
   }, 15_000);
 
+  test('a renewal while an ack is in flight never wakes twice for the same delivery (Pax 5ff08a93 follow-up)', async () => {
+    const { market, rec, stop } = setup({ renewEveryMs: 300 });
+    await ready(market);
+    let release = () => {};
+    market.ackGate = new Promise<void>((r) => (release = r));
+    market.push('inbox', [ev('task.ready', 'execution')]);
+    await until(() => rec.events.length === 1 && market.ackCalls === 1);
+    // The lane renews while the ack waits, and re-holds the same delivery.
+    const setups = market.calls.filter((c) => c === 'list_agent_subscriptions').length;
+    await until(() => market.calls.filter((c) => c === 'list_agent_subscriptions').length > setups);
+    await sleep(100);
+    market.ackGate = null;
+    release();
+    await until(() => market.acks.length === 1);
+    await sleep(300);
+    expect(rec.events.length).toBe(1);
+    await stop();
+  });
+
+  test('a newer batch held while an older ack is in flight is kept and wakes', async () => {
+    const { market, rec, stop } = setup({ renewEveryMs: 300 });
+    await ready(market);
+    let release = () => {};
+    market.ackGate = new Promise<void>((r) => (release = r));
+    market.push('inbox', [ev('task.ready', 'execution')]);
+    await until(() => rec.events.length === 1 && market.ackCalls === 1);
+    const tx = randomUUID();
+    market.push('inbox', [ev('transaction.message', 'transaction', tx)]);
+    const setups = market.calls.filter((c) => c === 'list_agent_subscriptions').length;
+    await until(() => market.calls.filter((c) => c === 'list_agent_subscriptions').length > setups);
+    await sleep(100);
+    market.ackGate = null;
+    release();
+    await until(() => rec.events.some((w) => wakeText(w).includes(`new message, transaction ${tx}`)), 3000);
+    await stop();
+  });
+
   test('each lane holds at most two server waiters while the other long-polls (Pax c)', async () => {
     const { tilori, market, rec, stop } = setup({ waitMs: 200 });
     await ready(market);
@@ -511,6 +555,7 @@ describe('Market wake text', () => {
       'transaction.contract_committed',
       'transaction.closed',
       'transaction.joined',
+      'transaction.message',
     ];
     const text = wakeText({
       ...base,
@@ -518,7 +563,7 @@ describe('Market wake text', () => {
       market: { events: kinds.map((kind) => ({ kind, entity_type: 'transaction' as const, entity_id: id })) },
     });
     expect(text).toEndWith(
-      ' Market: 7 owed to you (1 contract proposed, 1 task ready for you, 1 execution changed, 2 contract accepted, 1 transaction closed, 1 Market item). Call `whats_owed` for the list.',
+      ' Market: 8 owed to you (1 contract proposed, 1 task ready for you, 1 execution changed, 2 contract accepted, 1 transaction closed, 1 Market item, 1 new message). Call `whats_owed` for the list.',
     );
   });
 
