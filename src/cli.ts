@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { checkRules } from './rule-check.ts';
 import { spawn } from 'node:child_process';
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
@@ -902,10 +903,21 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         const trust = trustServerState(config);
         if (trust.inert) log(`trust_server is set but not applied: ${trust.inert}.`);
         const identity = sessionIdentityLines(config, agent, process.env, Boolean(str(args, 'agent')));
-        const text = policyText(coordinationPolicy(config, agent), identity);
+        // UNI-865 phase 0: a deny/ask rule left behind on a Market tool the
+        // paired Market server no longer lists. Read only; never fails.
+        let rules: string | null = null;
+        try {
+          rules = checkRules(process.env);
+        } catch {
+          rules = null;
+        }
+        const text = policyText(coordinationPolicy(config, agent), identity) + (rules ? `\n${rules}` : '');
         if (args.flags.has('hook')) {
           process.stdout.write(
-            JSON.stringify({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: text } }) + '\n',
+            JSON.stringify({
+              ...(rules ? { systemMessage: rules } : {}),
+              hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: text },
+            }) + '\n',
           );
         } else console.log(text);
         return 0;
