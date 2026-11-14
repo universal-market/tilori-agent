@@ -126,7 +126,7 @@ describe('syncPlugin', () => {
     const r = await syncPlugin(cfg());
     expect(r.code).toBe(1);
     expect(r.lines).toEqual([SYNC_LINES.byHand({ tilori_url: TILORI, market_url: MARKET })]);
-    expect(r.lines[0]).toContain(`echo '{"tilori_url":"${TILORI}","market_url":"${MARKET}"}' | claude plugin configure tilori@tilori-claude --values-stdin`);
+    expect(r.lines[0]).toContain(`echo '{"tilori_url":"${TILORI}","market_url":"${MARKET}"}' | claude plugin configure universal-market@tilori-claude --values-stdin`);
   });
 
   test('only the two URLs ever reach configure, never the key or a path (Bastion e7060719 3)', async () => {
@@ -161,7 +161,7 @@ describe('syncPluginAfterSave (init, setup)', () => {
   test('says what it changed', async () => {
     fake({ ...prodDefaults });
     const lines = await syncPluginAfterSave(cfg());
-    expect(lines[0]).toBe('The tilori plugin now uses these URLs:');
+    expect(lines[0]).toBe('The Universal Market plugin now uses these URLs:');
     expect(lines).toContain(SYNC_LINES.restart);
   });
   test('the plugin is there but refuses: the by-hand line', async () => {
@@ -221,7 +221,7 @@ describe('init (Pax d4ff9930 on tilori-agent#106)', () => {
     const r = await withStdin(KEY + '\n', ['init', '--agent', 'wren', '--url', TILORI, '--market-url', MARKET, '--no-verify']);
     expect(r.code).toBe(0);
     expect(calls).toEqual([{ tilori_url: TILORI, market_url: MARKET }]);
-    expect(r.err).toContain('The tilori plugin now uses these URLs:');
+    expect(r.err).toContain('The Universal Market plugin now uses these URLs:');
     expect(r.err).toContain(SYNC_LINES.restart);
     expect(r.err).not.toContain(KEY);
   });
@@ -231,7 +231,7 @@ describe('init (Pax d4ff9930 on tilori-agent#106)', () => {
     const r = await withStdin(KEY + '\n', ['init', '--agent', 'wren', '--url', TILORI, '--no-verify']);
     expect(r.code).toBe(0);
     expect(calls).toEqual([]);
-    expect(r.err).not.toContain('tilori plugin');
+    expect(r.err).not.toContain('Universal Market plugin');
   });
 });
 

@@ -75,7 +75,7 @@ Usage:
       old deployment's Market URL.
   tilori-agent connect --url <tilori-mcp-url> [--market-url <market-mcp-url>] [--replace]
       Sets this machine up for the agent whose key is on stdin, on that
-      deployment (such as a workspace), for plain \`claude\` with the tilori
+      deployment (such as a workspace), for plain \`claude\` with the Universal Market
       plugin. The Market address comes from --market-url, else from the
       plugin's market_url option when it isn't the production default. Both
       are checked with the key before anything is written; then the key is
@@ -85,7 +85,7 @@ Usage:
       other agents' key files aside (not deleted). The key is read only from
       stdin, never from argv or an existing key file.
   tilori-agent sync-plugin
-      Sets the tilori plugin's tilori_url and market_url options to "url" and
+      Sets the Universal Market plugin's tilori_url and market_url options to "url" and
       "market_url" in config.json, so plain \`claude\` reaches this agent's
       deployment, and prints what changed. It takes no arguments: config.json
       is the only source. init and setup do the same when the plugin is
@@ -153,7 +153,7 @@ Usage:
         reminder.every_minutes (15-1440, for a reminder set up by hand),
         stall_minutes (0-1440)
   tilori-agent config set trust_server=on|off
-      Owner only, through /tilori:config: on lets the agents of every account
+      Owner only, through /universal-market:config: on lets the agents of every account
       on the server in "url" give this machine's agents real work, pinned to
       that server's origin (it stops applying if "url" changes); off removes it.
       The new session note applies from the next session start.

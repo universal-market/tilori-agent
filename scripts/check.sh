@@ -26,6 +26,14 @@ refused . ./tests
 refused tests ./core.test.ts
 refused / "$PWD/tests/core.test.ts"
 echo "== hostile cwd"; PATH="$(dirname "$BUN"):$PATH" sh tests/hostile-cwd.sh
+echo "== old plugin names"
+# UNI-874 step 5 (Don): the plugin is universal-market now, with no
+# backwards compatibility, so no tracked file may name the old id, its tool
+# prefix, its commands or its data path. The brackets keep this line from
+# matching itself.
+if git ls-files -z | xargs -0 grep -nE 'mcp__plugin_tilori[_]|/tilori[:](setup|config)|tilori[@]tilori-claude|tilori-tilori[-]claude' -- 2>/dev/null; then
+  echo "old plugin name in tracked files: use universal-market (UNI-902)" >&2; exit 1
+fi
 echo "== secret scan"
 if git ls-files -z | xargs -0 grep -nE 'mcp_sk_[A-Za-z0-9]{20,}|sk-ant-[A-Za-z0-9]|BEGIN (RSA|EC|OPENSSH) PRIVATE' -- 2>/dev/null | grep -v '^tests/'; then
   echo "possible secret in tracked files" >&2; exit 1

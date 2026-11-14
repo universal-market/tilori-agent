@@ -21,7 +21,7 @@ import type { AgentUsage, Router } from './router.ts';
 
 /**
  * `tilori-agent config` (UNI-480): the few per-agent settings an owner may
- * change from the CLI or `/tilori:config`, and live reload of exactly those.
+ * change from the CLI or `/universal-market:config`, and live reload of exactly those.
  *
  * Everything else in config.json (url, exec, injector, inbox,
  * direct_messages, subscriptions, trusted_owners, the agent binding) stays
@@ -157,7 +157,7 @@ export function applyChanges(
  * `config set trust_server=on|off` (UNI-556): the one trust setting the CLI
  * writes. `on` pins the origin of the current `url`, so the trust stays with
  * that server; `off` removes it. Nothing else in config.json changes. Meant
- * only for the owner's own `/tilori:config`; the command text says so.
+ * only for the owner's own `/universal-market:config`; the command text says so.
  */
 export function parseTrustServer(arg: string): 'on' | 'off' | null {
   const m = /^trust_server=(on|off)$/.exec(arg);

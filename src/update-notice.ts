@@ -18,7 +18,7 @@ export interface UpdateNoticeOptions {
   running: string;
   /** The host's install record, e.g. ~/.claude/plugins/installed_plugins.json. */
   manifest: string;
-  /** This plugin's key in it, e.g. tilori@tilori-claude. */
+  /** This plugin's key in it, e.g. universal-market@tilori-claude. */
   key: string;
   now?: () => number;
   /** Reads the manifest; tests replace it. Returns null when unreadable. */

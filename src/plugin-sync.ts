@@ -5,7 +5,7 @@ import { buildMarketUrl, buildMcpUrl, sameEndpoint, type TiloriConfig } from './
 import { isOtherHome, tiloriHome } from './keys.ts';
 
 /**
- * The tilori plugin's two address options, `tilori_url` and `market_url`
+ * The Universal Market plugin's two address options, `tilori_url` and `market_url`
  * (UNI-882, design fb13dbe9). Claude Code's `.mcp.json` can only take a server
  * URL from the environment or a plugin option, so a plain `claude` session
  * reaches whatever the options say. tilori-agent is their only writer: every
@@ -25,9 +25,9 @@ import { isOtherHome, tiloriHome } from './keys.ts';
  * config.json (UNI-748), so a drifted option means a 401, never a leak.
  */
 
-export const PLUGIN_ID = 'tilori@tilori-claude';
+export const PLUGIN_ID = 'universal-market@tilori-claude';
 /** The plugin's stable launcher, written at session start (write-launcher.sh). */
-export const LAUNCHER = '~/.claude/plugins/data/tilori-tilori-claude/tilori-agent';
+export const LAUNCHER = '~/.claude/plugins/data/universal-market-tilori-claude/tilori-agent';
 export const SYNC_COMMAND = `sh ${LAUNCHER} sync-plugin`;
 
 export type OptionName = 'tilori_url' | 'market_url';
@@ -173,12 +173,12 @@ function matches(current: string | undefined, wanted: string): boolean {
 
 export const SYNC_LINES = {
   otherHome: (home: string) =>
-    `The tilori plugin's options serve the default Tilori home, and this is ${home}. Start this home's sessions with \`sh ${LAUNCHER} claude --home ${home}\` instead; it passes this home's URLs to Claude Code.`,
+    `The Universal Market plugin's options serve the default Tilori home, and this is ${home}. Start this home's sessions with \`sh ${LAUNCHER} claude --home ${home}\` instead; it passes this home's URLs to Claude Code.`,
   unread:
-    "Couldn't read the tilori plugin's options. Is Claude Code installed, with the tilori plugin? Install it, then run this again.",
+    "Couldn't read the Universal Market plugin's options. Is Claude Code installed, with the Universal Market plugin? Install it, then run this again.",
   byHand: (values: PluginValues) =>
-    `Couldn't set the tilori plugin's options. Run this in a terminal, then restart Claude Code:\n  echo '${JSON.stringify(values).replaceAll("'", `'\\''`)}' | claude plugin configure ${PLUGIN_ID} --values-stdin`,
-  same: 'The tilori plugin already uses the URLs in config.json; nothing to change.',
+    `Couldn't set the Universal Market plugin's options. Run this in a terminal, then restart Claude Code:\n  echo '${JSON.stringify(values).replaceAll("'", `'\\''`)}' | claude plugin configure ${PLUGIN_ID} --values-stdin`,
+  same: 'The Universal Market plugin already uses the URLs in config.json; nothing to change.',
   changed: (name: OptionName, from: string, to: string) => `${name}: ${from} → ${to}`,
   unchanged: (name: OptionName) => `${name} unchanged`,
   noMarket: 'market_url: config.json has none, so the option was left as it is.',
@@ -230,7 +230,7 @@ export async function syncPlugin(config: TiloriConfig): Promise<{ code: number; 
 export async function syncPluginAfterSave(config: TiloriConfig): Promise<string[]> {
   if (isOtherHome()) return [];
   const r = await syncPlugin(config);
-  if (r.changed) return ['The tilori plugin now uses these URLs:', ...r.lines];
+  if (r.changed) return ['The Universal Market plugin now uses these URLs:', ...r.lines];
   if (r.code === 1 && r.lines[0] !== SYNC_LINES.unread) return r.lines; // the plugin is there but refused
   return [];
 }
