@@ -14,8 +14,18 @@ import { DEFAULT_PAUSE_SECONDS, DEFAULT_DIRECT_WAKES_PER_HOUR, DEFAULT_WAKES_PER
 import { PushStream, type PushOptions, type PushStatus } from './push.ts';
 import { WakeLimiter } from './ratelimit.ts';
 import type { LiveSettings } from './settings.ts';
-import type { AgentDelivery, AgentSubscription, DeliverResult, EventRef, Injector, PollFailReason, SubscriptionSpec, Wake } from './types.ts';
-import { KIND_RANK, buildWake, refKey, toRefs } from './wake.ts';
+import type {
+  AgentDelivery,
+  AgentSubscription,
+  DeliverResult,
+  EventRef,
+  Injector,
+  MarketOffReason,
+  PollFailReason,
+  SubscriptionSpec,
+  Wake,
+} from './types.ts';
+import { KIND_RANK, MARKET_ENTITY_TYPES, buildWake, marketRefs, refKey, toRefs } from './wake.ts';
 
 /** How long a delivered post or conversation is remembered. Longer than the
  * wake cap can hold a batch (one hour), so a held copy of something that went
@@ -43,6 +53,15 @@ const DIRECT_PAUSE_MS = 10_000;
 /** While every subscription rests, `watching-` is refreshed this often, well
  * inside status's WATCHED_MS. */
 const REST_SIGNAL_MS = 30_000;
+/** The Market lane's one subscription (UNI-861 S2): the agent's Market inbox
+ * with its transactions and executions, never its own actions. */
+export const MARKET_SUBSCRIPTION: SubscriptionSpec = {
+  scope: { type: 'inbox', include_transactions: true, include_executions: true },
+  exclude_self: true,
+};
+/** How long Market polls may fail (network, timeouts) before the session is
+ * told the Market wake is off. A refused key or subscription is told at once. */
+const MARKET_OFF_MS = 120_000;
 
 export interface RouterAgentConfig {
   handle: string;
@@ -63,6 +82,10 @@ export interface RouterAgentConfig {
    * gateway stream and each frame triggers a zero-wait poll; there are no
    * long polls. Unset: long polls, as before. */
   push?: PushOptions;
+  /** The agent's Market lane (UNI-861 S2), only when config.json records a
+   * market_url: its own client for that address, with the same key. Long
+   * polls only; push stays on the Tilori lane. */
+  market?: { client: TiloriAgentClient };
 }
 
 /** This hour's wake counts for `tilori-agent config show`: counts only. */
@@ -113,6 +136,9 @@ export interface RouterOptions {
   /** How long to wait between tries while the server refuses the agent's
    * key (default 60 s, UNI-761). Each try reads the key file again. */
   keyRetryMs?: number;
+  /** Test seam: how long Market polls may fail before the session is told
+   * the Market wake is off (default 2 min). */
+  marketOffMs?: number;
 }
 
 function sleep(ms: number, signal?: AbortSignal, kick?: Promise<void>): Promise<void> {
@@ -138,36 +164,19 @@ async function settle(p: Promise<DeliverResult>): Promise<DeliverResult> {
   }
 }
 
-interface AgentState {
-  cfg: RouterAgentConfig;
-  limiter: WakeLimiter;
-  /** A separate allowance for direct signals, so broad traffic that used up
-   * `limiter` never starves a mention or direct message. Null when turned off. */
-  directLimiter: WakeLimiter | null;
-  /** The direct limiter while turned off by a reload, kept so turning it back
-   * on doesn't hand out a fresh hour. */
-  directOff: WakeLimiter | null;
-  /** Subscriptions whose batches are direct signals (inbox, mentions, DMs). */
-  directSubs: Set<string>;
-  /** Batches (by delivery id) the wake cap has delayed, for the wake's count. */
-  capHeld: Set<string>;
-  /** Posts (by `refKey`) handed to an injector recently, oldest first, with
-   * the time and the highest kind rank they went out under. Only posts: a
-   * reply is a new post id, but a conversation or a Market entity gets new
-   * events under the same id, which must always wake. Kept across
-   * generations: a held batch is re-served after a renewal. */
-  /** Old post events acknowledged without a wake since the last wake. */
-  backlog: { count: number; from: number; to: number; to_you?: string[]; to_you_more?: number } | null;
-  recent: Map<string, { at: number; rank: number; revision?: number }>;
-  /** Live injectors, oldest first. The newest one receives wakes; when it
-   * leaves, the previous one takes over. */
-  injectors: Injector[];
-  /** Consecutive busy results, for exponential backoff. */
-  busy: number;
-  /** No delivery attempt before this time (busy backoff); new batches don't shorten it. */
-  retryAt: number;
-  /** Fired when there may be something to flush (new batch, new injector). */
-  kick: { promise: Promise<void>; fire: () => void };
+export type LaneName = 'tilori' | 'market';
+
+/** One event connection of an agent (UNI-861 S2; Pax 61007a93 1): its own
+ * client, subscriptions, poll generations and failure state. The agent's
+ * lanes share one `pending` map, flush loop, wake caps and injector, so a
+ * wake with events from both is one wake. */
+interface Lane {
+  name: LaneName;
+  client: TiloriAgentClient;
+  subscriptions: SubscriptionSpec[];
+  /** This lane's current subscriptions addressed to the agent (inbox,
+   * mentions, DMs); the agent's `directSubs` is the union. */
+  direct: Set<string>;
   /** Fired after held batches were acknowledged, so pollers resume at once. */
   polled: { promise: Promise<void>; fire: () => void };
   /** Set while a multiplexed long poll leaves out held subscriptions: called
@@ -178,8 +187,9 @@ interface AgentState {
   singleUntil: number;
   /** Deadlines of abandoned long polls that may still hold a server waiter
    * (a restart, or a generation that ended mid-call). A restart waits until
-   * none is left and a new call until at most one is, so the agent never
-   * holds more than two. */
+   * none is left and a new call until at most one is, so the lane never
+   * holds more than two: the server's waiter budget is per resource and
+   * user, so per lane (Pax 61007a93 1). */
   abandoned: number[];
   /** Subscriptions (by spec) re-subscribed after a per-id poll error, and
    * when. A second error within a renewal interval drops it instead. */
@@ -189,31 +199,21 @@ interface AgentState {
   dropped: Map<string, number>;
   /** Subscription ids to subscribe again at the next setup. */
   renewIds: Set<string>;
-  /** Batches handed to an injector whose ack failed: ack again, never re-wake. */
-  handedOff: Set<string>;
-  /** When the oldest batch now held arrived (0 when none is held). */
-  heldSince: number;
   /** Subscriptions resting after a hand-off, until when (Date.now()). */
   paused: Map<string, number>;
-  /** When `watching-` was last refreshed for a rest (0: not yet). */
-  restSignalAt: number;
-  heldNotice: string;
-  /** When the next reminder is due (unused without a reminder). An event
-   * wake pushes it back when the reminder is only for idle agents. */
-  reminderAt: number;
-  stats: { wakes: number; events: number; delayed: number; reminders: number };
-  /** The last get_my_profile reading and when it was taken. */
-  profile: { at: number; value: ProfileNotes };
-  /** The prompt the session is blocked on (by its signal's mtime), the wakes
-   * accepted since, and whether the stall line was logged for it. */
-  blocked: { since: number; wakes: number; logged: boolean };
-  /** Since when every poll or subscription setup has failed, why (the last
-   * failure), and whether the session was told. Null while polls work. */
+  /** Tilori lane: since when every poll or subscription setup has failed,
+   * why (the last failure), and whether the session was told. Null while
+   * polls work. */
   pollFail: null | { since: number; reason: PollFailReason; told: boolean };
-  /** Since when the server has refused the key (keyRefused), or null. */
+  /** Tilori lane: since when the server has refused the key, or null. */
   keyRefusedSince: number | null;
-  /** Push mode only (cfg.push): `seq` counts frames and reconnects, so a
-   * poller that saw `seq` knows to poll again once it moves. */
+  /** Market lane: since when it has failed, and whether the session was
+   * told the Market wake is off. Null while it works. */
+  off: null | { since: number; told: boolean };
+  /** Market lane: the grant has no market:read (logged once; no line). */
+  noGrant: boolean;
+  /** Tilori lane, push mode only (cfg.push): `seq` counts frames and
+   * reconnects, so a poller that saw `seq` knows to poll again once it moves. */
   push: null | {
     stream: PushStream;
     seq: number;
@@ -227,6 +227,87 @@ interface AgentState {
     /** When this agent last started a push poll (the 1 s floor). */
     polledAt: number;
   };
+}
+
+/** A held batch, stamped with the lane that delivered it, so it is
+ * acknowledged through that lane's client (Pax 61007a93 3). A Market batch
+ * holds only the events the lane passes on; its ack covers the whole
+ * delivery. */
+type Held = AgentDelivery & { lane: LaneName };
+
+function newLane(name: LaneName, client: TiloriAgentClient, subscriptions: SubscriptionSpec[]): Lane {
+  return {
+    name,
+    client,
+    subscriptions,
+    direct: new Set(),
+    polled: makeKick(),
+    onPolled: null,
+    singleUntil: 0,
+    abandoned: [],
+    resubscribed: new Map(),
+    dropped: new Map(),
+    renewIds: new Set(),
+    paused: new Map(),
+    pollFail: null,
+    keyRefusedSince: null,
+    off: null,
+    noGrant: false,
+    push: null,
+  };
+}
+
+interface AgentState {
+  cfg: RouterAgentConfig;
+  /** The Tilori lane always; the Market lane when config.json has a
+   * market_url. */
+  lanes: { tilori: Lane; market: Lane | null };
+  limiter: WakeLimiter;
+  /** A separate allowance for direct signals, so broad traffic that used up
+   * `limiter` never starves a mention or direct message. Null when turned off. */
+  directLimiter: WakeLimiter | null;
+  /** The direct limiter while turned off by a reload, kept so turning it back
+   * on doesn't hand out a fresh hour. */
+  directOff: WakeLimiter | null;
+  /** Subscriptions whose batches are direct signals (inbox, mentions, DMs,
+   * and the Market lane's inbox): every lane's `direct`. */
+  directSubs: Set<string>;
+  /** Batches (by delivery id) the wake cap has delayed, for the wake's count. */
+  capHeld: Set<string>;
+  /** Old post events acknowledged without a wake since the last wake. */
+  backlog: { count: number; from: number; to: number; to_you?: string[]; to_you_more?: number } | null;
+  /** Posts (by `refKey`) handed to an injector recently, oldest first, with
+   * the time and the highest kind rank they went out under. Only posts: a
+   * reply is a new post id, but a conversation or a Market entity gets new
+   * events under the same id, which must always wake. Kept across
+   * generations: a held batch is re-served after a renewal. */
+  recent: Map<string, { at: number; rank: number; revision?: number }>;
+  /** Live injectors, oldest first. The newest one receives wakes; when it
+   * leaves, the previous one takes over. */
+  injectors: Injector[];
+  /** Consecutive busy results, for exponential backoff. */
+  busy: number;
+  /** No delivery attempt before this time (busy backoff); new batches don't shorten it. */
+  retryAt: number;
+  /** Fired when there may be something to flush (new batch, new injector). */
+  kick: { promise: Promise<void>; fire: () => void };
+  /** Batches handed to an injector whose ack failed: ack again, never re-wake.
+   * Acks are driven from `pending`, whose entries carry their lane. */
+  handedOff: Set<string>;
+  /** When the oldest batch now held arrived (0 when none is held). */
+  heldSince: number;
+  /** When `watching-` was last refreshed for a rest (0: not yet). */
+  restSignalAt: number;
+  heldNotice: string;
+  /** When the next reminder is due (unused without a reminder). An event
+   * wake pushes it back when the reminder is only for idle agents. */
+  reminderAt: number;
+  stats: { wakes: number; events: number; delayed: number; reminders: number };
+  /** The last get_my_profile reading and when it was taken. */
+  profile: { at: number; value: ProfileNotes };
+  /** The prompt the session is blocked on (by its signal's mtime), the wakes
+   * accepted since, and whether the stall line was logged for it. */
+  blocked: { since: number; wakes: number; logged: boolean };
 }
 
 /** Scopes whose events are addressed to the agent itself. */
@@ -251,6 +332,26 @@ export function failReason(cause: unknown): PollFailReason {
   if (cause instanceof ToolRefused) return 'refused';
   if (/fetch failed|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|socket|network|\b50[234]\b/i.test(text)) return 'network';
   return 'other';
+}
+
+/** Why the Market lane failed, in fixed words, or `no_grant` when the key's
+ * Market grant lacks market:read: then there is no Market line at all
+ * (Juniper 644de98e 5). Only the class of failure is kept, never its text. */
+export function marketReason(cause: unknown, phase: 'setup' | 'poll'): MarketOffReason | 'no_grant' {
+  const text = errText(cause);
+  if ((cause as { code?: unknown } | null)?.code === 403 || /\b403\b|insufficient_scope|market:read/i.test(text)) return 'no_grant';
+  switch (failReason(cause)) {
+    case 'auth':
+    case 'access':
+      return 'not_authorized';
+    case 'network':
+    case 'timeout':
+      return 'unreachable';
+    case 'refused':
+      return phase === 'setup' ? 'subscription_refused' : 'other';
+    default:
+      return 'other';
+  }
 }
 
 const errText = (cause: unknown) => (cause instanceof Error ? cause.message : String(cause));
@@ -280,6 +381,9 @@ function makeKick() {
  * poll_events, and hands each batch to the injector registered for the agent.
  * A batch is acknowledged on Tilori only after the injector reports
  * `accepted`; until then it stays pending server-side and is re-served.
+ * An agent with a Market address also has a Market lane: one inbox
+ * subscription on Market whose transaction and execution events join the
+ * same wakes (UNI-861 S2).
  */
 export class Router {
   readonly #agents = new Map<string, AgentState>();
@@ -297,6 +401,7 @@ export class Router {
   readonly #signalFailed = new Set<string>();
   readonly #pollFailMs: number | undefined;
   readonly #keyRetryMs: number;
+  readonly #marketOffMs: number;
 
   constructor(options: RouterOptions) {
     this.#log = options.logger ?? (() => {});
@@ -312,12 +417,18 @@ export class Router {
     this.#signalDir = options.signalDir;
     this.#pollFailMs = options.pollFailMs;
     this.#keyRetryMs = options.keyRetryMs ?? 60_000;
+    this.#marketOffMs = options.marketOffMs ?? MARKET_OFF_MS;
     for (const cfg of options.agents) {
       if (this.#agents.has(cfg.handle)) throw new Error(`Agent ${cfg.handle} listed twice.`);
       const broad = unfilteredPostsWarning(cfg.handle, cfg.subscriptions);
       if (broad) this.#log(broad);
-      this.#agents.set(cfg.handle, {
+      if (cfg.market && cfg.market.client === cfg.client) throw new Error(`Agent ${cfg.handle}: the Market lane needs its own client.`);
+      const st: AgentState = {
         cfg,
+        lanes: {
+          tilori: newLane('tilori', cfg.client, cfg.subscriptions),
+          market: cfg.market ? newLane('market', cfg.market.client, [MARKET_SUBSCRIPTION]) : null,
+        },
         limiter: new WakeLimiter(cfg.wakesPerHour ?? DEFAULT_WAKES_PER_HOUR, this.#now),
         directLimiter: directLimiter(cfg.directWakesPerHour, this.#now),
         directOff: null,
@@ -329,37 +440,33 @@ export class Router {
         busy: 0,
         retryAt: 0,
         kick: makeKick(),
-        polled: makeKick(),
-        onPolled: null,
-        singleUntil: 0,
-        abandoned: [],
-        resubscribed: new Map(),
-        dropped: new Map(),
-        renewIds: new Set(),
         handedOff: new Set(),
         heldSince: 0,
-        paused: new Map(),
         restSignalAt: 0,
         heldNotice: '',
         reminderAt: cfg.reminder ? Date.now() + cfg.reminder.everyMs : 0,
         stats: { wakes: 0, events: 0, delayed: 0, reminders: 0 },
         profile: { at: -Infinity, value: { postsLeft: null, toolsHash: null } },
         blocked: { since: 0, wakes: 0, logged: false },
-        pollFail: null,
-        keyRefusedSince: null,
-        push: null,
-      });
-      const st = this.#agents.get(cfg.handle)!;
-      if (cfg.push) st.push = { stream: this.#pushStream(st, cfg.push), seq: 0, kick: makeKick(), back: false, caught: 0, aliveAt: 0, polledAt: 0 };
+      };
+      this.#agents.set(cfg.handle, st);
+      const t = st.lanes.tilori;
+      if (cfg.push) t.push = { stream: this.#pushStream(st, cfg.push), seq: 0, kick: makeKick(), back: false, caught: 0, aliveAt: 0, polledAt: 0 };
     }
   }
 
+  /** The agent's lanes, Tilori first. */
+  #laneList(st: AgentState): Lane[] {
+    return st.lanes.market ? [st.lanes.tilori, st.lanes.market] : [st.lanes.tilori];
+  }
+
   /** The push stream for an agent, wired to its poll loop, status file and
-   * monitor lines. */
+   * monitor lines. Push is for the Tilori lane only. */
   #pushStream(st: AgentState, options: PushOptions): PushStream {
     const handle = st.cfg.handle;
+    const lane = st.lanes.tilori;
     const nudge = () => {
-      const p = st.push!;
+      const p = lane.push!;
       p.seq++;
       const k = p.kick;
       p.kick = makeKick();
@@ -368,15 +475,15 @@ export class Router {
     return new PushStream(options, {
       frame: () => nudge(),
       connected: (back) => {
-        if (back && !st.push!.back) {
-          st.push!.back = true;
-          st.push!.caught = 0;
+        if (back && !lane.push!.back) {
+          lane.push!.back = true;
+          lane.push!.caught = 0;
         }
         this.#log(`[${handle}] push stream open${back ? ' again' : ''}`);
         nudge();
       },
       stable: () => {
-        const p = st.push!;
+        const p = lane.push!;
         if (!p.back) return;
         p.back = false;
         this.#pushLine(st, { state: 'back', caught: p.caught });
@@ -386,11 +493,11 @@ export class Router {
         // Push mode polls only on a frame, so the stream being alive is
         // what "watched" means; at most one file touch per 30 s.
         const now = Date.now();
-        if (now - st.push!.aliveAt < 30_000) return;
-        st.push!.aliveAt = now;
+        if (now - lane.push!.aliveAt < 30_000) return;
+        lane.push!.aliveAt = now;
         this.#signal(handle, 'watching');
         // Keeps `push-` fresh for `status` while nothing changes.
-        this.#pushStatus(handle, st.push!.stream.status);
+        this.#pushStatus(handle, lane.push!.stream.status);
       },
       status: (s) => this.#pushStatus(handle, s),
       log: (m) => this.#log(`[${handle}] ${m}`),
@@ -416,9 +523,10 @@ export class Router {
     this.#monitorLine(st, { push });
   }
 
-  /** A monitor line (push or polls) to the newest injector, outside the wake
-   * caps, never acknowledged. False when no injector is registered. */
-  #monitorLine(st: AgentState, line: Pick<Wake, 'push' | 'polls'>): boolean {
+  /** A monitor line (push, polls or Market off) to the newest injector,
+   * outside the wake caps, never acknowledged. False when no injector is
+   * registered. */
+  #monitorLine(st: AgentState, line: Pick<Wake, 'push' | 'polls' | 'market_off'>): boolean {
     const injector = st.injectors.at(-1);
     if (!injector) return false;
     const wake: Wake = { wake_id: randomUUID(), agent: st.cfg.handle, events: [], resync_required: false, ...line };
@@ -428,12 +536,12 @@ export class Router {
     return true;
   }
 
-  /** A poll or subscription setup failed. Once failures have lasted
+  /** A Tilori poll or subscription setup failed. Once failures have lasted
    * stall_minutes with no success between, tell the session once: nothing
    * else would, since no wake can arrive. Only fixed words reach it. */
-  #pollFailed(st: AgentState, cause: unknown): number | null {
+  #pollFailed(st: AgentState, lane: Lane, cause: unknown): number | null {
     const now = Date.now();
-    const f = (st.pollFail ??= { since: now, reason: 'other', told: false });
+    const f = (lane.pollFail ??= { since: now, reason: 'other', told: false });
     f.reason = failReason(cause);
     const { handle, stallMinutes } = st.cfg;
     // A refused key won't recover by itself (UNI-761): say so once, mark it
@@ -441,8 +549,8 @@ export class Router {
     const refused = keyRefused(cause);
     if (refused) {
       this.#signal(handle, 'rejected');
-      if (st.keyRefusedSince === null) {
-        st.keyRefusedSince = now;
+      if (lane.keyRefusedSince === null) {
+        lane.keyRefusedSince = now;
         this.#log(
           `[${handle}] Tilori refused this agent's key (HTTP 401 invalid_token). Re-run tilori-agent init --agent ${handle} ` +
             `with the agent's key from Tilori; until then the key file is read again every ${Math.round(this.#keyRetryMs / 1000)} s.`,
@@ -461,26 +569,76 @@ export class Router {
     return wait;
   }
 
-  /** A poll succeeded: if the session was told polls fail, say they work again. */
-  #pollOk(st: AgentState): void {
-    if (st.keyRefusedSince !== null) {
-      st.keyRefusedSince = null;
+  /** A Market lane setup or poll failed (Bastion b9dd0cb9 2 and 4): logs
+   * fixed words only, never the server's text, the key or the URL, and tells
+   * the session once that the Market wake is off. Failures that won't pass
+   * by themselves are told at once, others once they have lasted
+   * marketOffMs. A grant without market:read is no line at all, and is
+   * retried only at the renewal interval. Returns how long to wait. */
+  #marketFailed(st: AgentState, lane: Lane, cause: unknown, phase: 'setup' | 'poll', attempt: number, backoff: number): number {
+    const { handle } = st.cfg;
+    const reason = marketReason(cause, phase);
+    if (reason === 'no_grant') {
+      if (!lane.noGrant) this.#log(`[${handle}] Market: this key's Market grant has no market:read; no Market wakes`);
+      lane.noGrant = true;
+      return this.#renewEveryMs;
+    }
+    const wait = keyRefused(cause) ? this.#keyRetryMs : backoff;
+    this.#log(`[${handle}] Market ${phase} failed (${reason}, attempt ${attempt}, retry in ${wait} ms)`);
+    const now = Date.now();
+    const off = (lane.off ??= { since: now, told: false });
+    if (off.told) return wait;
+    const lasting = reason === 'not_authorized' || reason === 'subscription_refused' || now - off.since >= this.#marketOffMs;
+    if (lasting && this.#monitorLine(st, { market_off: reason })) {
+      off.told = true;
+      this.#log(`[${handle}] told the session that the Market wake is off (${reason})`);
+    }
+    return wait;
+  }
+
+  /** A failed lane setup or poll: the Tilori lane's rules or the Market
+   * lane's. Returns how long to wait, logging as each lane does. */
+  #laneFailed(
+    st: AgentState,
+    lane: Lane,
+    cause: unknown,
+    phase: 'setup' | 'poll',
+    attempt: number,
+    backoff: number,
+    tiloriLine: () => string,
+  ): number {
+    if (lane.name === 'market') return this.#marketFailed(st, lane, cause, phase, attempt, backoff);
+    const slow = this.#pollFailed(st, lane, cause);
+    if (slow === null) this.#log(`[${st.cfg.handle}] ${tiloriLine()}`);
+    return slow ?? backoff;
+  }
+
+  /** A poll succeeded: if the session was told polls fail, say they work
+   * again. A Market lane that recovers sends no line: its events are the
+   * news (Wren 4b976197). */
+  #pollOk(st: AgentState, lane: Lane): void {
+    if (lane.name === 'market') {
+      if (lane.off) this.#log(`[${st.cfg.handle}] Market works again`);
+      lane.off = null;
+      return;
+    }
+    if (lane.keyRefusedSince !== null) {
+      lane.keyRefusedSince = null;
       this.#log(`[${st.cfg.handle}] Tilori accepts the agent's key again`);
     }
-    const f = st.pollFail;
+    const f = lane.pollFail;
     if (!f) return;
-    st.pollFail = null;
+    lane.pollFail = null;
     if (f.told && this.#monitorLine(st, { polls: { state: 'ok' } }))
       this.#log(`[${st.cfg.handle}] told the session that polls work again`);
   }
 
-  /** Push mode: waits until a frame or a reconnect moved `seq` past `seen`,
-   * or the generation ends. */
-  /** Waits for a frame or a reconnect, or until `untilMs` from now. Real
-   * time (`Date.now()`), like the pauses that set `untilMs` and the timers
-   * that end them; `this.#now` is a fakeable clock for the wake caps only. */
-  async #waitPush(st: AgentState, seen: number, signal: AbortSignal, untilMs = Infinity): Promise<void> {
-    const p = st.push!;
+  /** Push mode: waits for a frame or a reconnect, or until `untilMs` from
+   * now. Real time (`Date.now()`), like the pauses that set `untilMs` and the
+   * timers that end them; `this.#now` is a fakeable clock for the wake caps
+   * only. */
+  async #waitPush(lane: Lane, seen: number, signal: AbortSignal, untilMs = Infinity): Promise<void> {
+    const p = lane.push!;
     const end = Date.now() + untilMs;
     while (p.seq === seen && !signal.aborted && Date.now() < end)
       await sleep(Math.min(this.#renewEveryMs, end - Date.now()), signal, p.kick.promise);
@@ -594,107 +752,169 @@ export class Router {
           const stop = new AbortController();
           const end = () => stop.abort();
           signal?.addEventListener('abort', end, { once: true });
+          const push = st.lanes.tilori.push;
           try {
             await Promise.all([
-              this.#runAgent(st, signal).finally(end),
-              st.push ? st.push.stream.run(stop.signal) : Promise.resolve(),
+              this.#runAgent(st, stop.signal).finally(end),
+              push ? push.stream.run(stop.signal) : Promise.resolve(),
             ]);
           } finally {
             signal?.removeEventListener('abort', end);
           }
         } finally {
-          // End the MCP session; a cancelled long poll leaves it open.
-          await st.cfg.client.close();
+          // End the MCP sessions; a cancelled long poll leaves one open.
+          await Promise.all(this.#laneList(st).map((lane) => lane.client.close()));
         }
       }),
     );
   }
 
-  async #runAgent(st: AgentState, signal?: AbortSignal): Promise<void> {
-    const { client, handle } = st.cfg;
-    const pending = new Map<string, AgentDelivery>();
+  /** One flush loop for the agent's lifetime over the shared `pending`, and
+   * each lane's own subscription generations beside it (Pax 61007a93 2): a
+   * lane renewing never ends the other lane's polls or drops its held
+   * batches. */
+  async #runAgent(st: AgentState, signal: AbortSignal): Promise<void> {
+    const pending = new Map<string, Held>();
+    await Promise.all([
+      this.#flushLoop(st, pending, signal),
+      ...this.#laneList(st).map((lane) => this.#runLane(st, lane, pending, signal)),
+    ]);
+  }
+
+  async #runLane(st: AgentState, lane: Lane, pending: Map<string, Held>, signal: AbortSignal): Promise<void> {
+    const { handle } = st.cfg;
+    const tilori = lane.name === 'tilori';
     let failures = 0;
     let quickRestarts = 0;
 
-    while (!signal?.aborted) {
+    while (!signal.aborted) {
       let subs: AgentSubscription[];
+      let skipped: Error | null = null;
       const now = Date.now();
-      for (const [key, at] of st.resubscribed) if (now - at > this.#renewEveryMs) st.resubscribed.delete(key);
-      for (const [key, at] of st.dropped) if (now - at > this.#renewEveryMs) st.dropped.delete(key);
+      for (const [key, at] of lane.resubscribed) if (now - at > this.#renewEveryMs) lane.resubscribed.delete(key);
+      for (const [key, at] of lane.dropped) if (now - at > this.#renewEveryMs) lane.dropped.delete(key);
       try {
         // Setting up counts as an attempt: a router that can't reach Tilori
         // at all must show as polling-but-failing, not as nothing running.
-        this.#signal(handle, 'attempting');
-        subs = await client.ensureSubscriptions(st.cfg.subscriptions, {
+        // `status` is about Tilori, so only the Tilori lane touches it.
+        if (tilori) this.#signal(handle, 'attempting');
+        subs = await lane.client.ensureSubscriptions(lane.subscriptions, {
           signal,
           // Subscriptions that just failed a poll are subscribed again.
-          renewIds: st.renewIds,
-          log: (m) => this.#log(`[${handle}] ${m}`),
+          renewIds: lane.renewIds,
+          // The Market lane logs fixed words only (Bastion b9dd0cb9 4).
+          log: tilori ? (m) => this.#log(`[${handle}] ${m}`) : () => {},
+          skipped: (cause) => (skipped = cause),
         });
-        st.renewIds.clear();
+        lane.renewIds.clear();
         failures = 0;
       } catch (cause) {
-        if (signal?.aborted) return;
+        if (signal.aborted) return;
         failures++;
         const backoff = Math.min(60_000, 1000 * 2 ** (failures - 1));
-        const slow = this.#pollFailed(st, cause);
-        if (slow === null) this.#log(`[${handle}] could not set up subscriptions (retry in ${backoff} ms): ${errText(cause)}`);
-        await sleep(slow ?? backoff, signal);
+        const line = () => `could not set up subscriptions (retry in ${backoff} ms): ${errText(cause)}`;
+        await sleep(this.#laneFailed(st, lane, cause, 'setup', failures, backoff, line), signal);
         continue;
       }
       if (!subs.length) {
-        this.#log(`[${handle}] no usable subscriptions; retrying in 60 s`);
-        await sleep(60_000, signal);
+        if (tilori) {
+          this.#log(`[${handle}] no usable subscriptions; retrying in 60 s`);
+          await sleep(60_000, signal);
+        } else {
+          failures++;
+          const cause = skipped ?? new ToolRefused('subscription refused');
+          await sleep(this.#marketFailed(st, lane, cause, 'setup', failures, 60_000), signal);
+        }
         continue;
       }
-      this.#log(`[${handle}] following ${subs.map((s) => s.scope.type).join(', ')}`);
-      st.directSubs = new Set(subs.filter((s) => DIRECT_SCOPES.has(s.scope.type)).map((s) => s.id));
+      lane.noGrant = false;
+      this.#log(`[${handle}] following ${tilori ? '' : 'Market '}${subs.map((s) => s.scope.type).join(', ')}`);
+      lane.direct = new Set(subs.filter((s) => DIRECT_SCOPES.has(s.scope.type)).map((s) => s.id));
+      st.directSubs = new Set(this.#laneList(st).flatMap((l) => [...l.direct]));
 
       // One generation runs until renewal is due or a subscription vanishes.
       const gen = new AbortController();
       const stopGen = () => gen.abort();
-      signal?.addEventListener('abort', stopGen, { once: true });
+      signal.addEventListener('abort', stopGen, { once: true });
       const renewal = setTimeout(stopGen, this.#renewEveryMs);
       const started = Date.now();
       try {
-        await Promise.all([this.#pollAgent(st, subs, pending, gen), this.#flushLoop(st, pending, gen.signal)]);
+        await this.#pollAgent(st, lane, subs, pending, gen);
       } finally {
         clearTimeout(renewal);
-        signal?.removeEventListener('abort', stopGen);
+        signal.removeEventListener('abort', stopGen);
       }
-      // Held batches stay unacknowledged on Tilori and are re-served next generation.
-      pending.clear();
-      st.heldSince = 0;
-      st.capHeld.clear();
+      // This lane's held batches stay unacknowledged and are re-served next
+      // generation; the other lane's stay held (Pax 61007a93 2).
+      for (const [id, d] of pending) {
+        if (d.lane !== lane.name) continue;
+        pending.delete(id);
+        st.capHeld.delete(d.delivery_id);
+      }
+      if (!pending.size) st.heldSince = 0;
       // A generation that ended at once (a subscription keeps vanishing) backs off.
-      if (signal?.aborted) return;
+      if (signal.aborted) return;
       quickRestarts = Date.now() - started < 5_000 ? quickRestarts + 1 : 0;
       if (quickRestarts > 1) await sleep(Math.min(60_000, 1000 * 2 ** (quickRestarts - 2)), signal);
     }
   }
 
-  /** Polls all of an agent's subscriptions with one long poll at a time
-   * (`subscription_ids`, UNI-380), so an agent holds one server waiter
+  /** Takes a delivered batch into `pending`, stamped with its lane. The
+   * Market lane passes on only transaction and execution events (Bastion
+   * b9dd0cb9 3): a batch with nothing else is acknowledged here, before
+   * `pending`, so it takes no cap slot and touches no wake memory (Pax
+   * 61007a93 4). True when the batch is held for a wake. */
+  async #admit(st: AgentState, lane: Lane, d: AgentDelivery, pending: Map<string, Held>, signal: AbortSignal): Promise<boolean> {
+    if (!(d.events.length > 0 || d.resync_required)) return false;
+    let events = d.events;
+    if (lane.name === 'market') {
+      events = d.events.filter((e) => MARKET_ENTITY_TYPES.has(e.entity_type));
+      if (!events.length && !d.resync_required) {
+        try {
+          await lane.client.acknowledge(d.subscription_id, d.delivery_id);
+        } catch {
+          if (signal.aborted) return false;
+          // Re-served by the next poll; don't spin on it meanwhile.
+          this.#log(`[${st.cfg.handle}] Market acknowledge failed; it is re-served and acknowledged again`);
+          await sleep(this.#retryMs * 5, signal);
+        }
+        return false;
+      }
+    }
+    // Only the first held batch starts the hold, so it has a fixed end. A
+    // batch arriving while others are still held (ack retry, deliver in
+    // flight) joins their wake without a hold of its own.
+    if (!pending.size) st.heldSince = Date.now();
+    pending.set(d.subscription_id, { ...d, events, lane: lane.name });
+    return true;
+  }
+
+  /** Polls all of a lane's subscriptions with one long poll at a time
+   * (`subscription_ids`, UNI-380), so the lane holds one server waiter
    * instead of one per subscription. Held subscriptions are left out until
    * acknowledged. Falls back to one long poll per subscription when the
    * server predates `subscription_ids`. */
   async #pollAgent(
     st: AgentState,
+    lane: Lane,
     subs: AgentSubscription[],
-    pending: Map<string, AgentDelivery>,
+    pending: Map<string, Held>,
     gen: AbortController,
   ): Promise<void> {
-    const { client, handle } = st.cfg;
+    const { handle } = st.cfg;
+    const { client } = lane;
+    const tilori = lane.name === 'tilori';
     const signal = gen.signal;
     let failures = 0;
     // Push mode: the `seq` the last poll covered (-1: poll now; a new
     // generation sweeps once).
     let seen = -1;
-    const wait = st.push ? 0 : this.#waitMs;
+    const push = lane.push;
+    const wait = push ? 0 : this.#waitMs;
     while (!signal.aborted) {
-      const usable = subs.filter((s) => !st.dropped.has(specKey(s)));
-      if (!st.push && (st.singleUntil > Date.now() || usable.length > MAX_POLL_SUBSCRIPTIONS)) {
-        await Promise.all(usable.map((sub) => this.#pollSubscription(st, sub, pending, gen)));
+      const usable = subs.filter((s) => !lane.dropped.has(specKey(s)));
+      if (!push && (lane.singleUntil > Date.now() || usable.length > MAX_POLL_SUBSCRIPTIONS)) {
+        await Promise.all(usable.map((sub) => this.#pollSubscription(st, lane, sub, pending, gen)));
         return;
       }
       if (!usable.length) {
@@ -702,46 +922,46 @@ export class Router {
         await sleep(this.#renewEveryMs, signal);
         return;
       }
-      const idle = usable.filter((s) => !pending.has(s.id) && this.#restingMs(st, s.id) <= 0);
-      const resting = usable.map((s) => this.#restingMs(st, s.id)).filter((ms) => ms > 0);
+      const idle = usable.filter((s) => !pending.has(s.id) && this.#restingMs(lane, s.id) <= 0);
+      const resting = usable.map((s) => this.#restingMs(lane, s.id)).filter((ms) => ms > 0);
       if (!idle.length) {
         // Resting after a wake is still watched: keep `status` from saying
         // "not watched" during a pause longer than its window (Iris).
-        if (resting.length && Date.now() - st.restSignalAt >= this.#restSignalMs) {
+        if (tilori && resting.length && Date.now() - st.restSignalAt >= this.#restSignalMs) {
           st.restSignalAt = Date.now();
           this.#signal(handle, 'watching');
         }
-        await sleep(Math.min(this.#retryMs, ...resting), signal, st.polled.promise);
+        await sleep(Math.min(this.#retryMs, ...resting), signal, lane.polled.promise);
         continue;
       }
-      if (st.push && st.push.seq === seen) {
+      if (push && push.seq === seen) {
         // Nothing new since the last poll: wait for a frame or a reconnect.
         // While push is down nothing polls (no long-poll fallback). A
         // subscription resting after a hand-off missed the sweeps during its
         // pause, so its end sweeps once more.
-        await this.#waitPush(st, seen, signal, resting.length ? Math.min(...resting) : Infinity);
+        await this.#waitPush(lane, seen, signal, resting.length ? Math.min(...resting) : Infinity);
         seen = -1;
         continue;
       }
-      if (st.push) {
+      if (push) {
         // A hard floor between one agent's push polls, whatever `seen` says,
         // so a bug here is a slow poll, never a spin (Bastion). Frames that
         // land meanwhile are covered by the one poll after it.
-        const gap = st.push.polledAt + PUSH_POLL_GAP_MS - Date.now();
+        const gap = push.polledAt + PUSH_POLL_GAP_MS - Date.now();
         if (gap > 0) {
           await sleep(gap, signal);
           continue;
         }
-        st.push.polledAt = Date.now();
+        push.polledAt = Date.now();
       }
       // Frames that land while this poll runs move `seq` again. Until the
       // poll succeeds, the next round polls again (a failed poll is retried
       // after its backoff, not left for the next frame).
-      const covered = st.push?.seq ?? 0;
+      const covered = push?.seq ?? 0;
       seen = -1;
       // Two abandoned calls (a restart, then a generation that ended
       // mid-call) may still hold waiters; a new call now would be a third.
-      const open = this.#openAbandoned(st);
+      const open = this.#openAbandoned(lane);
       if (open.length > 1) {
         await sleep(Math.min(...open) - Date.now(), signal);
         continue;
@@ -751,7 +971,7 @@ export class Router {
       // are acknowledged, so their next events are not delayed. The abandoned
       // call keeps its server waiter until its deadline; at most one is
       // outstanding (a restart waits for an earlier one to expire), so the
-      // agent stays within the server's two waiters per agent.
+      // lane stays within the server's two waiters.
       const call = new AbortController();
       const stopCall = () => call.abort();
       signal.addEventListener('abort', stopCall, { once: true });
@@ -763,22 +983,22 @@ export class Router {
         const restart = () => {
           if (call.signal.aborted) return;
           restarted = true;
-          st.abandoned.push(startedAt + wait + 1_000);
+          lane.abandoned.push(startedAt + wait + 1_000);
           call.abort();
         };
-        st.onPolled = () => {
-          const wait = Math.max(0, ...this.#openAbandoned(st)) - Date.now();
+        lane.onPolled = () => {
+          const wait = Math.max(0, ...this.#openAbandoned(lane)) - Date.now();
           if (wait <= 0) restart();
           else restartTimer = setTimeout(restart, wait);
         };
         // A resting subscription rejoins the long poll when its pause ends.
-        const resting = usable.map((s) => this.#restingMs(st, s.id)).filter((ms) => ms > 0);
-        if (resting.length) pauseTimer = setTimeout(() => st.onPolled?.(), Math.min(...resting));
+        const resting = usable.map((s) => this.#restingMs(lane, s.id)).filter((ms) => ms > 0);
+        if (resting.length) pauseTimer = setTimeout(() => lane.onPolled?.(), Math.min(...resting));
       }
       try {
-        this.#signal(handle, 'attempting');
-        const res = st.push
-          ? await this.#pollNow(st, idle, call.signal)
+        if (tilori) this.#signal(handle, 'attempting');
+        const res = push
+          ? await this.#pollNow(st, lane, idle, call.signal)
           : await client.pollMany(
               idle.map((s) => s.id),
               this.#waitMs,
@@ -787,51 +1007,41 @@ export class Router {
         // Answered, but nothing can arrive while every polled subscription
         // errored (they are re-subscribed next): not watched yet.
         if (res.errors.length < idle.length) {
-          this.#signal(handle, 'watching');
-          this.#pollOk(st);
+          if (tilori) this.#signal(handle, 'watching');
+          this.#pollOk(st, lane);
         }
         failures = 0;
         let got = false;
-        for (const d of res.deliveries) {
-          if (d.events.length > 0 || d.resync_required) {
-            // Only the first held batch starts the hold, so it has a fixed end.
-            // A batch arriving while others are still held (ack retry, deliver
-            // in flight) joins their wake without a hold of its own.
-            if (!pending.size) st.heldSince = Date.now();
-            pending.set(d.subscription_id, d);
-            got = true;
-          }
-        }
+        for (const d of res.deliveries) if (await this.#admit(st, lane, d, pending, signal)) got = true;
         if (got) this.#wake(st);
-        if (st.push) {
+        if (push) {
           // A sweep covers every idle subscription (#pollNow chunks them), so
           // only a batch (maybe more behind it) polls again; otherwise wait
           // for a frame.
           seen = got ? -1 : covered;
-          if (st.push.back) st.push.caught += res.deliveries.reduce((n, d) => n + d.events.length, 0);
+          if (push.back) push.caught += res.deliveries.reduce((n, d) => n + d.events.length, 0);
         }
         let resubscribe = false;
         for (const e of res.errors) {
           const sub = idle.find((s) => s.id === e.subscription_id)!;
           const key = specKey(sub);
-          const at = st.resubscribed.get(key);
+          const at = lane.resubscribed.get(key);
           if (at === undefined || Date.now() - at > this.#renewEveryMs) {
-            st.resubscribed.set(key, Date.now());
-            st.renewIds.add(sub.id);
-            this.#log(`[${handle}] subscription ${e.subscription_id} could not be polled (${e.error_code}); re-subscribing`);
+            lane.resubscribed.set(key, Date.now());
+            lane.renewIds.add(sub.id);
+            this.#log(`[${handle}] ${tilori ? '' : 'Market '}subscription ${e.subscription_id} could not be polled (${e.error_code}); re-subscribing`);
             resubscribe = true;
           } else {
-            st.dropped.set(key, Date.now());
-            this.#log(`[${handle}] dropping subscription ${e.subscription_id} (${e.error_code}) until the next renewal`);
+            lane.dropped.set(key, Date.now());
+            this.#log(`[${handle}] dropping ${tilori ? '' : 'Market '}subscription ${e.subscription_id} (${e.error_code}) until the next renewal`);
           }
         }
         if (resubscribe) {
           // This call's deliveries for other subscriptions are in `pending`
-          // but never handed off: the flush loop ends with the generation
-          // before it can take them, and #runAgent then clears `pending`.
-          // They stay unacknowledged, so the server re-serves them next
-          // generation; the cost is one extra round trip, not a lost or
-          // repeated wake.
+          // but never handed off: the flush loop may not take them before
+          // #runLane clears this lane's entries. They stay unacknowledged,
+          // so the server re-serves them next generation; the cost is one
+          // extra round trip, not a lost or repeated wake.
           gen.abort();
           return;
         }
@@ -841,7 +1051,7 @@ export class Router {
         } else if (got) {
           // Give the handoff a moment to acknowledge, so the next long poll
           // can include these subscriptions again.
-          await sleep(this.#retryMs, signal, st.polled.promise);
+          await sleep(this.#retryMs, signal, lane.polled.promise);
         } else if (!res.errors.length && wait >= 5_000 && Date.now() - startedAt < 1_000) {
           // An older server degraded the long poll to an immediate one without
           // saying how long to wait; don't spin.
@@ -851,28 +1061,27 @@ export class Router {
         if (signal.aborted) {
           // The generation ended mid-call (renewal or stop): the call keeps
           // its server waiter until its deadline.
-          if (!restarted) st.abandoned.push(startedAt + wait + 1_000);
+          if (!restarted) lane.abandoned.push(startedAt + wait + 1_000);
           return;
         }
         if (restarted) continue;
         if (cause instanceof MultiPollUnsupported) {
-          st.singleUntil = Date.now() + this.#renewEveryMs;
-          this.#log(`[${handle}] server does not accept subscription_ids; polling each subscription separately`);
+          lane.singleUntil = Date.now() + this.#renewEveryMs;
+          this.#log(`[${handle}] ${tilori ? '' : 'Market '}server does not accept subscription_ids; polling each subscription separately`);
           continue;
         }
         const msg = errText(cause);
         if (gone(msg)) {
-          this.#log(`[${handle}] a subscription is gone; re-subscribing`);
+          this.#log(`[${handle}] a ${tilori ? '' : 'Market '}subscription is gone; re-subscribing`);
           gen.abort();
           return;
         }
         failures++;
         const backoff = Math.min(30_000, 500 * 2 ** (failures - 1));
-        const slow = this.#pollFailed(st, cause);
-        if (slow === null) this.#log(`[${handle}] Tilori error (attempt ${failures}, retry in ${backoff} ms): ${msg}`);
-        await sleep(slow ?? backoff, signal);
+        const line = () => `Tilori error (attempt ${failures}, retry in ${backoff} ms): ${msg}`;
+        await sleep(this.#laneFailed(st, lane, cause, 'poll', failures, backoff, line), signal);
       } finally {
-        st.onPolled = null;
+        lane.onPolled = null;
         clearTimeout(restartTimer);
         clearTimeout(pauseTimer);
         signal.removeEventListener('abort', stopCall);
@@ -883,9 +1092,9 @@ export class Router {
   /** Push mode's zero-wait sweep of every idle subscription: multiplexed
    * calls of up to MAX_POLL_SUBSCRIPTIONS ids, or one call per id on a
    * server without `subscription_ids`. Never a long poll. */
-  async #pollNow(st: AgentState, subs: AgentSubscription[], signal: AbortSignal): Promise<MultiPollResult> {
-    const { client } = st.cfg;
-    if (st.singleUntil <= Date.now()) {
+  async #pollNow(st: AgentState, lane: Lane, subs: AgentSubscription[], signal: AbortSignal): Promise<MultiPollResult> {
+    const { client } = lane;
+    if (lane.singleUntil <= Date.now()) {
       try {
         // Every idle subscription, MAX_POLL_SUBSCRIPTIONS ids per call, so
         // one sweep reads them all and a sweep never repeats itself.
@@ -907,7 +1116,7 @@ export class Router {
         return out;
       } catch (cause) {
         if (!(cause instanceof MultiPollUnsupported)) throw cause;
-        st.singleUntil = Date.now() + this.#renewEveryMs;
+        lane.singleUntil = Date.now() + this.#renewEveryMs;
         this.#log(`[${st.cfg.handle}] server does not accept subscription_ids; polling each subscription separately`);
       }
     }
@@ -921,19 +1130,19 @@ export class Router {
   }
 
   /** How long a subscription still rests after a hand-off (0 when not). */
-  #restingMs(st: AgentState, id: string): number {
-    const until = st.paused.get(id);
+  #restingMs(lane: Lane, id: string): number {
+    const until = lane.paused.get(id);
     if (until === undefined) return 0;
     const ms = until - Date.now();
-    if (ms <= 0) st.paused.delete(id);
+    if (ms <= 0) lane.paused.delete(id);
     return Math.max(0, ms);
   }
 
-  /** Deadlines of abandoned calls that may still hold a server waiter. */
-  #openAbandoned(st: AgentState): number[] {
+  /** Deadlines of a lane's abandoned calls that may still hold a server waiter. */
+  #openAbandoned(lane: Lane): number[] {
     const now = Date.now();
-    st.abandoned = st.abandoned.filter((t) => t > now);
-    return st.abandoned;
+    lane.abandoned = lane.abandoned.filter((t) => t > now);
+    return lane.abandoned;
   }
 
   /** Long-polls one subscription: the fallback for servers without
@@ -942,34 +1151,34 @@ export class Router {
    * (1-3 s). While its batch is held, it waits. */
   async #pollSubscription(
     st: AgentState,
+    lane: Lane,
     sub: AgentSubscription,
-    pending: Map<string, AgentDelivery>,
+    pending: Map<string, Held>,
     gen: AbortController,
   ): Promise<void> {
-    const { client, handle } = st.cfg;
+    const { handle } = st.cfg;
+    const { client } = lane;
+    const tilori = lane.name === 'tilori';
     const signal = gen.signal;
     let failures = 0;
     while (!signal.aborted) {
       if (pending.has(sub.id)) {
-        await sleep(this.#retryMs, signal, st.polled.promise);
+        await sleep(this.#retryMs, signal, lane.polled.promise);
         continue;
       }
-      const resting = this.#restingMs(st, sub.id);
+      const resting = this.#restingMs(lane, sub.id);
       if (resting > 0) {
         await sleep(resting, signal);
         continue;
       }
       try {
         const started = Date.now();
-        this.#signal(handle, 'attempting');
+        if (tilori) this.#signal(handle, 'attempting');
         const { delivery: d, retryAfterMs } = await client.pollOne(sub.id, this.#waitMs, signal);
-        this.#signal(handle, 'watching');
-        this.#pollOk(st);
+        if (tilori) this.#signal(handle, 'watching');
+        this.#pollOk(st, lane);
         failures = 0;
-        if (d && (d.events.length > 0 || d.resync_required)) {
-          // Only the first held batch starts the hold (see #pollAgent).
-          if (!pending.size) st.heldSince = Date.now();
-          pending.set(sub.id, d);
+        if (d && (await this.#admit(st, lane, d, pending, signal))) {
           this.#wake(st);
         } else if (retryAfterMs) {
           await sleep(retryAfterMs, signal);
@@ -982,20 +1191,19 @@ export class Router {
         if (signal.aborted) return;
         const msg = errText(cause);
         if (gone(msg)) {
-          this.#log(`[${handle}] ${sub.scope.type} subscription is gone; re-subscribing`);
+          this.#log(`[${handle}] ${tilori ? '' : 'Market '}${sub.scope.type} subscription is gone; re-subscribing`);
           gen.abort();
           return;
         }
         failures++;
         const backoff = Math.min(30_000, 500 * 2 ** (failures - 1));
-        const slow = this.#pollFailed(st, cause);
-        if (slow === null) this.#log(`[${handle}] Tilori error on ${sub.scope.type} (attempt ${failures}, retry in ${backoff} ms): ${msg}`);
-        await sleep(slow ?? backoff, signal);
+        const line = () => `Tilori error on ${sub.scope.type} (attempt ${failures}, retry in ${backoff} ms): ${msg}`;
+        await sleep(this.#laneFailed(st, lane, cause, 'poll', failures, backoff, line), signal);
       }
     }
   }
 
-  async #flushLoop(st: AgentState, pending: Map<string, AgentDelivery>, signal: AbortSignal): Promise<void> {
+  async #flushLoop(st: AgentState, pending: Map<string, Held>, signal: AbortSignal): Promise<void> {
     let failures = 0;
     while (!signal.aborted) {
       if (!pending.size) {
@@ -1012,7 +1220,9 @@ export class Router {
         if (signal.aborted) return;
         failures++;
         waitMs = Math.min(30_000, 500 * 2 ** (failures - 1));
-        this.#log(`[${st.cfg.handle}] acknowledge failed (retry in ${waitMs} ms): ${errText(cause)}`);
+        // An ack's error may carry the Market server's words: fixed text then.
+        const why = cause instanceof LaneAckFailed && cause.lane === 'market' ? failReason(cause.cause) : errText(cause);
+        this.#log(`[${st.cfg.handle}] acknowledge failed (retry in ${waitMs} ms): ${why}`);
       }
       if (waitMs > 0) await sleep(waitMs, signal, st.kick.promise);
       else this.#firePolled(st);
@@ -1020,12 +1230,14 @@ export class Router {
   }
 
   #firePolled(st: AgentState) {
-    const k = st.polled;
-    st.polled = makeKick();
-    k.fire();
-    const restart = st.onPolled;
-    st.onPolled = null;
-    restart?.();
+    for (const lane of this.#laneList(st)) {
+      const k = lane.polled;
+      lane.polled = makeKick();
+      k.fire();
+      const restart = lane.onPolled;
+      lane.onPolled = null;
+      restart?.();
+    }
   }
 
   /** Sends a due reminder. It runs in the flush loop, so it is never in
@@ -1156,8 +1368,8 @@ export class Router {
 
   /** Tries to hand held batches to the agent's injector. Returns 0 when done,
    * else how long to wait before retrying. Logs counts only, never content. */
-  async #flush(st: AgentState, pending: Map<string, AgentDelivery>, signal?: AbortSignal): Promise<number> {
-    const { client, handle } = st.cfg;
+  async #flush(st: AgentState, pending: Map<string, Held>, signal?: AbortSignal): Promise<number> {
+    const { handle } = st.cfg;
     const batches = [...pending.values()];
     const count = batches.reduce((n, d) => n + d.events.length, 0);
 
@@ -1172,7 +1384,7 @@ export class Router {
       if (now - at <= RECENT_MS) break;
       st.recent.delete(key);
     }
-    const known = (d: AgentDelivery) => {
+    const known = (d: Held) => {
       const refs = toRefs([d]);
       return !d.resync_required && refs.length > 0 && refs.every((r) => this.#seen(st, r));
     };
@@ -1244,9 +1456,11 @@ export class Router {
         notice(`holding ${count} event(s): no injector registered for this agent yet`);
         return this.#retryMs * 5;
       }
-      // Over the cap, direct batches (inbox, mentions, DMs) still wake on
-      // their own allowance; broad traffic waits and coalesces. A broad batch
-      // with any mention or dm.* event goes out whole (acks are per batch).
+      // Over the cap, direct batches (inbox, mentions, DMs, Market) still
+      // wake on their own allowance; broad traffic waits and coalesces. A
+      // broad batch with any mention or dm.* event goes out whole (acks are
+      // per batch). A capped batch is held, never dropped: it stays
+      // unacknowledged until a wake carries it.
       let send = fresh;
       let limiter = st.limiter;
       const capWait = st.limiter.waitMs();
@@ -1266,9 +1480,20 @@ export class Router {
         send = direct;
         limiter = st.directLimiter!;
       }
-      const wake = buildWake(handle, send, randomUUID(), st.directSubs);
+      // Tilori batches make the wake's events; Market batches its Market
+      // part, kinds and ids only.
+      const marketSend = send.filter((d) => d.lane === 'market');
+      const wake = buildWake(
+        handle,
+        send.filter((d) => d.lane === 'tilori'),
+        randomUUID(),
+        st.directSubs,
+      );
+      const marketEvents = marketRefs(marketSend);
+      if (marketEvents.length || marketSend.some((d) => d.resync_required))
+        wake.market = { events: marketEvents, ...(marketSend.some((d) => d.resync_required) ? { resync: true as const } : {}) };
       // Counted from batches, not wake.events, which may be deduplicated.
-      const events = (ds: AgentDelivery[]) => ds.reduce((n, d) => n + d.events.length, 0);
+      const events = (ds: Held[]) => ds.reduce((n, d) => n + d.events.length, 0);
       // Leave out posts an earlier wake already named; count the events
       // whose post is gone from this wake (not ones a mention still carries).
       wake.events = wake.events.filter((r) => !this.#seen(st, r));
@@ -1305,7 +1530,7 @@ export class Router {
       limiter.record();
       if (st.cfg.reminder?.onlyWhenIdle) st.reminderAt = Date.now() + st.cfg.reminder.everyMs;
       st.stats.wakes++;
-      st.stats.events += wake.events.length;
+      st.stats.events += wake.events.length + marketEvents.length;
       this.#noteBlocked(st);
       st.stats.delayed = stillHeld;
       st.heldNotice = '';
@@ -1318,13 +1543,14 @@ export class Router {
         // window per subscription. The pause starts at the hand-off, so a
         // busy thread can't delay a wake, and a running pause is not
         // extended.
-        if (this.#restingMs(st, d.subscription_id) <= 0) {
+        const lane = st.lanes[d.lane];
+        if (lane && this.#restingMs(lane, d.subscription_id) <= 0) {
           const ms = st.directSubs.has(d.subscription_id)
             ? this.#directPauseMs
             : st.cfg.pauseSeconds === undefined
               ? this.#broadPauseMs
               : st.cfg.pauseSeconds * 1000;
-          if (ms > 0) st.paused.set(d.subscription_id, Date.now() + ms);
+          if (ms > 0) lane.paused.set(d.subscription_id, Date.now() + ms);
         }
       }
       // Remembered only once accepted, so a busy or gone attempt never
@@ -1340,20 +1566,38 @@ export class Router {
       }
       while (st.recent.size > MAX_RECENT) st.recent.delete(st.recent.keys().next().value!);
       this.#log(
-        `[${handle}] woke ${injector.kind} with ${wake.events.length} event(s)` +
+        `[${handle}] woke ${injector.kind} with ${wake.events.length + marketEvents.length} event(s)` +
           (limiter === st.directLimiter ? ` past the wake cap; ${stillHeld} still held` : ''),
       );
     }
 
-    // Acknowledge what was handed off; batches the cap still holds wait.
+    // Acknowledge what was handed off, each through the lane that delivered
+    // it (Pax 61007a93 3); batches the cap still holds wait.
     for (const d of batches.filter((b) => st.handedOff.has(b.delivery_id))) {
+      const lane = st.lanes[d.lane];
       // Not tied to the stop signal: a batch already handed off is always
       // acknowledged, even while the router is stopping.
-      await client.acknowledge(d.subscription_id, d.delivery_id);
+      try {
+        if (lane) await lane.client.acknowledge(d.subscription_id, d.delivery_id);
+      } catch (cause) {
+        throw new LaneAckFailed(d.lane, cause);
+      }
       st.handedOff.delete(d.delivery_id);
-      pending.delete(d.subscription_id);
+      // Only this entry: the lane may have renewed and holds a new batch
+      // for the same subscription by now.
+      if (pending.get(d.subscription_id) === d) pending.delete(d.subscription_id);
     }
     if (!pending.size) st.heldSince = 0;
     return 0;
+  }
+}
+
+/** An acknowledgement failed on one lane; retried on that lane. */
+class LaneAckFailed extends Error {
+  constructor(
+    readonly lane: LaneName,
+    override readonly cause: unknown,
+  ) {
+    super(errText(cause));
   }
 }

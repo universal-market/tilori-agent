@@ -462,6 +462,9 @@ export class TiloriAgentClient {
       /** Subscription ids to subscribe again even if they look live. */
       renewIds?: ReadonlySet<string>;
       log?: (m: string) => void;
+      /** Called with each skipped spec's (redacted) error, for callers that
+       * classify it instead of logging its words. */
+      skipped?: (cause: Error) => void;
     } = {},
   ): Promise<AgentSubscription[]> {
     const existing = await this.listSubscriptions(options.signal);
@@ -478,7 +481,11 @@ export class TiloriAgentClient {
       try {
         out.push(await this.subscribe(spec, options.signal));
       } catch (cause) {
-        (options.log ?? this.log)(`Skipping ${spec.scope.type} subscription: ${this.#clean(cause).message}`);
+        const clean = this.#clean(cause);
+        // A refusal keeps its class (its text is already redacted), so a
+        // caller can tell it from a transport failure.
+        options.skipped?.(cause instanceof ToolRefused ? cause : clean);
+        (options.log ?? this.log)(`Skipping ${spec.scope.type} subscription: ${clean.message}`);
       }
     }
     return out;

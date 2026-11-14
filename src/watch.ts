@@ -1,10 +1,10 @@
 import { activityDir, stallMinutes } from './activity.ts';
 import { TiloriAgentClient } from './client.ts';
-import { pauseSeconds, desiredSubscriptions, keyUrl, pushEnabled, reminderSettings, type TiloriConfig } from './config.ts';
+import { pauseSeconds, desiredSubscriptions, keyUrl, marketKeyUrl, pushEnabled, reminderSettings, type TiloriConfig } from './config.ts';
 import { NotifyLinesInjector } from './injectors/notify-lines.ts';
 import { attachToRouter, probeRouter, socketIdentity, socketPath } from './ipc.ts';
 import { ensurePrivateDir, readKey } from './keys.ts';
-import { Router } from './router.ts';
+import { Router, type RouterAgentConfig } from './router.ts';
 import { followConfig } from './settings.ts';
 import type { Injector } from './types.ts';
 import type { UpdateNotice } from './update-notice.ts';
@@ -56,6 +56,28 @@ export function exitWhenOrphaned(log: (m: string) => void = () => {}): void {
   orphanCheck.unref();
 }
 
+/** The agent's Market lane (UNI-861 S2), or undefined when config.json has
+ * no market_url: then nothing connects to Market and the key goes nowhere
+ * else. The key goes only to that recorded address (marketKeyUrl). A
+ * market_url that can't be used is logged in fixed words and leaves the
+ * Tilori lane running. */
+export function marketLane(
+  config: TiloriConfig,
+  handle: string,
+  apiKey: string,
+  rereadKey: () => string,
+  logger?: (m: string) => void,
+): RouterAgentConfig['market'] {
+  let url: URL | null;
+  try {
+    url = marketKeyUrl(config);
+  } catch {
+    logger?.(`[${handle}] market_url in config.json is not a usable Market address; no Market wakes`);
+    return undefined;
+  }
+  return url ? { client: new TiloriAgentClient({ url, apiKey, rereadKey, logger }) } : undefined;
+}
+
 /** Builds a one-agent router that talks to Tilori directly with the agent's key. */
 export function directRouter(opts: NotifyLinesOptions): Router {
   const settings = opts.config.agents?.[opts.agent] ?? {};
@@ -77,6 +99,7 @@ export function directRouter(opts: NotifyLinesOptions): Router {
         reminder: reminderSettings(settings),
         stallMinutes: stallMinutes(settings.stall_minutes),
         ...(pushEnabled(settings) ? { push: { endpoint: url, apiKey, rereadKey } } : {}),
+        market: marketLane(opts.config, opts.agent, apiKey, rereadKey, opts.logger),
       },
     ],
     logger: opts.logger,

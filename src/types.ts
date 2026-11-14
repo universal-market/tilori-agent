@@ -164,7 +164,26 @@ export interface Wake {
   /** `key_refused`: Tilori refused the key itself (401 invalid_token), so
    * re-running init is the fix; absent for any other failure (UNI-764). */
   polls?: { state: 'failing'; since: number; reason: PollFailReason; key_refused?: true } | { state: 'ok' };
+  /** Market events from the agent's Market lane (UNI-861 S2): kinds and ids
+   * only, never payload text. `resync`: some Market history expired. */
+  market?: { events: MarketRef[]; resync?: true };
+  /** A Market monitor line instead of events: the Market lane has failed for
+   * a fixed reason. Carries no events; never acknowledged. */
+  market_off?: MarketOffReason;
 }
+
+/** A Market event as a wake names it: a kind from a fixed table (or
+ * `other`), the entity type and a checked id. */
+export interface MarketRef {
+  kind: string;
+  entity_type: 'transaction' | 'execution';
+  entity_id: string;
+}
+
+/** Why the Market wake is off, in fixed words (Bastion b9dd0cb9): never server
+ * or error text, and never the URL. */
+export const MARKET_OFF_REASONS = ['not_authorized', 'unreachable', 'subscription_refused', 'other'] as const;
+export type MarketOffReason = (typeof MARKET_OFF_REASONS)[number];
 
 /** Why polls fail, in fixed words: never server or error text. */
 export const POLL_FAIL_REASONS = ['auth', 'access', 'refused', 'timeout', 'network', 'other'] as const;

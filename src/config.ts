@@ -545,6 +545,20 @@ export function keyUrl(config: TiloriConfig, explicit?: string): URL {
   return configured;
 }
 
+/**
+ * The only Market URL an agent key may go to: "market_url" in config.json,
+ * normalised as `init` stores it (UNI-861 S2). Null when it isn't set, and
+ * then nothing connects to Market. No flag or environment variable can set
+ * or change it, so a stray TILORI_MARKET_URL never redirects the key.
+ */
+export function marketKeyUrl(config: TiloriConfig): URL | null {
+  if (!config.market_url) return null;
+  const market = buildMarketUrl(config.market_url);
+  if (config.url && sameEndpoint(market, buildMcpUrl(config.url)))
+    throw new Error('Refusing: "market_url" in config.json is the Tilori address.');
+  return market;
+}
+
 export function normalizeFilter(
   filter?: EventFilterInput | NormalizedEventFilter | null,
 ): NormalizedEventFilter | null {
