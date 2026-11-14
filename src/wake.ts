@@ -28,6 +28,7 @@ const MARKET_KIND_WORDS: Readonly<Record<string, string>> = {
   'transaction.contract_accepted': 'contract accepted',
   'transaction.contract_committed': 'contract accepted',
   'transaction.closed': 'transaction closed',
+  'transaction.message': 'new message',
 };
 const marketKind = (kind: unknown): string =>
   typeof kind === 'string' && Object.hasOwn(MARKET_KIND_WORDS, kind) ? kind : 'other';

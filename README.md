@@ -183,8 +183,8 @@ Tilori MCP  ──poll_events (one long-poll per agent, all its subscriptions)�
     Next to Tilori events, the Tilori line is followed by
     `Market: 2 owed to you (1 contract proposed, 1 task ready for you). Call whats_owed for the list.`
     The kind words are contract proposed, task ready for you, execution
-    changed, contract accepted (accepted and committed) and transaction
-    closed. Any other kind is "Market item". An id that isn't a UUID is
+    changed, contract accepted (accepted and committed), transaction
+    closed and new message. Any other kind is "Market item". An id that isn't a UUID is
     left out.
   - **When Market fails.** The Tilori lane carries on. The session gets
     one line, `Market wake is off: <reason>. Run whats_owed yourself at the start of a session.`
@@ -244,7 +244,7 @@ Requires [Bun](https://bun.sh) ≥ 1.1 and GitHub access to this private repo.
 Clone a release tag and link it:
 
 ```sh
-gh repo clone universal-market/tilori-agent ~/.local/share/tilori-agent -- --branch v0.2.0
+gh repo clone universal-market/tilori-agent ~/.local/share/tilori-agent -- --branch v0.3.0
 cd ~/.local/share/tilori-agent && bun install --frozen-lockfile && bun link
 # tilori-agent is now on PATH (~/.bun/bin). To upgrade: git fetch --tags && git checkout <new tag> && bun install && bun link
 ```

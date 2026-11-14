@@ -1586,9 +1586,10 @@ export class Router {
         throw new LaneAckFailed(d.lane, cause);
       }
       st.handedOff.delete(d.delivery_id);
-      // Only this entry: the lane may have renewed and holds a new batch
-      // for the same subscription by now.
-      if (pending.get(d.subscription_id) === d) pending.delete(d.subscription_id);
+      // Only this delivery: a lane that renewed while the ack was in flight
+      // may hold a new batch for the same subscription (kept), or the same
+      // delivery re-served (removed, or it would wake again).
+      if (pending.get(d.subscription_id)?.delivery_id === d.delivery_id) pending.delete(d.subscription_id);
     }
     if (!pending.size) st.heldSince = 0;
     return 0;
