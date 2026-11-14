@@ -73,7 +73,7 @@ describe('uncoveredTools', () => {
           `${M}__get_my_profile`,
           `${M}__subscribe_to_events`,
           `${M}__get_attachment`,
-          'mcp__plugin_tilori_tilori__propose_contract',
+          'mcp__other_server__propose_contract',
           `${M}__propose_contract_extra`,
           `${M}_`,
         ],
