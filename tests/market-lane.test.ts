@@ -355,29 +355,35 @@ describe('Market lane', () => {
     const { tilori, market, rec, stop } = setup();
     await ready(market);
     await ready(tilori, 2);
-    // A Tilori batch the session is too busy for, held while Market renews.
-    rec.next = ['busy', 'busy', 'busy', 'busy'];
-    tilori.push('inbox', [mention()]);
-    await until(() => rec.attempts >= 2);
-    const tiloriSetups = tilori.calls.filter((c) => c === 'list_agent_subscriptions').length;
-    const marketSetups = market.calls.filter((c) => c === 'list_agent_subscriptions').length;
-    market.subs = [];
-    await until(() => market.calls.filter((c) => c === 'list_agent_subscriptions').length > marketSetups);
+    const setups = (f: FakeTilori) => f.calls.filter((c) => c === 'list_agent_subscriptions').length;
+    const inbox = (f: FakeTilori) => f.subs.find((s) => s.scope.type === 'inbox')!.id;
+    const busy = () => Array<DeliverResult>(9).fill('busy');
+    // A held batch's subscription is left out of polls until it is
+    // acknowledged; if a renewal of the other lane dropped it from pending,
+    // the next poll would ask for it again.
+    const heldThrough = async (held: FakeTilori, other: FakeTilori) => {
+      const id = inbox(held);
+      const before = rec.attempts;
+      rec.next = busy();
+      held.push('inbox', [held === tilori ? mention() : ev('task.ready', 'execution')]);
+      await until(() => rec.attempts >= before + 2);
+      const from = held.polls.length;
+      const heldSetups = setups(held);
+      const otherSetups = setups(other);
+      other.subs = [];
+      await until(() => setups(other) > otherSetups && other.subs.length > 0);
+      await sleep(80);
+      expect(rec.next.length).toBeGreaterThan(0);
+      expect(held.polls.slice(from).some((p) => p.ids.includes(id))).toBe(false);
+      expect(setups(held)).toBe(heldSetups);
+      rec.next = [];
+    };
+    await heldThrough(tilori, market);
     await until(() => rec.events.length === 1, 5000);
     await until(() => tilori.acks.length === 1);
-    expect(tilori.calls.filter((c) => c === 'list_agent_subscriptions').length).toBe(tiloriSetups);
-    // The reverse: a held Market batch while Tilori renews.
-    rec.next = ['busy', 'busy', 'busy', 'busy'];
-    const before = rec.attempts;
-    market.push('inbox', [ev('task.ready', 'execution')]);
-    await until(() => rec.attempts >= before + 2);
-    const marketSetups2 = market.calls.filter((c) => c === 'list_agent_subscriptions').length;
-    const tiloriSetups2 = tilori.calls.filter((c) => c === 'list_agent_subscriptions').length;
-    tilori.subs = [];
-    await until(() => tilori.calls.filter((c) => c === 'list_agent_subscriptions').length > tiloriSetups2);
+    await heldThrough(market, tilori);
     await until(() => rec.events.length === 2, 5000);
     await until(() => market.acks.length === 1);
-    expect(market.calls.filter((c) => c === 'list_agent_subscriptions').length).toBe(marketSetups2);
     expect(rec.events[1].market?.events.length).toBe(1);
     await stop();
   }, 15_000);
