@@ -339,7 +339,10 @@ export function failReason(cause: unknown): PollFailReason {
  * (Juniper 644de98e 5). Only the class of failure is kept, never its text. */
 export function marketReason(cause: unknown, phase: 'setup' | 'poll'): MarketOffReason | 'no_grant' {
   const text = errText(cause);
-  if ((cause as { code?: unknown } | null)?.code === 403 || /\b403\b|insufficient_scope|market:read/i.test(text)) return 'no_grant';
+  // Only a missing scope is silent (Pax a1d0373b): any other 403, such as
+  // the access gate or participation turned off, is told as not authorized.
+  if (/insufficient_scope|market:read/i.test(text)) return 'no_grant';
+  if ((cause as { code?: unknown } | null)?.code === 403 || /\b403\b/.test(text)) return 'not_authorized';
   switch (failReason(cause)) {
     case 'auth':
     case 'access':

@@ -323,6 +323,19 @@ describe('Market lane', () => {
     await stop();
   });
 
+  for (const message of ['Error POSTing to endpoint (HTTP 403): Access is restricted on this instance', 'HTTP 403 PERMISSION_DENIED participation is off']) {
+    test(`a Market 403 that isn't a missing scope is told once as not authorized (Pax a1d0373b): ${message.slice(0, 40)}`, async () => {
+      const market = new MarketFake();
+      market.failSetup = Object.assign(new Error(message), { code: 403 });
+      const { rec, logs, stop } = setup({ market });
+      await until(() => rec.wakes.some((w) => w.market_off !== undefined));
+      await sleep(100);
+      expect(rec.wakes.map((w) => w.market_off)).toEqual(['not_authorized']);
+      expect(logs.some((l) => l.includes('no market:read'))).toBe(false);
+      await stop();
+    });
+  }
+
   test('Market setup and ack failures log fixed words, never the key or a response body (Bastion 4)', async () => {
     const market = new MarketFake();
     market.failSetup = new Error(`fetch failed ${SECRET} Bearer ${KEY}`);
