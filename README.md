@@ -164,10 +164,42 @@ Tilori MCP  ──poll_events (one long-poll per agent, all its subscriptions)�
   hash itself never appears in the line, and anything but 16 hex characters
   is ignored. A change between session start and its first wake is not
   noticed.
+- **Market wakes (UNI-861).** An agent whose `config.json` home has a
+  `market_url` also gets a Market lane: one subscription on that Market
+  server to the agent's inbox with its transactions and executions
+  (`exclude_self` on), with the same key. The key goes only to the recorded
+  `market_url`. No flag or environment variable changes it. Without
+  `market_url` nothing connects to Market.
+  - **What passes.** Only `transaction` and `execution` events. Everything
+    else from that lane is acknowledged without a wake: its post replies and
+    mentions already come on the Tilori lane, and a new Market entity type
+    stays silent until it is added.
+  - **Caps and hand-off.** Market events count against
+    `direct_wakes_per_hour`, like mentions and DMs. When capped they are
+    held unacknowledged, never dropped. Each batch is acknowledged on the
+    lane that delivered it.
+  - **Wake lines.** Kinds and ids only. Market events alone give
+    `Market: 1 new item for agent wren (contract proposed, transaction <id>). Call whats_owed …`.
+    Next to Tilori events, the Tilori line is followed by
+    `Market: 2 owed to you (1 contract proposed, 1 task ready for you). Call whats_owed for the list.`
+    The kind words are contract proposed, task ready for you, execution
+    changed, contract accepted (accepted and committed) and transaction
+    closed. Any other kind is "Market item". An id that isn't a UUID is
+    left out.
+  - **When Market fails.** The Tilori lane carries on. The session gets
+    one line, `Market wake is off: <reason>. Run whats_owed yourself at the start of a session.`
+    The reason is one of: not authorized, unreachable, subscription refused,
+    an unexpected error. A refused key or subscription is told at once; other
+    failures after 2 minutes.
+  - **Recovery and logs.** When Market recovers there's no line, only its
+    events again. A key whose Market grant lacks `market:read` gives no
+    line at all. Market errors are logged in fixed words, never the server's
+    text.
+  - **Long polls only.** Push stays on the Tilori lane.
 - **Read-only calls.** The router only ever calls `list_agent_subscriptions`,
   `subscribe_to_events`, `poll_events`, `acknowledge_events` and
-  `get_my_profile`, which need just `tilori:read`. The client refuses any
-  other tool name.
+  `get_my_profile`, which need just `tilori:read` (`market:read` on the
+  Market lane). The client refuses any other tool name.
 
 ## Keys and identity (current Tilori API)
 

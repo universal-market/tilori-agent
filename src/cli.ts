@@ -48,7 +48,7 @@ import { configurePluginWithClaude, readPluginConfigFromClaude, runConnect } fro
 import { claudeBinary, syncPlugin, syncPluginAfterSave } from './plugin-sync.ts';
 
 export { claudeBinary } from './plugin-sync.ts';
-import { exitWhenOrphaned, runNotifyLines, signalDir } from './watch.ts';
+import { exitWhenOrphaned, marketLane, runNotifyLines, signalDir } from './watch.ts';
 
 const USAGE = `tilori-agent: wake local coding agents on Tilori events
 
@@ -833,6 +833,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
               reminder: reminderSettings(settings),
               stallMinutes: stallMinutes(settings.stall_minutes),
               ...(pushEnabled(settings) ? { push: { endpoint: url, apiKey, rereadKey } } : {}),
+              market: marketLane(config, agent, apiKey, rereadKey, log),
             },
           ],
           logger: log,
@@ -858,6 +859,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
             handle,
             client: new TiloriAgentClient({ url, apiKey, rereadKey, logger: log }),
             ...(pushEnabled(s) ? { push: { endpoint: url, apiKey, rereadKey } } : {}),
+            market: marketLane(config, handle, apiKey, rereadKey, log),
             subscriptions: desiredSubscriptions(s),
             wakesPerHour: s.wakes_per_hour,
             directWakesPerHour: s.direct_wakes_per_hour,
