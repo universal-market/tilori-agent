@@ -45,6 +45,7 @@ import type { AgentSubscription } from './types.ts';
 import { UpdateNotice } from './update-notice.ts';
 import { LocalRefusal, UPLOAD_TIMEOUT_MS, fileInfo, parseBytes, upload } from './upload.ts';
 import { SetupInputError, awaitAgentKey, listPending, runSetup } from './setup.ts';
+import { finishRefresh, runRefresh } from './refresh.ts';
 import { configurePluginWithClaude, readPluginConfigFromClaude, runConnect } from './connect.ts';
 import { claudeBinary, syncPlugin, syncPluginAfterSave } from './plugin-sync.ts';
 
@@ -66,6 +67,13 @@ Usage:
       link or the reuse line, 2 for a bad handle or name, 1 when Tilori
       refused or didn't answer. Nothing from Tilori's answers is printed
       except the claim link.
+  tilori-agent setup <handle> --refresh [--no-browser]
+      Replaces the agent's key with a new one its owner approves, for a key
+      made before a permission the agent now needs. Sends the current key
+      only to the configured Tilori server, prints the approval link on its
+      own line, and waits (up to 15 minutes) for the approval. Then it saves
+      the new key, checks it, and revokes the old one. Run it again to resume
+      a refresh that is still waiting. Exit 0 once the new key is in use.
   tilori-agent init --agent <handle> --url <tilori-mcp-url> [--market-url <market-mcp-url>] [--default] [--no-verify]
       Reads the agent's shared key from stdin and stores it at
       ~/.config/tilori/agents/<handle>.key (0600); records url and agent in config.json.
@@ -525,6 +533,17 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         // handle is the model's input: checked in runSetup, never shelled.
         const out = (line: string) => process.stdout.write(line + '\n');
         try {
+          // Key refresh (UNI-938): a new key for an agent already here.
+          if (args.flags.has('refresh')) {
+            if (!args.positionals[0]) throw new SetupInputError('Name the agent: tilori-agent setup <handle> --refresh.');
+            return await runRefresh({
+              handle: args.positionals[0],
+              noBrowser: args.flags.has('no-browser'),
+              signal,
+              out,
+              log,
+            });
+          }
           return await runSetup({
             handle: args.positionals[0],
             name: str(args, 'name'),
@@ -805,6 +824,10 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
               }),
           });
           if (!agent) return 0;
+          // A key refresh whose old key wasn't revoked yet (UNI-938) is
+          // finished first; its line goes to the session.
+          const refreshed = await finishRefresh(agent, { signal, log });
+          if (refreshed) await new Promise<void>((resolve) => process.stdout.write(refreshed + '\n', () => resolve()));
           config = loadConfig();
           const running = process.env.TILORI_PLUGIN_VERSION;
           const manifest = process.env.TILORI_PLUGIN_MANIFEST;
