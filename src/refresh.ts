@@ -62,6 +62,17 @@ export interface PendingRefresh extends PendingRegistration {
 export function oldKeyPath(handle: string): string {
   return keyPath(handle) + '.old';
 }
+/** A backup equal to the key file means the switch never happened (the
+ * process stopped between the backup and the new key): the backup is
+ * dropped, with nothing to complete (Bastion b4c72c3f). True when it was. */
+function dropStaleBackup(handle: string): boolean {
+  const path = oldKeyPath(handle);
+  if (!existsSync(path)) return false;
+  assertPrivate(path);
+  if (readFileSync(path, 'utf8').trim() !== readKey(handle)) return false;
+  deleteFile(path);
+  return true;
+}
 /** Not a handle with `.json` (`listPending` skips it: a dot is no handle). */
 export function refreshPath(handle: string): string {
   return join(pendingDir(), `${validateHandle(handle)}.refresh.json`);
@@ -70,30 +81,30 @@ export function refreshPath(handle: string): string {
 export const REFRESH_LINES = {
   noKey: (handle: string) => `@${handle} has no key here to refresh. Run /universal-market:setup ${handle} to connect it first.`,
   unfinished: (handle: string) =>
-    `An earlier key refresh for @${handle} hasn't finished. It finishes when the Tilori monitor next starts; start a new session, then try again.`,
+    `An earlier key refresh for @${handle} hasn't finished. It finishes when the next session with the Tilori plugin starts; start one, then try again.`,
   link: (handle: string) => `Open this link to approve a new key for @${handle}:`,
-  wait: "Waiting for your approval in the browser. When you approve, I'll switch to the new key and revoke the old one.",
+  wait: 'Waiting for your approval in the browser. Once you approve, the agent switches to the new key and revokes the old one.',
   done: (handle: string) => `@${handle} now uses its new key, and the old key is revoked.`,
   /** The new key works but the old key's revocation didn't go through yet. */
   doneLater: (handle: string) =>
-    `@${handle} now uses its new key. The old key will be revoked when the Tilori monitor next starts.`,
+    `@${handle} now uses its new key. The old key will be revoked when the next session with the Tilori plugin starts.`,
   /** The refresh expired before it completed: the old key wasn't revoked. */
   oldMayLive: (handle: string) =>
     `@${handle} now uses its new key, but the old key may still be active. Revoke it under Account → Agents.`,
   /** The new key failed its check: the old key was put back. */
   kept: (handle: string) =>
-    `The new key for @${handle} didn't work, so I kept the old one. Run /universal-market:setup ${handle} --refresh again to retry.`,
+    `The new key for @${handle} didn't work, so I kept the old one. Run /universal-market:setup --refresh ${handle} again to retry.`,
   timeout: (handle: string) =>
-    `Didn't see an approval in 15 minutes. The link stays valid for a day: run /universal-market:setup ${handle} --refresh again to keep waiting.`,
+    `Didn't see an approval in 15 minutes. The link stays valid for a day: run /universal-market:setup --refresh ${handle} again to keep waiting.`,
   expired: (handle: string) =>
-    `The approval link for @${handle} expired or was already used. Run /universal-market:setup ${handle} --refresh again.`,
+    `The approval link for @${handle} expired or was already used. Run /universal-market:setup --refresh ${handle} again.`,
   pending: (handle: string) =>
     `A key refresh for @${handle} is already waiting for approval, and its link isn't on this machine. It expires within a day.`,
 } as const;
 
 /** Fixed words for a refused refresh: the body is never echoed. */
 export function refreshRefusal(handle: string, status: number, code = ''): string {
-  if (status === 401) return `Tilori didn't accept @${handle}'s current key (HTTP 401${code}), so it can't be refreshed. Run /universal-market:setup with a new handle, or reconnect it under Account → Agents.`;
+  if (status === 401) return `Tilori didn't accept @${handle}'s current key (HTTP 401${code}), so it can't be refreshed. Connect a new agent with /universal-market:setup <new-handle>.`;
   if (status === 403 && code.trim() === 'OPERATION_NOT_ALLOWED') return REFRESH_LINES.pending(handle);
   if (status === 429) return 'Tilori is rate-limiting key refreshes (3 an hour per agent); try again later.';
   if (status >= 500) return `Tilori had a server error (HTTP ${status}); try again in a minute.`;
@@ -252,7 +263,7 @@ export async function runRefresh(o: RefreshOptions): Promise<number> {
   const handle = validateHandle(o.handle);
   if (!existsSync(keyPath(handle))) throw new SetupInputError(REFRESH_LINES.noKey(handle));
   // Bastion ac87faf9: never start one refresh over another's backup.
-  if (existsSync(oldKeyPath(handle))) {
+  if (!dropStaleBackup(handle) && existsSync(oldKeyPath(handle))) {
     o.out(REFRESH_LINES.unfinished(handle));
     return 1;
   }
@@ -342,7 +353,7 @@ async function swapKey(
  * throws. */
 export async function finishRefresh(handle: string, o: HttpOptions & { log: (m: string) => void }): Promise<string | null> {
   try {
-    if (!existsSync(oldKeyPath(handle))) return null;
+    if (!existsSync(oldKeyPath(handle)) || dropStaleBackup(handle)) return null;
     const key = readKey(handle);
     const log = (m: string) => o.log(redact(m, [key]));
     let url: string;

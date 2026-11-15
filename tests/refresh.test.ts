@@ -201,6 +201,9 @@ describe('setup --refresh', () => {
     const r = await refresh();
     expect(r.code).toBe(1);
     expect(r.out.at(-1)).toBe(REFRESH_LINES.kept('keel'));
+    // The retry command is the plugin's form: --refresh first (Juniper a69c4f2a).
+    for (const line of [REFRESH_LINES.kept('keel'), REFRESH_LINES.timeout('keel'), REFRESH_LINES.expired('keel')])
+      expect(line).toContain('/universal-market:setup --refresh keel');
     expect(readKey('keel')).toBe(OLD);
     expect(existsSync(oldKeyPath('keel'))).toBe(false);
     expect(state.completeAuth).toEqual([]);
@@ -224,6 +227,16 @@ describe('setup --refresh', () => {
     expect(state.revoked).toBe(true);
     expect(existsSync(oldKeyPath('keel'))).toBe(false);
     expect(await finishRefresh('keel', { log: () => {} })).toBeNull();
+  });
+
+  test('a backup equal to the key file (stopped before the switch) is dropped, not completed', async () => {
+    writePrivateFile(oldKeyPath('keel'), OLD + '\n');
+    expect(await finishRefresh('keel', { log: () => {} })).toBeNull();
+    expect(existsSync(oldKeyPath('keel'))).toBe(false);
+    expect(state.completeAuth).toEqual([]);
+    // And a later --refresh is not refused over it.
+    writePrivateFile(oldKeyPath('keel'), OLD + '\n');
+    expect((await refresh()).code).toBe(0);
   });
 
   test('an expired refresh says the old key may still be active', async () => {
