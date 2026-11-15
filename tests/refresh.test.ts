@@ -1,6 +1,6 @@
 import './setup.ts';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -20,8 +20,10 @@ import { allowHome } from './allow-home.ts';
  * refused while a `.old` backup shows an unfinished refresh.
  */
 
-const OLD = 'mcp_sk_refresh_old_key_0123456789abcdef';
-const NEW = 'mcp_sk_refresh_new_key_0123456789abcdef';
+// Not `mcp_sk_`-shaped: redact's global patterns would hide them anyway,
+// so only the run's own secrets list keeps them out of logs (Pax cc6709c8).
+const OLD = 'refresh-old-key-0123456789abcdef';
+const NEW = 'refresh-new-key-0123456789abcdef';
 const TOKEN = 'claimtoken_0123456789abcdef0123456789abcdef';
 
 type CompleteMode = 'ok' | 'nothing' | '500';
@@ -32,15 +34,26 @@ const state = {
   statusGone: false,
   complete: 'ok' as CompleteMode,
   profileHandle: 'keel',
+  /** The handle status reports once approved. */
+  statusHandle: 'keel',
   refreshAuth: [] as string[],
   completeAuth: [] as string[],
   statusCalls: 0,
   refreshes: 0,
   revoked: false,
+  /** Overrides fields of the refresh answer (URLs pointing elsewhere). */
+  answer: {} as Record<string, unknown>,
+  /** get_my_profile fails with both keys in its error message. */
+  leak: false,
+  /** Requests that reached the other server. */
+  other: [] as string[],
 };
 const fake = new FakeTilori();
 let http: ReturnType<typeof Bun.serve>;
 let origin: string;
+/** Another server on another origin (another port): no key may reach it. */
+let other: ReturnType<typeof Bun.serve>;
+let otherOrigin: string;
 let home: string;
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 
@@ -64,6 +77,7 @@ beforeAll(() => {
           status_url: '/api/v1/agents/status',
           complete_url: '/api/v1/agents/refresh/complete',
           poll_after_seconds: 5,
+          ...state.answer,
         });
       }
       if (url.pathname === '/api/v1/agents/status' && req.method === 'GET') {
@@ -74,7 +88,7 @@ beforeAll(() => {
           status: 'claimed',
           agent_id: 'a1',
           connection_id: 'c2',
-          handle: 'keel',
+          handle: state.statusHandle,
           urls: { tilori: `${origin}/mcp/tilori/v1`, market: `${origin}/mcp/v1` },
         });
       }
@@ -91,6 +105,7 @@ beforeAll(() => {
         const mcp = new Server({ name: 'fake-tilori', version: '1' }, { capabilities: { tools: {} } });
         mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [] }));
         mcp.setRequestHandler(CallToolRequestSchema, async (r) => {
+          if (r.params.name === 'get_my_profile' && state.leak) throw new Error(`profile failed for ${OLD} and ${NEW}`);
           if (r.params.name === 'get_my_profile')
             fake.profile = {
               profile: { username: 'don-zheng', handle: state.profileHandle, id: 'a1', user_id: 'u1', kind: 'agent' },
@@ -106,8 +121,20 @@ beforeAll(() => {
     },
   });
   origin = `http://127.0.0.1:${http.port}`;
+  other = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    fetch(req) {
+      state.other.push(`${req.method} ${new URL(req.url).pathname} ${req.headers.get('authorization') ?? ''}`);
+      return json(503, { code: 'UNAVAILABLE' });
+    },
+  });
+  otherOrigin = `http://127.0.0.1:${other.port}`;
 });
-afterAll(() => http.stop(true));
+afterAll(() => {
+  http.stop(true);
+  other.stop(true);
+});
 
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), 'tilori-agent-refresh-'));
@@ -120,11 +147,15 @@ beforeEach(() => {
     statusGone: false,
     complete: 'ok',
     profileHandle: 'keel',
+    statusHandle: 'keel',
     refreshAuth: [],
     completeAuth: [],
     statusCalls: 0,
     refreshes: 0,
     revoked: false,
+    answer: {},
+    leak: false,
+    other: [],
   });
   writeKey('keel', OLD);
   saveConfig({ url: `${origin}/mcp/tilori/v1`, default_agent: 'keel', agents: { keel: {} } });
@@ -267,5 +298,100 @@ describe('setup --refresh', () => {
     expect(r.out.at(-1)).toBe(REFRESH_LINES.expired('keel'));
     expect(existsSync(refreshPath('keel'))).toBe(false);
     expect(readKey('keel')).toBe(OLD);
+  });
+
+  // Pax cc6709c8: the guards on where a key goes, each pinned.
+  test('an answer whose URLs leave the Tilori origin, or are plain http elsewhere, is refused', async () => {
+    const cases: Record<string, unknown>[] = [
+      { claim_url: `${otherOrigin}/claim?registration=reg-r1#claim=${TOKEN}` },
+      { claim_url: `http://claim.example/claim#claim=${TOKEN}` },
+      { claim_url: undefined },
+      { status_url: `${otherOrigin}/api/v1/agents/status` },
+      { status_url: 'http://status.example/api/v1/agents/status' },
+      { complete_url: `${otherOrigin}/api/v1/agents/refresh/complete` },
+      { complete_url: 'http://complete.example/api/v1/agents/refresh/complete' },
+    ];
+    for (const answer of cases) {
+      state.answer = answer;
+      const r = await refresh();
+      expect(r.code).toBeInstanceOf(Error);
+      expect((r.code as Error).message).toContain('could not be used');
+      expect(existsSync(refreshPath('keel'))).toBe(false);
+    }
+    expect(state.other).toEqual([]);
+    expect(state.statusCalls).toBe(0);
+    expect(state.completeAuth).toEqual([]);
+    expect(readKey('keel')).toBe(OLD);
+  });
+
+  test('a pending refresh file with a URL on another origin is not resumed', async () => {
+    for (const k of ['status_url', 'complete_url', 'claim_url']) {
+      state.refreshes = 0;
+      const urls: Record<string, string> = {
+        status_url: `${origin}/api/v1/agents/status`,
+        complete_url: `${origin}/api/v1/agents/refresh/complete`,
+        claim_url: `${origin}/claim?registration=reg-r0#claim=${TOKEN}`,
+      };
+      urls[k] = `${otherOrigin}/elsewhere`;
+      mkdirSync(join(process.env.TILORI_HOME!, 'pending'), { recursive: true, mode: 0o700 });
+      writePrivateFile(
+        refreshPath('keel'),
+        JSON.stringify({
+          id: 'reg-r0',
+          handle: 'keel',
+          api_key: 'refresh-stale-pending-key-0123456789',
+          ...urls,
+          expires_at: new Date(Date.now() + 3600_000).toISOString(),
+          poll_after_seconds: 5,
+          origin,
+          created_at: new Date().toISOString(),
+        }) + '\n',
+      );
+      const r = await refresh();
+      expect(r.code).toBe(0);
+      // Read as malformed, so a new refresh started instead.
+      expect(r.logs.some((l) => l.includes('is malformed'))).toBe(true);
+      expect(state.refreshes).toBe(1);
+      expect(state.other).toEqual([]);
+      writeKey('keel', OLD);
+      state.statusCalls = 0;
+      state.completeAuth = [];
+    }
+  });
+
+  test('after the configured server changes, a re-run does not resume on the old one', async () => {
+    state.pendingPolls = 1000;
+    expect(
+      await runRefresh({ handle: 'keel', noBrowser: true, out: () => {}, log: () => {}, deadlineMs: 0, sleep: async () => {} }),
+    ).toBe(1);
+    expect(existsSync(refreshPath('keel'))).toBe(true);
+    const polled = state.statusCalls;
+    saveConfig({ url: `${otherOrigin}/mcp/tilori/v1`, default_agent: 'keel', agents: { keel: {} } });
+    const r = await refresh();
+    // A fresh refresh on the new server (which refuses it), with the
+    // current key only; the old server's status is never polled again.
+    expect((r.code as Error).message).toContain('server error');
+    expect(state.statusCalls).toBe(polled);
+    expect(state.other).toEqual([`POST /api/v1/agents/refresh Bearer ${OLD}`]);
+    expect(existsSync(refreshPath('keel'))).toBe(false);
+  });
+
+  test('a logged failure that carries either key is redacted', async () => {
+    state.leak = true;
+    const r = await refresh();
+    expect(r.code).toBe(1);
+    expect(r.out.at(-1)).toBe(REFRESH_LINES.kept('keel'));
+    // The failure was logged (refresh() asserts neither key appears).
+    expect(r.logs.some((l) => l.includes('could not read the owner') && l.includes('[REDACTED]'))).toBe(true);
+  });
+
+  test('an approval that names another handle keeps the old key', async () => {
+    state.statusHandle = 'someone-else';
+    const r = await refresh();
+    expect(r.code).toBe(1);
+    expect(r.out.at(-1)).toBe(REFRESH_LINES.kept('keel'));
+    expect(readKey('keel')).toBe(OLD);
+    expect(existsSync(oldKeyPath('keel'))).toBe(false);
+    expect(state.completeAuth).toEqual([]);
   });
 });
