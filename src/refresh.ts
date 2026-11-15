@@ -53,7 +53,8 @@ export const REFRESH_PATH = '/api/v1/agents/refresh';
 export const COMPLETE_PATH = '/api/v1/agents/refresh/complete';
 
 export interface PendingRefresh extends PendingRegistration {
-  /** The approval link (it carries the claim token), for a resumed run. */
+  /** The approval link (it carries the claim token), for a resumed run. It
+   * may be on another origin than the API (the web site: UNI-940). */
   claim_url: string;
   /** Absolute, on the registration's origin. */
   complete_url: string;
@@ -82,7 +83,8 @@ export const REFRESH_LINES = {
   noKey: (handle: string) => `@${handle} has no key here to refresh. Run /universal-market:setup ${handle} to connect it first.`,
   unfinished: (handle: string) =>
     `An earlier key refresh for @${handle} hasn't finished. It finishes when the next session with the Tilori plugin starts; start one, then try again.`,
-  link: (handle: string) => `Open this link to approve a new key for @${handle}:`,
+  /** Names the link's host: it may be the web site, not the API (Bastion aaa9f925). */
+  link: (handle: string, host: string) => `Open this link on ${host} to approve a new key for @${handle}:`,
   wait: 'Waiting for your approval in the browser. Once you approve, the agent switches to the new key and revokes the old one.',
   done: (handle: string) => `@${handle} now uses its new key, and the old key is revoked.`,
   /** The new key works but the old key's revocation didn't go through yet. */
@@ -125,7 +127,7 @@ function deleteFile(path: string): void {
 }
 
 /** The pending refresh for a handle, or null. Fails closed as readPending
- * does; every URL in it must be on its origin. */
+ * does; the URLs a key goes to must be on its origin. */
 export function readRefresh(handle: string): PendingRefresh | null {
   const path = refreshPath(handle);
   if (!existsSync(path)) return null;
@@ -151,7 +153,8 @@ export function readRefresh(handle: string): PendingRefresh | null {
   } catch {
     throw bad();
   }
-  if (!allowedUrl(origin, origin) || Object.values(urls).some((u) => u.origin !== origin.origin || !allowedUrl(u, origin))) throw bad();
+  if (!allowedUrl(origin, origin) || !allowedUrl(urls.claim_url, origin)) throw bad();
+  if ([urls.status_url, urls.complete_url].some((u) => u.origin !== origin.origin || !allowedUrl(u, origin))) throw bad();
   const poll = j.poll_after_seconds;
   return {
     id,
@@ -191,19 +194,29 @@ export async function startRefresh(o: HttpOptions & { handle: string; origin: UR
   const j = res.json as any;
   const key = j?.api_key;
   if (typeof key !== 'string' || !key.trim() || /\s/.test(key.trim()) || key.length > 200) throw unusable('no usable api_key');
-  const on = (raw: unknown, fallback?: string) => {
-    let u: URL;
+  const parse = (raw: unknown, fallback?: string) => {
     try {
-      u = new URL(typeof raw === 'string' ? raw : (fallback ?? ''), o.origin);
+      return new URL(typeof raw === 'string' ? raw : (fallback ?? ''), o.origin);
     } catch {
       return null;
     }
-    return u.origin === o.origin.origin && allowedUrl(u, o.origin) ? u : null;
   };
-  const claim = typeof j?.claim_url === 'string' ? on(j.claim_url) : null;
+  // Where the keys go: the status and complete URLs carry the pending and
+  // new key, so they stay on the origin the current key went to.
+  const on = (raw: unknown, fallback?: string) => {
+    const u = parse(raw, fallback);
+    return u && u.origin === o.origin.origin && allowedUrl(u, o.origin) ? u : null;
+  };
+  // The approval link is only shown and opened in a browser, never sent a
+  // key. Tilori builds it on its web site, which need not be the API's
+  // origin (Internal's config.url is the Convex site: UNI-940). It must
+  // still be https (http only for loopback, as the origin is) and carry no
+  // credentials.
+  const shown = typeof j?.claim_url === 'string' ? parse(j.claim_url) : null;
+  const claim = shown && allowedUrl(shown, o.origin) ? shown : null;
   const status = on(j?.status_url, '/api/v1/agents/status');
   const complete = on(j?.complete_url, COMPLETE_PATH);
-  if (!claim) throw unusable('the approval link is not on the Tilori origin');
+  if (!claim) throw unusable('the approval link is not https');
   if (!status || !complete) throw unusable('its URLs are not on the Tilori origin');
   const id = typeof j?.id === 'string' && j.id.trim() && j.id.length <= 64 ? j.id : null;
   if (!id) throw unusable('no id');
@@ -288,7 +301,7 @@ export async function runRefresh(o: RefreshOptions): Promise<number> {
     writeRefresh(p);
   }
   secrets.push(p.api_key);
-  o.out(REFRESH_LINES.link(handle));
+  o.out(REFRESH_LINES.link(handle, new URL(p.claim_url).host));
   o.out(p.claim_url);
   if (!o.noBrowser) openBrowser(p.claim_url, log, o.platform);
   o.out(REFRESH_LINES.wait);
