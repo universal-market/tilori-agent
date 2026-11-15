@@ -193,7 +193,7 @@ describe('setup --refresh', () => {
     const r = await refresh();
     expect(r.code).toBe(0);
     expect(r.out).toEqual([
-      REFRESH_LINES.link('keel'),
+      REFRESH_LINES.link('keel', new URL(origin).host),
       `${origin}/claim?registration=reg-r1#claim=${TOKEN}`,
       REFRESH_LINES.wait,
       REFRESH_LINES.done('keel'),
@@ -301,15 +301,44 @@ describe('setup --refresh', () => {
   });
 
   // Pax cc6709c8: the guards on where a key goes, each pinned.
-  test('an answer whose URLs leave the Tilori origin, or are plain http elsewhere, is refused', async () => {
+  test('an approval link on the web site, another origin than the API, works (Internal: UNI-940)', async () => {
+    state.answer = { claim_url: `${otherOrigin}/claim?registration=reg-r1#claim=${TOKEN}` };
+    const r = await refresh();
+    expect(r.code).toBe(0);
+    expect(r.out[0]).toBe(REFRESH_LINES.link('keel', new URL(otherOrigin).host));
+    expect(r.out[1]).toBe(`${otherOrigin}/claim?registration=reg-r1#claim=${TOKEN}`);
+    expect(r.out.at(-1)).toBe(REFRESH_LINES.done('keel'));
+    // Shown only: no request, and so no key, ever reaches the link's host.
+    expect(state.other).toEqual([]);
+    expect(readKey('keel')).toBe(NEW);
+  });
+
+  test('the approval link is printed normalized, not as sent', async () => {
+    state.answer = { claim_url: `HTTPS://Claim.EXAMPLE:443/claim?registration=reg-r1#claim=${TOKEN}` };
+    const r = await refresh();
+    expect(r.code).toBe(0);
+    expect(r.out[0]).toBe(REFRESH_LINES.link('keel', 'claim.example'));
+    expect(r.out[1]).toBe(`https://claim.example/claim?registration=reg-r1#claim=${TOKEN}`);
+  });
+
+  test('an answer whose key URLs leave the Tilori origin, or whose link is not https, is refused', async () => {
     const cases: Record<string, unknown>[] = [
-      { claim_url: `${otherOrigin}/claim?registration=reg-r1#claim=${TOKEN}` },
       { claim_url: `http://claim.example/claim#claim=${TOKEN}` },
+      { claim_url: `https://user:pw@claim.example/claim#claim=${TOKEN}` },
       { claim_url: undefined },
       { status_url: `${otherOrigin}/api/v1/agents/status` },
       { status_url: 'http://status.example/api/v1/agents/status' },
       { complete_url: `${otherOrigin}/api/v1/agents/refresh/complete` },
       { complete_url: 'http://complete.example/api/v1/agents/refresh/complete' },
+      // The link's own origin is no place for a key either (Bastion aaa9f925).
+      {
+        claim_url: `${otherOrigin}/claim?registration=reg-r1#claim=${TOKEN}`,
+        complete_url: `${otherOrigin}/api/v1/agents/refresh/complete`,
+      },
+      {
+        claim_url: `${otherOrigin}/claim?registration=reg-r1#claim=${TOKEN}`,
+        status_url: `${otherOrigin}/api/v1/agents/status`,
+      },
     ];
     for (const answer of cases) {
       state.answer = answer;
@@ -324,7 +353,7 @@ describe('setup --refresh', () => {
     expect(readKey('keel')).toBe(OLD);
   });
 
-  test('a pending refresh file with a URL on another origin is not resumed', async () => {
+  test('a pending refresh file with a key URL on another origin, or an http link, is not resumed', async () => {
     for (const k of ['status_url', 'complete_url', 'claim_url']) {
       state.refreshes = 0;
       const urls: Record<string, string> = {
@@ -332,7 +361,8 @@ describe('setup --refresh', () => {
         complete_url: `${origin}/api/v1/agents/refresh/complete`,
         claim_url: `${origin}/claim?registration=reg-r0#claim=${TOKEN}`,
       };
-      urls[k] = `${otherOrigin}/elsewhere`;
+      // A key URL off the origin, or a link that isn't https or loopback.
+      urls[k] = k === 'claim_url' ? 'http://claim.example/elsewhere' : `${otherOrigin}/elsewhere`;
       mkdirSync(join(process.env.TILORI_HOME!, 'pending'), { recursive: true, mode: 0o700 });
       writePrivateFile(
         refreshPath('keel'),
