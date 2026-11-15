@@ -256,7 +256,7 @@ export function listPending(): string[] {
 // ---------------------------------------------------------------------------
 // HTTP
 
-interface HttpOptions {
+export interface HttpOptions {
   fetch?: typeof fetch;
   timeoutMs?: number;
   signal?: AbortSignal;
@@ -265,7 +265,7 @@ interface HttpOptions {
 /** One request, no redirects (a redirect could carry the key elsewhere), one
  * timeout. The body is read at most MAX_BODY bytes and parsed as JSON; a
  * failure to parse is reported without the text. */
-async function request(
+export async function request(
   url: URL,
   init: RequestInit,
   o: HttpOptions,
@@ -287,7 +287,7 @@ async function request(
 }
 
 /** A server error code from a JSON error body, if it has one and it is a constant. */
-function errorCode(json: unknown): string {
+export function errorCode(json: unknown): string {
   const j = json as any;
   const code = j?.error?.code ?? j?.code;
   return typeof code === 'string' && CODE_RE.test(code) ? ` ${code}` : '';
@@ -303,7 +303,7 @@ export function registerRefusal(status: number, code = ''): string {
   return `Tilori refused the registration (HTTP ${status}${code}).`;
 }
 
-function transportFailure(cause: unknown, what: string, host: string, timeoutMs: number): Error {
+export function transportFailure(cause: unknown, what: string, host: string, timeoutMs: number): Error {
   const name = (cause as Error)?.name;
   if (name === 'TimeoutError') return new Error(`Tilori did not answer ${what} within ${Math.round(timeoutMs / 1000)} s; try again.`);
   if (name === 'AbortError') return new Error(`${what} was stopped before Tilori answered.`);
@@ -707,7 +707,7 @@ async function finishClaim(
   );
 }
 
-async function readOwner(
+export async function readOwner(
   tilori: URL,
   apiKey: string,
   handle: string,
