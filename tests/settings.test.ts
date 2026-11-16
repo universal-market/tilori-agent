@@ -256,7 +256,7 @@ describe('live reload', () => {
     writeConfig(FULL);
     const fake = new FakeTilori();
     const router = new Router({
-      agents: [{ handle: 'wren', client: fake.client(), subscriptions: desiredSubscriptions(), wakesPerHour: 20, stallMinutes: 10 }],
+      agents: [{ handle: 'wren', client: fake.client(), subscriptions: desiredSubscriptions(), wakesPerHour: 20, postWakeMinutes: 10, stallMinutes: 10 }],
       waitMs: 10,
       retryMs: 10,
       coalesceMs: 0,
@@ -293,7 +293,7 @@ describe('live reload', () => {
     writeConfig(FULL);
     const fake = new FakeTilori();
     const router = new Router({
-      agents: [{ handle: 'wren', client: fake.client(), subscriptions: desiredSubscriptions(), wakesPerHour: 20, stallMinutes: 10 }],
+      agents: [{ handle: 'wren', client: fake.client(), subscriptions: desiredSubscriptions(), wakesPerHour: 20, postWakeMinutes: 10, stallMinutes: 10 }],
       waitMs: 10,
       retryMs: 10,
       coalesceMs: 0,
@@ -319,13 +319,17 @@ describe('live reload', () => {
   });
 
   test('liveSettings validates as the router does at start', () => {
-    expect(liveSettings({})).toEqual({ wakesPerHour: 20, directWakesPerHour: 10, pauseSeconds: 60, reminderEveryMs: undefined, stallMinutes: 10 });
+    expect(liveSettings({})).toEqual({ wakesPerHour: 20, directWakesPerHour: 10, pauseSeconds: 60, postWakeMinutes: 10, reminderEveryMs: undefined, stallMinutes: 10 });
     expect(() => liveSettings({ wakes_per_hour: 0 })).toThrow();
     expect(() => liveSettings({ direct_wakes_per_hour: -1 })).toThrow();
     expect(() => liveSettings({ stall_minutes: 2000 })).toThrow();
     expect(liveSettings({ pause_seconds: 0 }).pauseSeconds).toBe(0);
     expect(liveSettings({ pause_seconds: 300 }).pauseSeconds).toBe(300);
     for (const bad of [-1, 301, 2.5, '30', null, Number.NaN]) expect(() => liveSettings({ pause_seconds: bad as never })).toThrow();
+    // UNI-951: post_wake_minutes, 0-60, default 10.
+    expect(liveSettings({ post_wake_minutes: 0 }).postWakeMinutes).toBe(0);
+    expect(liveSettings({ post_wake_minutes: 60 }).postWakeMinutes).toBe(60);
+    for (const bad of [-1, 61, 2.5, '10', null]) expect(() => liveSettings({ post_wake_minutes: bad as never })).toThrow();
     expect(() => liveSettings({ reminder: { every_minutes: 5, prompt: 'x' } })).toThrow();
   });
 });

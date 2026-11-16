@@ -26,6 +26,8 @@ function setup(
     now?: () => number;
     coalesceMs?: number;
     plainHoldMs?: number;
+    minuteMs?: number;
+    postWakeMinutes?: number;
     pauseSeconds?: number;
     directPauseMs?: number;
     broadPauseMs?: number;
@@ -46,6 +48,7 @@ function setup(
         wakesPerHour: opts.wakesPerHour,
         directWakesPerHour: opts.directWakesPerHour,
         pauseSeconds: opts.pauseSeconds,
+        postWakeMinutes: opts.postWakeMinutes,
         reminder: opts.reminder,
       },
     ],
@@ -54,6 +57,7 @@ function setup(
     retryMs: 10,
     coalesceMs: opts.coalesceMs ?? 0,
     plainHoldMs: opts.plainHoldMs ?? 0,
+    minuteMs: opts.minuteMs,
     directPauseMs: opts.directPauseMs ?? 0,
     broadPauseMs: opts.broadPauseMs ?? 0,
     now: opts.now,
@@ -225,7 +229,7 @@ describe('router', () => {
     fake.push('posts', [post(), post()]);
     await until(() => router.stats('wren')!.delayed === 2);
     expect(router.usage('wren')).toEqual({ wakes: { used: 1, limit: 1 }, direct: { used: 0, limit: 10 }, held: 2 });
-    expect(router.reload('wren', { wakesPerHour: 5, directWakesPerHour: 10, pauseSeconds: 0, stallMinutes: 0 })).toEqual(['wakes_per_hour 1 -> 5']);
+    expect(router.reload('wren', { wakesPerHour: 5, directWakesPerHour: 10, pauseSeconds: 0, postWakeMinutes: 0, stallMinutes: 0 })).toEqual(['wakes_per_hour 1 -> 5']);
     // No hour passes: the raised cap alone releases them.
     await until(() => inj.wakes.length === 2);
     expect(inj.wakes[1].events).toHaveLength(2);
@@ -245,14 +249,14 @@ describe('router', () => {
       fake.push('posts', [post()]);
       await until(() => inj.wakes.length === i);
     }
-    router.reload('wren', { wakesPerHour: 2, directWakesPerHour: 0, pauseSeconds: 0, stallMinutes: 0 });
+    router.reload('wren', { wakesPerHour: 2, directWakesPerHour: 0, pauseSeconds: 0, postWakeMinutes: 0, stallMinutes: 0 });
     expect(router.usage('wren')).toEqual({ wakes: { used: 2, limit: 2 }, direct: null, held: 0 });
     // Over the new cap, and the direct allowance is off: even a mention waits.
     fake.push('inbox', [mention()]);
     await until(() => router.stats('wren')!.delayed === 1);
     expect(inj.wakes).toHaveLength(2);
     // Turning the direct allowance back on lets it out.
-    expect(router.reload('wren', { wakesPerHour: 2, directWakesPerHour: 3, pauseSeconds: 0, stallMinutes: 0 })).toEqual([
+    expect(router.reload('wren', { wakesPerHour: 2, directWakesPerHour: 3, pauseSeconds: 0, postWakeMinutes: 0, stallMinutes: 0 })).toEqual([
       'direct_wakes_per_hour 0 -> 3',
     ]);
     await until(() => inj.wakes.length === 3);
@@ -273,9 +277,9 @@ describe('router', () => {
       await until(() => inj.wakes.length === i);
     }
     expect(router.usage('wren')!.direct).toEqual({ used: 2, limit: 2 });
-    router.reload('wren', { wakesPerHour: 1, directWakesPerHour: 0, pauseSeconds: 0, stallMinutes: 0 });
+    router.reload('wren', { wakesPerHour: 1, directWakesPerHour: 0, pauseSeconds: 0, postWakeMinutes: 0, stallMinutes: 0 });
     expect(router.usage('wren')!.direct).toBeNull();
-    router.reload('wren', { wakesPerHour: 1, directWakesPerHour: 3, pauseSeconds: 0, stallMinutes: 0 });
+    router.reload('wren', { wakesPerHour: 1, directWakesPerHour: 3, pauseSeconds: 0, postWakeMinutes: 0, stallMinutes: 0 });
     // Back on with a higher cap: the two spent wakes still count, one is left.
     expect(router.usage('wren')!.direct).toEqual({ used: 2, limit: 3 });
     fake.push('inbox', [mention()]);
@@ -292,7 +296,7 @@ describe('router', () => {
     const { router, ac, done } = setup({ reminder: { everyMs: 3600_000, prompt: 'Check in.', onlyWhenIdle: false } });
     const inj = new Recorder();
     router.register('wren', inj);
-    const changed = router.reload('wren', { wakesPerHour: 20, directWakesPerHour: 10, pauseSeconds: 0, reminderEveryMs: 50, stallMinutes: 0 });
+    const changed = router.reload('wren', { wakesPerHour: 20, directWakesPerHour: 10, pauseSeconds: 0, postWakeMinutes: 0, reminderEveryMs: 50, stallMinutes: 0 });
     expect(changed).toHaveLength(1);
     expect(changed[0]).toStartWith('reminder.every_minutes 60 -> ');
     await until(() => inj.wakes.some((w) => w.reminder === 'Check in.'));
@@ -301,7 +305,7 @@ describe('router', () => {
     const plain = setup();
     const inj2 = new Recorder();
     plain.router.register('wren', inj2);
-    expect(plain.router.reload('wren', { wakesPerHour: 20, directWakesPerHour: 10, pauseSeconds: 0, reminderEveryMs: 50, stallMinutes: 0 })).toEqual([]);
+    expect(plain.router.reload('wren', { wakesPerHour: 20, directWakesPerHour: 10, pauseSeconds: 0, postWakeMinutes: 0, reminderEveryMs: 50, stallMinutes: 0 })).toEqual([]);
     await new Promise((r) => setTimeout(r, 150));
     expect(inj2.wakes).toHaveLength(0);
     plain.ac.abort();
@@ -1418,6 +1422,84 @@ describe('plain-post hold', () => {
   });
 });
 
+// UNI-951 (Keel's token audit): plain new posts make at most one wake per
+// post_wake_minutes, counted from the last wake that carried any; anything
+// addressed to the agent still wakes at once and takes them along.
+describe('post_wake_minutes', () => {
+  const subscriptions = desiredSubscriptions({ direct_messages: false, subscriptions: [{ scope: { type: 'posts' } }] });
+  // One "minute" is 400 ms here.
+  const opts = { subscriptions, postWakeMinutes: 1, minuteMs: 400 };
+
+  test('the first plain post after a quiet spell wakes at once; the next waits out the window', async () => {
+    const { fake, router, logs, ac, done } = setup(opts);
+    await until(() => fake.subs.length === 2);
+    const inj = new Recorder();
+    router.register('wren', inj);
+    fake.push('posts', [post()]);
+    await until(() => inj.wakes.length === 1, 3000);
+    const first = Date.now();
+    fake.push('posts', [post()]);
+    await until(() => inj.wakes.length === 2, 3000);
+    expect(Date.now() - first).toBeGreaterThanOrEqual(350);
+    expect(logs.some((l) => /holding 1 new post event\(s\) until .* \(post_wake_minutes 1\)/.test(l))).toBe(true);
+    ac.abort();
+    await done;
+  });
+
+  test('a mention during the window wakes at once and carries the held post', async () => {
+    const { fake, router, ac, done } = setup({ ...opts, postWakeMinutes: 60 });
+    await until(() => fake.subs.length === 2);
+    const inj = new Recorder();
+    router.register('wren', inj);
+    fake.push('posts', [post()]);
+    await until(() => inj.wakes.length === 1, 3000);
+    const held = post();
+    fake.push('posts', [held]);
+    await until(() => fake.polls.length > 4);
+    await Bun.sleep(100);
+    expect(inj.wakes).toHaveLength(1);
+    const m = mention();
+    fake.push('inbox', [m]);
+    await until(() => inj.wakes.length === 2, 3000);
+    expect(inj.wakes[1].events.map((e) => e.entity_id).sort()).toEqual([held.entity_id, m.entity_id].sort());
+    ac.abort();
+    await done;
+  });
+
+  test('0 turns the window off', async () => {
+    const { fake, router, ac, done } = setup({ ...opts, postWakeMinutes: 0 });
+    await until(() => fake.subs.length === 2);
+    const inj = new Recorder();
+    router.register('wren', inj);
+    fake.push('posts', [post()]);
+    await until(() => inj.wakes.length === 1, 3000);
+    const first = Date.now();
+    fake.push('posts', [post()]);
+    await until(() => inj.wakes.length === 2, 3000);
+    expect(Date.now() - first).toBeLessThan(300);
+    ac.abort();
+    await done;
+  });
+
+  test('reload changes the window from the next check', async () => {
+    const { fake, router, ac, done } = setup({ ...opts, postWakeMinutes: 60 });
+    await until(() => fake.subs.length === 2);
+    const inj = new Recorder();
+    router.register('wren', inj);
+    fake.push('posts', [post()]);
+    await until(() => inj.wakes.length === 1, 3000);
+    fake.push('posts', [post()]);
+    await Bun.sleep(300);
+    expect(inj.wakes).toHaveLength(1);
+    expect(router.reload('wren', { wakesPerHour: 20, directWakesPerHour: 10, pauseSeconds: 0, postWakeMinutes: 0, stallMinutes: 0 })).toEqual([
+      'post_wake_minutes 60 -> 0',
+    ]);
+    await until(() => inj.wakes.length === 2, 3000);
+    ac.abort();
+    await done;
+  });
+});
+
 describe('UNI-562 unfiltered posts warning', () => {
   test('logged once per agent at start, and nothing else changes', async () => {
     const { fake, router, logs, ac, done } = setup({ posts: true });
@@ -1514,7 +1596,7 @@ describe('wake pauses', () => {
     await until(() => fake.subs.length === 2);
     const inj = new Recorder();
     router.register('wren', inj);
-    expect(router.reload('wren', { wakesPerHour: 20, directWakesPerHour: 10, pauseSeconds: 1, stallMinutes: 0 })).toEqual([
+    expect(router.reload('wren', { wakesPerHour: 20, directWakesPerHour: 10, pauseSeconds: 1, postWakeMinutes: 0, stallMinutes: 0 })).toEqual([
       'pause_seconds 0 -> 1',
     ]);
     fake.push('posts', [post()]);

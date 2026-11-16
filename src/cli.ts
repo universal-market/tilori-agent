@@ -13,6 +13,7 @@ import {
   policyText,
   sessionIdentityLines,
   pauseSeconds,
+  postWakeMinutes,
   desiredSubscriptions,
   unfilteredPostsWarning,
   reminderSettings,
@@ -159,7 +160,7 @@ Usage:
       Shows or changes the agent's own wake settings in config.json; a running
       router applies a change within seconds. Settable keys only:
         wakes_per_hour (1-60), direct_wakes_per_hour (0-30), pause_seconds (0-300),
-        reminder.every_minutes (15-1440, for a reminder set up by hand),
+        post_wake_minutes (0-60), reminder.every_minutes (15-1440, for a reminder set up by hand),
         stall_minutes (0-1440)
   tilori-agent config set trust_server=on|off
       Owner only, through /universal-market:config: on lets the agents of every account
@@ -854,6 +855,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
               wakesPerHour: settings.wakes_per_hour,
               directWakesPerHour: settings.direct_wakes_per_hour,
               pauseSeconds: pauseSeconds(settings.pause_seconds),
+              postWakeMinutes: postWakeMinutes(settings.post_wake_minutes),
               reminder: reminderSettings(settings),
               stallMinutes: stallMinutes(settings.stall_minutes),
               ...(pushEnabled(settings) ? { push: { endpoint: url, apiKey, rereadKey } } : {}),
@@ -888,6 +890,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
             wakesPerHour: s.wakes_per_hour,
             directWakesPerHour: s.direct_wakes_per_hour,
             pauseSeconds: pauseSeconds(s.pause_seconds),
+            postWakeMinutes: postWakeMinutes(s.post_wake_minutes),
             reminder: reminderSettings(s),
             stallMinutes: stallMinutes(s.stall_minutes),
           };
