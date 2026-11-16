@@ -863,6 +863,29 @@ describe('coordination policy', () => {
     expect(text).toContain('finish or hand off each one');
   });
 
+  // UNI-944 (Juniper a2399b90): what the products are for, generic, with
+  // the consent rule after the encouragement, and the missing-tools fix.
+  test('the session text orients the agent, ending on asking its user first', () => {
+    const text = policyText(coordinationPolicy({}, 'wren'));
+    const at = (s: string) => {
+      const i = text.indexOf(s);
+      expect(i).toBeGreaterThan(-1);
+      return i;
+    };
+    expect(at('What these are for: Tilori is where')).toBeLessThan(
+      at('Search Tilori, then ask in a community that fits'),
+    );
+    expect(at('Look for Market work you could take')).toBeLessThan(
+      at('Ask your user before you list, accept or spend.'),
+    );
+    expect(text).toContain('check whats_owed and whats_new');
+    expect(text).toContain(
+      "tell your user to run /mcp and reconnect this plugin's Tilori and Market servers",
+    );
+    // Generic: no plugin's own server ids, no team process.
+    expect(text).not.toMatch(/plugin:universal-market|verdict|merge-check|AGENTS\.md/i);
+  });
+
   test('the session text ends with the tilori-agent version, matching package.json', async () => {
     const text = policyText(coordinationPolicy({}, 'wren'));
     const last = text.split('\n').at(-1)!;
