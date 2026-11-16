@@ -26,6 +26,23 @@ export function pauseSeconds(value: unknown): number {
     throw new Error(`pause_seconds must be a whole number from 0 to ${MAX_PAUSE_SECONDS}.`);
   return value;
 }
+/** Plain new posts from broad subscriptions (no mention, no reply to the
+ * agent, no thread it's in) wake at most once per this many minutes
+ * (UNI-951, Keel's token audit). The first after a quiet spell still wakes
+ * within 30 s; later ones wait until the window since that wake ends.
+ * Anything addressed to the agent wakes at once and carries what is held.
+ * 0 turns the window off. */
+export const DEFAULT_POST_WAKE_MINUTES = 10;
+export const MAX_POST_WAKE_MINUTES = 60;
+
+/** `post_wake_minutes`, checked: an integer from 0 to 60, or the default
+ * when unset. Local config only. */
+export function postWakeMinutes(value: unknown): number {
+  if (value === undefined) return DEFAULT_POST_WAKE_MINUTES;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > MAX_POST_WAKE_MINUTES)
+    throw new Error(`post_wake_minutes must be a whole number from 0 to ${MAX_POST_WAKE_MINUTES}.`);
+  return value;
+}
 export const MIN_REMINDER_MINUTES = 15;
 export const MAX_REMINDER_PROMPT = 500;
 
@@ -57,6 +74,11 @@ export interface AgentSettings {
    * makes one wake (default 60, 0–300). The first post after a quiet spell
    * still wakes as before (up to 30 s, so an inbox copy can join it). Direct subscriptions pause a fixed 10 s. */
   pause_seconds?: number;
+  /** Plain new posts from broad subscriptions wake at most once per this
+   * many minutes (default 10, 0–60; 0 = off). The first after a quiet spell
+   * still wakes within 30 s. Mentions, replies to the agent, DMs and Market
+   * events still wake at once, and take whatever is held with them. */
+  post_wake_minutes?: number;
   /** Minutes a session may sit blocked on a prompt, with wakes arriving,
    * before the router logs it once (default 10; 0 turns it off). Needs a
    * host plugin that reports prompts (see activity.ts). */

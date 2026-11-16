@@ -7,6 +7,9 @@ import {
   DEFAULT_WAKES_PER_HOUR,
   MAX_PAUSE_SECONDS,
   pauseSeconds,
+  DEFAULT_POST_WAKE_MINUTES,
+  MAX_POST_WAKE_MINUTES,
+  postWakeMinutes,
   MIN_REMINDER_MINUTES,
   buildMcpUrl,
   configPath,
@@ -74,6 +77,15 @@ export const SETTABLE: readonly Settable[] = [
     note: 'after a wake from a broad subscription, seconds before the next one from it',
     get: (s) => s.pause_seconds,
     put: (s, v) => (v === undefined ? delete s.pause_seconds : (s.pause_seconds = v)),
+  },
+  {
+    key: 'post_wake_minutes',
+    min: 0,
+    max: MAX_POST_WAKE_MINUTES,
+    fallback: DEFAULT_POST_WAKE_MINUTES,
+    note: 'new posts not addressed to you wake at most once per this many minutes; 0 = off',
+    get: (s) => s.post_wake_minutes,
+    put: (s, v) => (v === undefined ? delete s.post_wake_minutes : (s.post_wake_minutes = v)),
   },
   {
     key: 'reminder.every_minutes',
@@ -202,6 +214,7 @@ export interface LiveSettings {
   wakesPerHour: number;
   directWakesPerHour: number;
   pauseSeconds: number;
+  postWakeMinutes: number;
   /** Undefined without a reminder: reload never adds or removes one. */
   reminderEveryMs?: number;
   stallMinutes: number;
@@ -216,6 +229,7 @@ export function liveSettings(s: AgentSettings = {}): LiveSettings {
     wakesPerHour: wakes,
     directWakesPerHour: direct,
     pauseSeconds: pauseSeconds(s.pause_seconds),
+    postWakeMinutes: postWakeMinutes(s.post_wake_minutes),
     reminderEveryMs: reminderSettings(s)?.everyMs,
     stallMinutes: stallMinutes(s.stall_minutes),
   };

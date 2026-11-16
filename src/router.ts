@@ -80,6 +80,11 @@ export interface RouterAgentConfig {
   /** Seconds a broad subscription rests after each hand-off (validated by
    * pauseSeconds; local config only). Unset: the router's `broadPauseMs`. */
   pauseSeconds?: number;
+  /** Plain new posts from broad subscriptions make at most one wake per
+   * this many minutes, counted from the last wake that carried any (validated
+   * by postWakeMinutes; local config only). Unset or 0: only the router's
+   * `plainHoldMs`. A direct batch ends the hold at once. */
+  postWakeMinutes?: number;
   /** A periodic wake with the operator's own text (validated by reminderSettings). */
   reminder?: Reminder;
   /** Log once when the session has been blocked on a prompt this long with
@@ -130,6 +135,8 @@ export interface RouterOptions {
    * Fixed from the first held batch, so a stream of new posts never pushes
    * it back. Any direct batch ends the hold at once. */
   plainHoldMs?: number;
+  /** Test seam: one minute of post_wake_minutes (default 60 s). */
+  minuteMs?: number;
   /** How long a direct subscription rests after a hand-off (default 10 s). */
   directPauseMs?: number;
   /** How long a broad subscription rests after a hand-off, for an agent
@@ -313,6 +320,9 @@ interface AgentState {
   handedOff: Set<string>;
   /** When the oldest batch now held arrived (0 when none is held). */
   heldSince: number;
+  /** When a wake last carried plain posts from a broad subscription
+   * (Date.now; 0 = none yet): post_wake_minutes counts from here. */
+  plainWokeAt: number;
   /** When `watching-` was last refreshed for a rest (0: not yet). */
   restSignalAt: number;
   heldNotice: string;
@@ -418,6 +428,7 @@ export class Router {
   readonly #renewEveryMs: number;
   readonly #coalesceMs: number;
   readonly #plainHoldMs: number;
+  readonly #minuteMs: number;
   readonly #directPauseMs: number;
   readonly #broadPauseMs: number;
   readonly #restSignalMs: number;
@@ -438,6 +449,7 @@ export class Router {
     this.#renewEveryMs = options.renewEveryMs ?? 6 * 3600_000;
     this.#coalesceMs = options.coalesceMs ?? 3_000;
     this.#plainHoldMs = Math.max(this.#coalesceMs, options.plainHoldMs ?? 30_000);
+    this.#minuteMs = options.minuteMs ?? 60_000;
     this.#directPauseMs = options.directPauseMs ?? DIRECT_PAUSE_MS;
     this.#broadPauseMs = options.broadPauseMs ?? DEFAULT_PAUSE_SECONDS * 1000;
     this.#restSignalMs = options.restSignalMs ?? REST_SIGNAL_MS;
@@ -470,6 +482,7 @@ export class Router {
         kick: makeKick(),
         handedOff: new Set(),
         heldSince: 0,
+        plainWokeAt: 0,
         restSignalAt: 0,
         heldNotice: '',
         reminderAt: cfg.reminder ? Date.now() + cfg.reminder.everyMs : 0,
@@ -757,7 +770,8 @@ export class Router {
   }
 
   /** Applies reloaded settings (live reload, UNI-480): the caps,
-   * pause_seconds (from the next hand-off), the reminder interval and
+   * pause_seconds (from the next hand-off), post_wake_minutes (from the
+   * next check of what's held), the reminder interval and
    * stall_minutes only. Wakes already spent this hour still
    * count. A reminder is never added or removed here, only re-timed; a
    * shorter interval brings the next one forward. Returns what changed, as
@@ -782,6 +796,7 @@ export class Router {
       st.directLimiter.resize(live.directWakesPerHour);
     }
     note('pause_seconds', st.cfg.pauseSeconds ?? this.#broadPauseMs / 1000, live.pauseSeconds);
+    note('post_wake_minutes', st.cfg.postWakeMinutes ?? 0, live.postWakeMinutes);
     note('stall_minutes', st.cfg.stallMinutes ?? 0, live.stallMinutes);
     let reminder = st.cfg.reminder;
     if (reminder && live.reminderEveryMs !== undefined && live.reminderEveryMs !== reminder.everyMs) {
@@ -794,6 +809,7 @@ export class Router {
       wakesPerHour: live.wakesPerHour,
       directWakesPerHour: live.directWakesPerHour,
       pauseSeconds: live.pauseSeconds,
+      postWakeMinutes: live.postWakeMinutes,
       stallMinutes: live.stallMinutes,
       reminder,
     };
@@ -1539,8 +1555,16 @@ export class Router {
           !st.directSubs.has(d.subscription_id) &&
           d.events.every((e) => e.kind === 'post.created'),
       );
-      const plainWait = st.heldSince + this.#plainHoldMs - Date.now();
-      if (plainOnly && plainWait > 0) return plainWait;
+      // And at most one such wake per post_wake_minutes (UNI-951), counted
+      // from the last wake that carried them: the first after a quiet spell
+      // keeps the short hold, the rest of a busy spell waits for the window.
+      const windowEnd = st.plainWokeAt + (st.cfg.postWakeMinutes ?? 0) * this.#minuteMs;
+      const plainWait = Math.max(st.heldSince + this.#plainHoldMs, windowEnd) - Date.now();
+      if (plainOnly && plainWait > 0) {
+        if (windowEnd > st.heldSince + this.#plainHoldMs)
+          notice(`holding ${count} new post event(s) until ${clock(windowEnd)} (post_wake_minutes ${st.cfg.postWakeMinutes})`);
+        return plainWait;
+      }
       const injector = st.injectors.at(-1);
       if (!injector) {
         notice(`holding ${count} event(s): no injector registered for this agent yet`);
@@ -1616,6 +1640,7 @@ export class Router {
       }
       st.busy = 0;
       st.retryAt = 0;
+      if (send.some((d) => d.lane === 'tilori' && !st.directSubs.has(d.subscription_id))) st.plainWokeAt = Date.now();
       this.#signal(handle, 'woke');
       limiter.record();
       if (st.cfg.reminder?.onlyWhenIdle) st.reminderAt = Date.now() + st.cfg.reminder.everyMs;
