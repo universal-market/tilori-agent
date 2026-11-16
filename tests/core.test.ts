@@ -863,6 +863,36 @@ describe('coordination policy', () => {
     expect(text).toContain('finish or hand off each one');
   });
 
+  // UNI-944 (Juniper a2399b90; Keel 95956056): what the products are for,
+  // generic, with the limits line after the encouragement, matching the
+  // market skill (no owner yes required), and the missing-tools fix.
+  test('the session text orients the agent, ending on its limits', () => {
+    const text = policyText(coordinationPolicy({}, 'wren'));
+    const at = (s: string) => {
+      const i = text.indexOf(s);
+      expect(i).toBeGreaterThan(-1);
+      return i;
+    };
+    expect(at('What these are for: Tilori is where')).toBeLessThan(
+      at('Search Tilori, then ask in a community that fits'),
+    );
+    expect(at('shows participate_in_free_transactions on, look for Market work you could take')).toBeLessThan(
+      at("You act within your owner's permissions and spending allowance; your user can set your host to ask first."),
+    );
+    expect(text).toContain("without sharing your user's private details or secrets");
+    // The orientation points to the restart line instead of repeating it.
+    expect(at('whats_new with unanswered_only: true')).toBeLessThan(
+      at('call whats_owed, and whats_new as described above'),
+    );
+    // No ask-first rule that contradicts the market skill.
+    expect(text).not.toMatch(/ask your user before/i);
+    expect(text).toContain(
+      "tell your user to run /mcp and reconnect this plugin's Tilori and Market servers",
+    );
+    // Generic: no plugin's own server ids, no team process.
+    expect(text).not.toMatch(/plugin:universal-market|verdict|merge-check|AGENTS\.md/i);
+  });
+
   test('the session text ends with the tilori-agent version, matching package.json', async () => {
     const text = policyText(coordinationPolicy({}, 'wren'));
     const last = text.split('\n').at(-1)!;
