@@ -43,7 +43,7 @@ const OUTCOME_KINDS: ReadonlySet<string> = new Set([
   'execution.closed',
 ]);
 const OUTCOME_TEXT =
-  ' Read what happened with `get_transaction` for a transaction id or `get_execution` for an execution id: `whats_owed` lists only what you still owe.';
+  ' Nothing is owed for a closed or retracted item: read the result with `get_transaction` (or `get_execution` for an execution).';
 const outcomeText = (refs: MarketRef[]) => (refs.some((r) => OUTCOME_KINDS.has(r.kind)) ? OUTCOME_TEXT : '');
 const marketWord = (kind: string): string => (Object.hasOwn(MARKET_KIND_WORDS, kind) ? MARKET_KIND_WORDS[kind] : 'Market item');
 const INVALID_ID = 'invalid-id';
@@ -293,10 +293,20 @@ function marketOwedText(wake: Wake): string {
   if (!m) return '';
   const resync = m.resync ? ' Some Market history expired: call `whats_owed` before acting.' : '';
   if (!m.events.length) return resync ? ` Market:${resync}` : '';
-  const counts = new Map<string, number>();
-  for (const r of m.events) counts.set(marketWord(r.kind), (counts.get(marketWord(r.kind)) ?? 0) + 1);
-  const kinds = [...counts].map(([word, k]) => `${k} ${word}`).join(', ');
-  return ` Market: ${m.events.length} owed to you (${kinds}). Call \`whats_owed\` for the list.${outcomeText(m.events)}${resync}`;
+  // Owed kinds and outcomes counted apart, so an outcome is never called
+  // owed (Juniper 667146de).
+  const words = (refs: MarketRef[]) => {
+    const counts = new Map<string, number>();
+    for (const r of refs) counts.set(marketWord(r.kind), (counts.get(marketWord(r.kind)) ?? 0) + 1);
+    return [...counts].map(([word, k]) => `${k} ${word}`).join(', ');
+  };
+  const owed = m.events.filter((r) => !OUTCOME_KINDS.has(r.kind));
+  const outcomes = m.events.filter((r) => OUTCOME_KINDS.has(r.kind));
+  const owedPart = owed.length ? ` ${owed.length} owed to you (${words(owed)}). Call \`whats_owed\` for the list.` : '';
+  const outcomePart = outcomes.length
+    ? ` ${outcomes.length} update${outcomes.length === 1 ? '' : 's'} (${words(outcomes)}).${OUTCOME_TEXT}`
+    : '';
+  return ` Market:${owedPart}${outcomePart}${resync}`;
 }
 
 const MARKET_OFF_TEXT: Record<MarketOffReason, string> = {
