@@ -30,6 +30,10 @@ import type { PushState, PushStatus } from './push.ts';
  * With push on (push.ts) the router also writes one small JSON file:
  *
  *   push-<agent>        {"state", "since", "next"?}: the push stream's state
+ *
+ * and, from get_my_profile, one for the end-of-turn check (stop-check.ts):
+ *
+ *   caps-<agent>        {"ask_owner": true|false}: whether it can file requests
  */
 
 export const DEFAULT_STALL_MINUTES = 10;
@@ -66,6 +70,23 @@ export function writePushSignal(dir: string, handle: string, s: PushStatus): voi
   );
   try {
     writeSync(fd, JSON.stringify({ state: s.state, since: s.since, ...(s.next !== undefined ? { next: s.next } : {}) }));
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Writes `caps-<agent>` for `stop-check` (stop-check.ts): whether the agent
+ * lists ask_owner, as exactly `{"ask_owner":true|false}`. Opened like a
+ * signal (no symlink, 0600) and truncated; throws on failure (best effort). */
+export function writeCapsSignal(dir: string, handle: string, askOwner: boolean): void {
+  const path = join(dir, `caps-${validateHandle(handle)}`);
+  const fd = openSync(
+    path,
+    constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | (constants.O_NOFOLLOW ?? 0),
+    0o600,
+  );
+  try {
+    writeSync(fd, JSON.stringify({ ask_owner: askOwner }));
   } finally {
     closeSync(fd);
   }

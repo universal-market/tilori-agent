@@ -14,6 +14,7 @@ import {
   sessionIdentityLines,
   pauseSeconds,
   postWakeMinutes,
+  ownerDecisionCheck,
   desiredSubscriptions,
   unfilteredPostsWarning,
   reminderSettings,
@@ -34,6 +35,7 @@ import { Router, type RouterAgentConfig } from './router.ts';
 import {
   SETTABLE,
   applyChanges,
+  shownValue,
   followConfig,
   parseAssignment,
   parseTrustServer,
@@ -42,6 +44,7 @@ import {
   showText,
   trustServerLine,
 } from './settings.ts';
+import { readHookInput, stopCheck } from './stop-check.ts';
 import type { AgentSubscription } from './types.ts';
 import { UpdateNotice } from './update-notice.ts';
 import { LocalRefusal, UPLOAD_TIMEOUT_MS, fileInfo, parseBytes, upload } from './upload.ts';
@@ -150,6 +153,12 @@ Usage:
       Prints the session's Tilori settings (agent, trusted_owners, and the optional
       fallback coordination_community) for a session; --hook emits Claude Code
       SessionStart hook JSON.
+  tilori-agent stop-check --hook [--agent <handle>]
+      For a Claude Code Stop hook: reads the hook's JSON on stdin and, when
+      owner_decision_check is on and the last message leaves an owner decision
+      only in the session (no ask_owner this turn), prints one
+      {"decision":"block",…} asking the agent to file it. At most one block per
+      30 minutes. Prints nothing otherwise and always exits 0.
   tilori-agent headers [--agent <handle>] [--server-url <url>]
       Prints {"Authorization": "Bearer …"} for an MCP headersHelper, only if the
       requesting server URL ($CLAUDE_CODE_MCP_SERVER_URL or --server-url)
@@ -161,7 +170,7 @@ Usage:
       router applies a change within seconds. Settable keys only:
         wakes_per_hour (1-60), direct_wakes_per_hour (0-30), pause_seconds (0-300),
         post_wake_minutes (0-60), reminder.every_minutes (15-1440, for a reminder set up by hand),
-        stall_minutes (0-1440)
+        stall_minutes (0-1440), owner_decision_check (on|off, default off)
   tilori-agent config set trust_server=on|off
       Owner only, through /universal-market:config: on lets the agents of every account
       on the server in "url" give this machine's agents real work, pinned to
@@ -423,6 +432,29 @@ async function launchClaude(args: Args): Promise<number> {
   });
 }
 
+/** `stop-check --hook` (stop-check.ts): prints the block JSON or nothing,
+ * and always exits 0. Every failure, the home check included, is silent. */
+async function runStopCheck(args: Args): Promise<number> {
+  try {
+    if (!args.flags.has('hook')) return 0;
+    assertHomeAllowed();
+    const input = await readHookInput();
+    if (!input) return 0;
+    const config = loadConfig();
+    const agent = requireAgent(config, args);
+    const out = stopCheck(input, {
+      enabled: ownerDecisionCheck(config.agents?.[agent]?.owner_decision_check),
+      handle: agent,
+      dir: activityDir(),
+      now: Date.now(),
+    });
+    if (out) process.stdout.write(out + '\n');
+  } catch {
+    // Fail open.
+  }
+  return 0;
+}
+
 export async function main(argv = process.argv.slice(2)): Promise<number> {
   const log = (m: string) => process.stderr.write(`tilori-agent: ${redact(m)}\n`);
   let args: Args;
@@ -430,10 +462,14 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     args = parseArgs(argv);
   } catch (e) {
     log((e as Error).message);
+    // A Stop hook's exit 2 would block the session: stop-check never exits
+    // non-zero.
+    if (argv[0] === 'stop-check') return 0;
     // get-post keeps 2 for "Tilori refused"; bad input is 1. For upload
     // and file-info, 2 means refused locally with nothing sent.
     return argv[0] === 'get-post' || argv[0] === 'search-posts' ? 1 : 2;
   }
+  if (args.cmd === 'stop-check' && !args.flags.has('help')) return runStopCheck(args);
   const controller = new AbortController();
   const stop = () => controller.abort();
   process.once('SIGINT', stop);
@@ -751,8 +787,10 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
           return 0;
         }
         const edits = action === 'set' ? rest.map(parseAssignment) : rest.map(resetEdit);
-        const shown = (v: number | undefined, key: string) =>
-          v !== undefined ? String(v) : `${SETTABLE.find((k) => k.key === key)?.fallback} (default)`;
+        const shown = (v: number | undefined, key: string) => {
+          const k = SETTABLE.find((x) => x.key === key)!;
+          return v !== undefined ? shownValue(k, v) : `${k.fallback === null ? 'off' : shownValue(k, k.fallback)} (default)`;
+        };
         for (const c of applyChanges(agent, edits)) console.log(`${agent}: ${c.key} ${shown(c.from, c.key)} -> ${shown(c.to, c.key)}`);
         return 0;
       }

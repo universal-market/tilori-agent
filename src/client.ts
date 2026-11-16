@@ -71,6 +71,8 @@ export interface ProfileNotes {
   postsLeft: PostsLeft | null;
   /** The hash of the tool definitions this connection lists: 16 hex only. */
   toolsHash: string | null;
+  /** Whether the connection lists ask_owner; null when `tools` is missing. */
+  askOwner: boolean | null;
 }
 
 /** Called only through `unsubscribe` (`ensure --prune --yes`), never
@@ -403,10 +405,11 @@ export class TiloriAgentClient {
     const res = await this.call<any>('get_my_profile', {}, { signal, timeout: 5_000 });
     const hash = res?.tools_hash;
     const toolsHash = typeof hash === 'string' && TOOLS_HASH.test(hash) ? hash : null;
+    const askOwner = Array.isArray(res?.tools) ? res.tools.includes('ask_owner') : null;
     const remaining = res?.posts_remaining_today;
-    if (!Number.isInteger(remaining) || remaining < 0) return { postsLeft: null, toolsHash };
+    if (!Number.isInteger(remaining) || remaining < 0) return { postsLeft: null, toolsHash, askOwner };
     const at = typeof res.resets_at === 'string' ? Date.parse(res.resets_at) : NaN;
-    return { postsLeft: { remaining, resetsAt: Number.isFinite(at) ? at : null }, toolsHash };
+    return { postsLeft: { remaining, resetsAt: Number.isFinite(at) ? at : null }, toolsHash, askOwner };
   }
 
   async listSubscriptions(signal?: AbortSignal): Promise<AgentSubscription[]> {

@@ -10,6 +10,7 @@ import {
   DEFAULT_POST_WAKE_MINUTES,
   MAX_POST_WAKE_MINUTES,
   postWakeMinutes,
+  ownerDecisionCheck,
   MIN_REMINDER_MINUTES,
   buildMcpUrl,
   configPath,
@@ -41,6 +42,9 @@ export interface Settable {
   max: number;
   /** The value when unset, or null when unsetting is not allowed. */
   fallback: number | null;
+  /** An on/off key: set with `on` or `off` (1 or 0 here), stored as a
+   * boolean, shown as on or off. */
+  flag?: true;
   note: string;
   get(s: AgentSettings): number | undefined;
   put(s: AgentSettings, value: number | undefined): void;
@@ -109,7 +113,22 @@ export const SETTABLE: readonly Settable[] = [
     get: (s) => s.stall_minutes,
     put: (s, v) => (v === undefined ? delete s.stall_minutes : (s.stall_minutes = v)),
   },
+  {
+    key: 'owner_decision_check',
+    min: 0,
+    max: 1,
+    fallback: 0,
+    flag: true,
+    note: 'at the end of a turn, ask for ask_owner when a decision was left only in the session',
+    get: (s) => (s.owner_decision_check === undefined ? undefined : s.owner_decision_check ? 1 : 0),
+    put: (s, v) => (v === undefined ? delete s.owner_decision_check : (s.owner_decision_check = v === 1)),
+  },
 ];
+
+/** A value as `show` and `set` print it: on/off for a flag. */
+export function shownValue(k: Settable, v: number): string {
+  return k.flag ? (v ? 'on' : 'off') : String(v);
+}
 
 function settable(key: string): Settable {
   const k = SETTABLE.find((x) => x.key === key);
@@ -117,12 +136,15 @@ function settable(key: string): Settable {
   return k;
 }
 
-/** `key=value` with a decimal integer value, checked against the key's bounds. */
+/** `key=value` with a decimal integer value, checked against the key's
+ * bounds; `key=on|off` for a flag. */
 export function parseAssignment(arg: string): { key: Settable; value: number } {
-  const m = /^([a-z_.]{1,40})=(\d{1,5})$/.exec(arg);
+  const m = /^([a-z_.]{1,40})=(\d{1,5}|on|off)$/.exec(arg);
   if (!m) throw new Error(`Expected key=<whole number>, got: ${arg.slice(0, 60)}`);
   const key = settable(m[1]);
-  const value = Number(m[2]);
+  const word = m[2] === 'on' || m[2] === 'off';
+  if (!!key.flag !== word) throw new Error(key.flag ? `${key.key} takes on or off.` : `${key.key} takes a whole number.`);
+  const value = word ? Number(m[2] === 'on') : Number(m[2]);
   if (value < key.min || value > key.max) throw new Error(`${key.key} must be from ${key.min} to ${key.max}.`);
   return { key, value };
 }
@@ -161,6 +183,8 @@ export function applyChanges(
   // The router must accept the result, or a running one would keep its old
   // values and a restart would fail.
   liveSettings(s);
+  // Not a router setting: stop-check reads it at each stop.
+  ownerDecisionCheck(s.owner_decision_check);
   saveConfig(config, path);
   return changes;
 }
@@ -320,8 +344,9 @@ export function showText(agent: string, s: AgentSettings, usage: AgentUsage | nu
   for (const k of SETTABLE) {
     const v = k.get(s);
     const value =
-      v !== undefined ? String(v) : k.fallback === null ? 'off' : `${k.fallback} (default)`;
-    lines.push(`  ${k.key} = ${value}    [${k.min}-${k.max}] ${k.note}`);
+      v !== undefined ? shownValue(k, v) : k.fallback === null ? 'off' : `${shownValue(k, k.fallback)} (default)`;
+    const range = k.flag ? 'on|off' : `${k.min}-${k.max}`;
+    lines.push(`  ${k.key} = ${value}    [${range}] ${k.note}`);
   }
   if (!usage) lines.push('  this hour: not reported (no router running)');
   else {

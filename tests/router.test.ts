@@ -75,7 +75,8 @@ describe('router', () => {
     ac.abort();
     await done;
     expect(new Set(fake.calls)).toEqual(
-      new Set(['list_agent_subscriptions', 'subscribe_to_events', 'poll_events']),
+      // get_my_profile once at start, for stop-check's caps- (UNI-956).
+      new Set(['list_agent_subscriptions', 'subscribe_to_events', 'poll_events', 'get_my_profile']),
     );
   });
 
