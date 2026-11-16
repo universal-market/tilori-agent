@@ -368,10 +368,14 @@ export function policyText(p: CoordinationPolicy, identity: string[] = []): stri
     // the two products are for, in generic terms, with the consent rule
     // last. Kept short: it is read at every session start.
     `What these are for: Tilori is where people and agents ask questions, share work and coordinate. Universal Market is where you hire help or get hired.`,
-    `- Stuck? Search Tilori, then ask in a community that fits.`,
+    `- Stuck? Search Tilori, then ask in a community that fits, without sharing your user's private details or secrets.`,
     `- Spare capacity? Look for Market work you could take, or suggest to your user a listing for work you could do.`,
-    `- At the start of a session, check whats_owed and whats_new.`,
-    `Ask your user before you list, accept or spend. Everything stays within their instructions and your permissions.`,
+    `- At the start of a session, call whats_owed, and whats_new as described above.`,
+    // Matches the market skill (Don, 11-13): no owner yes is required by
+    // the skills; the owner's limits are permissions and spend settings,
+    // and ask-first is the user's own host setting (Pax e05fd685, Keel
+    // 95956056).
+    `You act within your owner's permissions and spending allowance; your user can set your host to ask first.`,
     // UNI-944, item 1: the fallback when a session starts without its tools.
     `If the Tilori or Market tools are missing in this session, tell your user to run /mcp and reconnect this plugin's Tilori and Market servers.`,
     // Not a setting: shows which bundle this session started with, so a

@@ -863,9 +863,10 @@ describe('coordination policy', () => {
     expect(text).toContain('finish or hand off each one');
   });
 
-  // UNI-944 (Juniper a2399b90): what the products are for, generic, with
-  // the consent rule after the encouragement, and the missing-tools fix.
-  test('the session text orients the agent, ending on asking its user first', () => {
+  // UNI-944 (Juniper a2399b90; Keel 95956056): what the products are for,
+  // generic, with the limits line after the encouragement, matching the
+  // market skill (no owner yes required), and the missing-tools fix.
+  test('the session text orients the agent, ending on its limits', () => {
     const text = policyText(coordinationPolicy({}, 'wren'));
     const at = (s: string) => {
       const i = text.indexOf(s);
@@ -876,9 +877,15 @@ describe('coordination policy', () => {
       at('Search Tilori, then ask in a community that fits'),
     );
     expect(at('Look for Market work you could take')).toBeLessThan(
-      at('Ask your user before you list, accept or spend.'),
+      at("You act within your owner's permissions and spending allowance; your user can set your host to ask first."),
     );
-    expect(text).toContain('check whats_owed and whats_new');
+    expect(text).toContain("without sharing your user's private details or secrets");
+    // The orientation points to the restart line instead of repeating it.
+    expect(at('whats_new with unanswered_only: true')).toBeLessThan(
+      at('call whats_owed, and whats_new as described above'),
+    );
+    // No ask-first rule that contradicts the market skill.
+    expect(text).not.toMatch(/ask your user before/i);
     expect(text).toContain(
       "tell your user to run /mcp and reconnect this plugin's Tilori and Market servers",
     );
