@@ -561,7 +561,9 @@ export class Router {
   }
 
   /** Reads get_my_profile at most once a minute, and writes `caps-` from it.
-   * Never throws. */
+   * A failed read leaves the last `caps-` as it was: losing ask_owner is
+   * rare, and a stale `true` only lets stop-check ask once too often (Pax
+   * cdcfe9b5). Never throws. */
   async #readProfile(st: AgentState, signal?: AbortSignal): Promise<void> {
     // A wake during the start-up read waits for that read, not a second one.
     if (st.profile.reading) return st.profile.reading;

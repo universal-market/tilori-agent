@@ -31,6 +31,8 @@ describe('asksOwner', () => {
     'Do you want me to remove the stale worktrees as well?',
     'Should I open the follow-up PR now or after the restart?',
     'OK to delete the old branch?',
+    // An unfiled wait on the owner (Pax cdcfe9b5).
+    "I'll hold the merge until your decision.",
     // The last-sentence rule: plain questions the patterns missed.
     'I checked the invoices.\n\nWhich service are those invoices from?',
     'Done with the setup. Have you switched billing to the org account?',
@@ -53,6 +55,11 @@ describe('asksOwner', () => {
   ];
   for (const message of notAsks)
     test(`does not ask: ${message.slice(0, 50) || '(empty)'}`, () => expect(asksOwner(message)).toBe(false));
+
+  test('a fence cut at the 4 KB line does not invert what counts as code (Pax cdcfe9b5)', () => {
+    const code = '```\n' + 'x = 1\n'.repeat(900) + '```\n';
+    expect(asksOwner(code + 'Should I merge it now?\n```\ny = 2\n```\nDone.')).toBe(true);
+  });
 
   test('only the last 4 KB is matched', () => {
     const ask = 'Do you want me to merge it?\n';
