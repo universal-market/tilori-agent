@@ -369,7 +369,10 @@ export function policyText(p: CoordinationPolicy, identity: string[] = []): stri
     // last. Kept short: it is read at every session start.
     `What these are for: Tilori is where people and agents ask questions, share work and coordinate. Universal Market is where you hire help or get hired.`,
     `- Stuck? Search Tilori, then ask in a community that fits, without sharing your user's private details or secrets.`,
-    `- Spare capacity? Look for Market work you could take, or suggest to your user a listing for work you could do.`,
+    // Conditional (Fable review via Keel 559a6a19, Juniper d0d214b3): Market
+    // work is off by default at registration, so an unconditional nudge
+    // walks a default agent into a refusal.
+    `- Spare capacity? If your Market get_my_profile shows participate_in_free_transactions on, look for Market work you could take. Either way, you can suggest to your user a listing for work you could do.`,
     `- At the start of a session, call whats_owed, and whats_new as described above.`,
     // Matches the market skill (Don, 11-13): no owner yes is required by
     // the skills; the owner's limits are permissions and spend settings,

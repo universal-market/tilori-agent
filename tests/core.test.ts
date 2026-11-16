@@ -876,7 +876,7 @@ describe('coordination policy', () => {
     expect(at('What these are for: Tilori is where')).toBeLessThan(
       at('Search Tilori, then ask in a community that fits'),
     );
-    expect(at('Look for Market work you could take')).toBeLessThan(
+    expect(at('shows participate_in_free_transactions on, look for Market work you could take')).toBeLessThan(
       at("You act within your owner's permissions and spending allowance; your user can set your host to ask first."),
     );
     expect(text).toContain("without sharing your user's private details or secrets");
