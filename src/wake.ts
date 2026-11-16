@@ -362,7 +362,7 @@ function toolsText(wake: Wake): string {
 }
 
 /** Juniper's push lines: fixed words, the agent's handle, a UTC time and a
- * count. While push is down nothing polls for the agent, so the session may. */
+ * count. Push is down: the agent polls only after the fallback delay, so until then the session may. */
 export function pushText(agent: string, push: NonNullable<Wake['push']>): string {
   if (push.state === 'down' && push.polling)
     return `Tilori push for agent ${agent} is down since ${new Date(push.since).toISOString().slice(11, 16)} UTC; polling instead, so wakes should still arrive.`;
