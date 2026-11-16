@@ -65,23 +65,26 @@ function sentences(text: string): string[] {
 const ASKS: readonly RegExp[] = [
   // A labelled ask: "Decision for you:", "Your call:", "Needs your OK:".
   /^\W*(?:\*\*)?(?:your (?:calls?|decisions?)|decisions? for you|needs? your (?:decision|answer|ok|okay|approval)|questions? for you)\b[^.]{0,20}:/i,
-  /\b(?:(?:is|are|it'?s|stays?|still|be) your (?:call|decision)s?\b|needs? your (?:decision|approval|ok|okay|answer|answers|go-ahead|sign-?off|yes|call)|(?:waiting|blocked) (?:on|for) (?:you\b|your (?:decision|answer|approval|ok|okay|yes|go-ahead))|say (?:go|yes|if you want)|once you (?:decide|confirm|approve|answer|say))/i,
+  /\b(?:(?:is|are|it'?s|stays?|still|be) your (?:call|decision)s?\b|needs? your (?:decision|approval|ok|okay|answer|answers|go-ahead|sign-?off|yes|call)|(?:waiting|blocked) (?:on|for) (?:you\b|your (?:decision|answer|approval|ok|okay|yes|go-ahead))|say (?:go|yes|if you want)|once you (?:decide|confirm|approve|answer|say)|until (?:you (?:decide|confirm|approve|answer)|your (?:decision|answer|approval|ok|okay|go-ahead)))/i,
   /\b(?:please (?:confirm|decide|approve|choose|pick|advise)|let me know (?:which|whether|if you(?:'d| would)? (?:like|want|prefer)|how you(?:'d| would)? like))\b/i,
   /\b(?:do you want|would you (?:like|prefer|rather)|should (?:I|we)|shall I|want me to|which (?:option|one|do you)|ok(?:ay)? to (?:proceed|merge|ship|push|go|delete|remove)|may I|can I (?:go ahead|proceed|merge)|do you (?:approve|prefer|agree))\b[^?]{0,200}\?/i,
 ];
 /** Says nothing is asked now, or reports an answer already given. */
 const NOT_ASKING =
-  /\b(?:nothing (?:new |else )?(?:needs|is waiting on|waits on|is blocked on) you|(?:doesn'?t|does not|don'?t|no longer|not) (?:need|needs|wait|waiting|blocked)[^.]{0,30}\byou|no decision (?:is )?needed|until your decision|passed your decision|your decision (?:was|is in|came)|you (?:said|decided|approved|answered|confirmed))\b/i;
+  /\b(?:nothing (?:new |else )?(?:needs|is waiting on|waits on|is blocked on) you|(?:doesn'?t|does not|don'?t|no longer|not) (?:need|needs|wait|waiting|blocked)[^.]{0,30}\byou|no decision (?:is )?needed|passed your decision|your decision (?:was|is in|came)|you (?:said|decided|approved|answered|confirmed))\b/i;
 /** The sentence points at a request already filed (layer 1's convention). */
 const FILED = /\b(?:ask_owner|owner request|inbox|filed|request (?:is )?open)\b/i;
 
-/** Whether `message` asks its reader for a decision, judged on its last 4 KB.
+/** Whether `message` asks its reader for a decision, judged on the last 4 KB
+ * of its text once code and quotes are removed. Stripping first keeps a fence
+ * cut in half at the 4 KB line from inverting which parts count as code
+ * (Pax cdcfe9b5).
  * A sentence that cites a filed request, or says nothing is needed, never
  * counts. A message whose last sentence is a question counts too (the four
  * plain questions the patterns missed in the replay). */
 export function asksOwner(message: string): boolean {
-  const tail = Buffer.from(message, 'utf8').subarray(-MATCH_TAIL_BYTES).toString('utf8');
-  const all = sentences(strip(tail));
+  const text = strip(Buffer.from(message, 'utf8').subarray(-MAX_STDIN_BYTES).toString('utf8'));
+  const all = sentences(Buffer.from(text, 'utf8').subarray(-MATCH_TAIL_BYTES).toString('utf8'));
   const open = (s: string) => !NOT_ASKING.test(s) && !FILED.test(s);
   if (all.some((s) => open(s) && ASKS.some((r) => r.test(s)))) return true;
   const last = all.at(-1);
