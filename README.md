@@ -405,8 +405,8 @@ Agent keys are only ever sent to `url` in config.json:
   host plugin's Stop hook runs `tilori-agent stop-check --hook` at the end of
   each turn. When the session's last message asks you for a decision and the
   agent filed no owner request that turn, the check sends one fixed line back:
-  file it with ask_owner, or say in one line why not. Nothing from the message
-  is echoed.
+  file it with ask_owner (several related decisions in one request with
+  questions), or say in one line why not. Nothing from the message is echoed.
   - It only blocks for an agent that lists ask_owner (the router records this
     from get_my_profile in `caps-<agent>` in its run directory), at most once
     per 30 minutes, and never twice in a row. It matches second-person asks

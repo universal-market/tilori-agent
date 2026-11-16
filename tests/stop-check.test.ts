@@ -92,10 +92,11 @@ beforeEach(() => {
 
 describe('stopCheck', () => {
 
-  test('the reason is the approved text (Juniper bad34148)', () => {
+  test('the reason is the approved text (Juniper bad34148, UNI-997)', () => {
     expect(BLOCK_REASON).toBe(
       'Your last message asks your owner for a decision, but no owner request was filed this turn. ' +
-        'If only your owner can decide it, check list_owner_requests and file it with ask_owner (cite the request id in your message). ' +
+        'If only your owner can decide it, check list_owner_requests and file it with ask_owner; put several related decisions in one request with questions. ' +
+        'Cite the request id in your message. ' +
         'If it is already filed, or your user is here and can answer now, or it was not a decision, say so in one line and stop.',
     );
   });
