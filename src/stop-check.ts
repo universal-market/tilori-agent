@@ -219,6 +219,30 @@ export function stopCheck(input: StopHookInput, env: StopCheckEnv): string | nul
   return JSON.stringify({ decision: 'block', reason: BLOCK_REASON });
 }
 
+/** A PostToolUse hook's input, as far as `--asked` reads it. */
+export interface ToolHookInput {
+  tool_name?: unknown;
+  tool_response?: unknown;
+}
+
+/** ask_owner under any MCP server name (`mcp__<server>__ask_owner`). */
+const ASK_OWNER_TOOL = /^mcp__[A-Za-z0-9_-]{1,128}__ask_owner$/;
+
+/** `stop-check --asked`, from the host's PostToolUse hook: touches
+ * `asked-<agent>` after a successful ask_owner, so that turn is never blocked
+ * (Bastion 785bd425, condition 4). Not after list_owner_requests or any other
+ * tool, not when the result is missing or says `isError`. Returns whether it
+ * touched. Throws only on the marker write. */
+export function noteAsked(input: ToolHookInput, handle: string, dir: string, now: number): boolean {
+  if (!HANDLE_RE.test(handle)) return false;
+  if (typeof input.tool_name !== 'string' || !ASK_OWNER_TOOL.test(input.tool_name)) return false;
+  const r = input.tool_response;
+  if (r === null || typeof r !== 'object') return false;
+  if (!Array.isArray(r) && (r as { isError?: unknown }).isError === true) return false;
+  touch(join(dir, `asked-${handle}`), now);
+  return true;
+}
+
 /** Reads the hook's JSON from stdin (at most 1 MiB); null on anything else. */
 export async function readHookInput(stream: AsyncIterable<Uint8Array> = process.stdin): Promise<StopHookInput | null> {
   const chunks: Uint8Array[] = [];

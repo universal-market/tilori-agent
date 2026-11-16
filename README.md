@@ -415,8 +415,10 @@ Agent keys are only ever sent to `url` in config.json:
     cite a filed request.
   - Any error, missing file or unexpected input means no block. The check
     always exits 0.
-  - The plugin's PostToolUse hook touches `asked-<agent>` after a successful
-    ask_owner, so a turn that filed one is never blocked.
+  - The plugin's PostToolUse hook on ask_owner runs `tilori-agent stop-check
+    --asked`, which touches `asked-<agent>` only when the call succeeded (not
+    for list_owner_requests or an error result), so a turn that filed a
+    request is never blocked.
 
 - `stall_minutes` (default 10) is how long a session may sit blocked on a
   prompt, with wakes arriving, before the router logs it once. `0` turns it

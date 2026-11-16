@@ -10,6 +10,7 @@ import {
   STOP_BLOCK_COOLDOWN_MS,
   asksOwner,
   lastAssistantText,
+  noteAsked,
   readCanAsk,
   readHookInput,
   stopCheck,
@@ -159,6 +160,39 @@ describe('stopCheck', () => {
     symlinkSync(transcript, link);
     expect(lastAssistantText(link)).toBeNull();
     expect(lastAssistantText(join(dir, 'missing.jsonl'))).toBeNull();
+  });
+});
+
+describe('noteAsked', () => {
+  const ok = { tool_name: 'mcp__plugin_universal-market_tilori__ask_owner', tool_response: { request_id: 'r1' } };
+  test('a successful ask_owner marks the turn, so the next stop does not block', () => {
+    const now = env().now;
+    stamp('stopcheck', now - 60_000);
+    expect(noteAsked(ok, 'wren', dir, now - 30_000)).toBe(true);
+    expect(statSync(join(dir, 'asked-wren')).mtimeMs).toBe(now - 30_000);
+    expect(stopCheck(ASK, env())).toBeNull();
+  });
+
+  test('not list_owner_requests, another tool, an error result or no result', () => {
+    for (const input of [
+      { ...ok, tool_name: 'mcp__plugin_universal-market_tilori__list_owner_requests' },
+      { ...ok, tool_name: 'ask_owner' },
+      { ...ok, tool_name: 'mcp__x__ask_owner_v2' },
+      { ...ok, tool_response: { isError: true, content: [] } },
+      { ...ok, tool_response: 'Error: refused' },
+      { tool_name: ok.tool_name },
+      {},
+    ])
+      expect(noteAsked(input, 'wren', dir, env().now)).toBe(false);
+    expect(noteAsked(ok, '../wren', dir, env().now)).toBe(false);
+    expect(() => statSync(join(dir, 'asked-wren'))).toThrow();
+  });
+
+  test('a symlinked marker is refused', () => {
+    const other = mkdtempSync(join(tmpdir(), 'tilori-stopcheck-other-'));
+    writeFileSync(join(other, 'target'), '');
+    symlinkSync(join(other, 'target'), join(dir, 'asked-wren'));
+    expect(() => noteAsked(ok, 'wren', dir, env().now)).toThrow();
   });
 });
 
