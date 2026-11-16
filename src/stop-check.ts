@@ -34,7 +34,8 @@ import { HANDLE_RE } from './keys.ts';
  * turned it on. */
 export const BLOCK_REASON =
   'Your last message asks your owner for a decision, but no owner request was filed this turn. ' +
-  'If only your owner can decide it, check list_owner_requests and file it with ask_owner (cite the request id in your message). ' +
+  'If only your owner can decide it, check list_owner_requests and file it with ask_owner; put several related decisions in one request with questions. ' +
+  'Cite the request id in your message. ' +
   'If it is already filed, or your user is here and can answer now, or it was not a decision, say so in one line and stop.';
 
 /** At most one block per agent in this window (design: 30 min cut repeats
