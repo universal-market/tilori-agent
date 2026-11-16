@@ -44,7 +44,7 @@ import {
   showText,
   trustServerLine,
 } from './settings.ts';
-import { readHookInput, stopCheck } from './stop-check.ts';
+import { noteAsked, readHookInput, stopCheck, type ToolHookInput } from './stop-check.ts';
 import type { AgentSubscription } from './types.ts';
 import { UpdateNotice } from './update-notice.ts';
 import { LocalRefusal, UPLOAD_TIMEOUT_MS, fileInfo, parseBytes, upload } from './upload.ts';
@@ -159,6 +159,10 @@ Usage:
       only in the session (no ask_owner this turn), prints one
       {"decision":"block",…} asking the agent to file it. At most one block per
       30 minutes. Prints nothing otherwise and always exits 0.
+  tilori-agent stop-check --asked [--agent <handle>]
+      For a PostToolUse hook on ask_owner: reads the hook's JSON on stdin and,
+      when the call succeeded, marks that the agent filed a request this turn,
+      so stop-check doesn't ask. Prints nothing and always exits 0.
   tilori-agent headers [--agent <handle>] [--server-url <url>]
       Prints {"Authorization": "Bearer …"} for an MCP headersHelper, only if the
       requesting server URL ($CLAUDE_CODE_MCP_SERVER_URL or --server-url)
@@ -433,15 +437,22 @@ async function launchClaude(args: Args): Promise<number> {
 }
 
 /** `stop-check --hook` (stop-check.ts): prints the block JSON or nothing,
- * and always exits 0. Every failure, the home check included, is silent. */
+ * and always exits 0. `stop-check --asked` (from PostToolUse) only touches
+ * `asked-` after a successful ask_owner and prints nothing. Every failure,
+ * the home check included, is silent. */
 async function runStopCheck(args: Args): Promise<number> {
   try {
-    if (!args.flags.has('hook')) return 0;
+    const asked = args.flags.has('asked');
+    if (!args.flags.has('hook') && !asked) return 0;
     assertHomeAllowed();
     const input = await readHookInput();
     if (!input) return 0;
     const config = loadConfig();
     const agent = requireAgent(config, args);
+    if (asked) {
+      noteAsked(input as ToolHookInput, agent, activityDir(), Date.now());
+      return 0;
+    }
     const out = stopCheck(input, {
       enabled: ownerDecisionCheck(config.agents?.[agent]?.owner_decision_check),
       handle: agent,
