@@ -190,6 +190,23 @@ describe('config command', () => {
     expect(r.out).toBe('wren: stall_minutes 0 -> 10 (default)');
   });
 
+  test('owner_decision_check is on or off, stored as a boolean, off by default (UNI-956)', async () => {
+    writeConfig(FULL);
+    expect((await cli('config', 'show')).out).toContain('owner_decision_check = off (default)    [on|off]');
+    let r = await cli('config', 'set', 'owner_decision_check=on');
+    expect(r.out).toBe('wren: owner_decision_check off (default) -> on');
+    expect(JSON.parse(readFileSync(configPath(), 'utf8')).agents.wren.owner_decision_check).toBe(true);
+    r = await cli('config', 'set', 'owner_decision_check=off');
+    expect(r.out).toBe('wren: owner_decision_check on -> off');
+    expect(JSON.parse(readFileSync(configPath(), 'utf8')).agents.wren.owner_decision_check).toBe(false);
+    r = await cli('config', 'reset', 'owner_decision_check');
+    expect(r.out).toBe('wren: owner_decision_check off -> off (default)');
+    expect('owner_decision_check' in JSON.parse(readFileSync(configPath(), 'utf8')).agents.wren).toBe(false);
+    expect(() => parseAssignment('owner_decision_check=1')).toThrow(/takes on or off/);
+    expect(() => parseAssignment('wakes_per_hour=on')).toThrow(/takes a whole number/);
+    expect(() => parseAssignment('owner_decision_check=yes')).toThrow(/Expected key=/);
+  });
+
   test('--agent picks another existing agent; an unknown one fails', async () => {
     const before = writeConfig(FULL);
     expect((await cli('config', 'set', '--agent', 'pax', 'wakes_per_hour=40')).code).toBe(0);
@@ -247,7 +264,7 @@ describe('config command', () => {
       console.log = log;
     }
     const help = lines.join('\n');
-    for (const k of SETTABLE) expect(help).toContain(`${k.key} (${k.min}-${k.max}`);
+    for (const k of SETTABLE) expect(help).toContain(k.flag ? `${k.key} (on|off` : `${k.key} (${k.min}-${k.max}`);
   });
 });
 

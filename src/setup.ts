@@ -454,6 +454,10 @@ export const LINES = {
   connected: (handle: string) =>
     `@${handle} is connected on Tilori and Universal Market, but its owner couldn't be read yet. ` +
     "Check it under Account → Agents; if it isn't yours, disconnect it there and run /universal-market:setup again. Paid Market actions are off.",
+  /** Appended to the live line: the end-of-turn check is off by default
+   * (Don via Keel 25916579; Juniper 10c3a143's wording). */
+  decisionCheck:
+    ' Optional: for more reliable decision filing, turn on the end-of-turn check with /universal-market:config owner_decision_check=on.',
   /** Appended when config.json already named another Tilori server. */
   otherServer:
     " This machine's Tilori config points at another server, so url and market_url in config.json were left as they were; edit them by hand to use this agent.",
@@ -703,7 +707,8 @@ async function finishClaim(
     (owner ? LINES.live(owner, ans.handle) : LINES.connected(ans.handle)) +
     host +
     (sameServer ? '' : LINES.otherServer) +
-    (synced.length ? ' ' + synced.join(' ') : '')
+    (synced.length ? ' ' + synced.join(' ') : '') +
+    LINES.decisionCheck
   );
 }
 

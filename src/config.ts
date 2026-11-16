@@ -43,6 +43,13 @@ export function postWakeMinutes(value: unknown): number {
     throw new Error(`post_wake_minutes must be a whole number from 0 to ${MAX_POST_WAKE_MINUTES}.`);
   return value;
 }
+/** `owner_decision_check`, checked: true or false, off when unset (Don via
+ * Keel 25916579: off by default for plugin users). */
+export function ownerDecisionCheck(value: unknown): boolean {
+  if (value === undefined) return false;
+  if (typeof value !== 'boolean') throw new Error('owner_decision_check must be true or false.');
+  return value;
+}
 export const MIN_REMINDER_MINUTES = 15;
 export const MAX_REMINDER_PROMPT = 500;
 
@@ -83,6 +90,9 @@ export interface AgentSettings {
    * before the router logs it once (default 10; 0 turns it off). Needs a
    * host plugin that reports prompts (see activity.ts). */
   stall_minutes?: number;
+  /** The end-of-turn owner-decision check (stop-check.ts): off unless true.
+   * Read by `stop-check` at each stop, so a change applies at once. */
+  owner_decision_check?: boolean;
   /** Follow replies and mentions (default true). */
   inbox?: boolean;
   /** Follow direct messages; needs tilori:messages on the agent (default true). */

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { clock, promptSignal, touchSignal, writePushSignal, type SignalKind } from './activity.ts';
+import { clock, promptSignal, touchSignal, writeCapsSignal, writePushSignal, type SignalKind } from './activity.ts';
 import {
   ACCESS_GATE,
   KeyRejected,
@@ -331,7 +331,7 @@ interface AgentState {
   reminderAt: number;
   stats: { wakes: number; events: number; delayed: number; reminders: number };
   /** The last get_my_profile reading and when it was taken. */
-  profile: { at: number; value: ProfileNotes };
+  profile: { at: number; value: ProfileNotes; reading?: Promise<void> };
   /** The prompt the session is blocked on (by its signal's mtime), the wakes
    * accepted since, and whether the stall line was logged for it. */
   blocked: { since: number; wakes: number; logged: boolean };
@@ -487,7 +487,7 @@ export class Router {
         heldNotice: '',
         reminderAt: cfg.reminder ? Date.now() + cfg.reminder.everyMs : 0,
         stats: { wakes: 0, events: 0, delayed: 0, reminders: 0 },
-        profile: { at: -Infinity, value: { postsLeft: null, toolsHash: null } },
+        profile: { at: -Infinity, value: { postsLeft: null, toolsHash: null, askOwner: null } },
         blocked: { since: 0, wakes: 0, logged: false },
       };
       this.#agents.set(cfg.handle, st);
@@ -558,6 +558,44 @@ export class Router {
       },
       log: (m) => this.#log(`[${handle}] ${m}`),
     });
+  }
+
+  /** Reads get_my_profile at most once a minute, and writes `caps-` from it.
+   * Never throws. */
+  async #readProfile(st: AgentState, signal?: AbortSignal): Promise<void> {
+    // A wake during the start-up read waits for that read, not a second one.
+    if (st.profile.reading) return st.profile.reading;
+    const now = this.#now();
+    if (now - st.profile.at < POSTS_LEFT_MS) return;
+    st.profile.at = now;
+    const read = (async () => {
+      try {
+        st.profile.value = await st.cfg.client.profileNotes(signal);
+      } catch {
+        st.profile.value = { postsLeft: null, toolsHash: null, askOwner: null };
+      }
+      if (st.profile.value.askOwner !== null) this.#capsStatus(st.cfg.handle, st.profile.value.askOwner);
+    })();
+    st.profile.reading = read;
+    try {
+      await read;
+    } finally {
+      st.profile.reading = undefined;
+    }
+  }
+
+  /** Writes `caps-<agent>` for stop-check (best effort, logged once). */
+  #capsStatus(handle: string, askOwner: boolean) {
+    if (this.#signalDir === undefined) return;
+    try {
+      writeCapsSignal(this.#signalDir, handle, askOwner);
+      this.#signalFailed.delete(`caps-${handle}`);
+    } catch (cause) {
+      const key = `caps-${handle}`;
+      if (this.#signalFailed.has(key)) return;
+      this.#signalFailed.add(key);
+      this.#log(`[${handle}] could not update caps- in the run directory: ${errText(cause)}`);
+    }
   }
 
   /** Writes `push-<agent>` for `status` (best effort). */
@@ -859,6 +897,9 @@ export class Router {
    * batches. */
   async #runAgent(st: AgentState, signal: AbortSignal): Promise<void> {
     const pending = new Map<string, Held>();
+    // One profile read at start, so stop-check's caps- exists before the
+    // first wake. It never delays polling.
+    void this.#readProfile(st, signal);
     await Promise.all([
       this.#flushLoop(st, pending, signal),
       ...this.#laneList(st).map((lane) => this.#runLane(st, lane, pending, signal)),
@@ -1441,15 +1482,7 @@ export class Router {
    * most once a minute; any failure leaves the wake as it is, so a missing or
    * older server never delays or blocks one. */
   async #noteProfile(st: AgentState, wake: Wake, signal?: AbortSignal): Promise<void> {
-    const now = this.#now();
-    if (now - st.profile.at >= POSTS_LEFT_MS) {
-      st.profile.at = now;
-      try {
-        st.profile.value = await st.cfg.client.profileNotes(signal);
-      } catch {
-        st.profile.value = { postsLeft: null, toolsHash: null };
-      }
-    }
+    await this.#readProfile(st, signal);
     const { postsLeft: left, toolsHash } = st.profile.value;
     if (toolsHash) wake.tools_hash = toolsHash;
     if (!left || left.remaining >= POSTS_LOW) return;
