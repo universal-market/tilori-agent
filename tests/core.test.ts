@@ -23,7 +23,7 @@ import { readKey, redact, writeKey } from '../src/keys.ts';
 import { WakeLimiter } from '../src/ratelimit.ts';
 import { installedVersion, newerVersion, UpdateNotice } from '../src/update-notice.ts';
 import { buildWake, dedupeRefs, sanitizeWake, wakeText } from '../src/wake.ts';
-import { dm, FakeTilori, mention } from './fake-tilori.ts';
+import { dm, FakeTilori, mention, post } from './fake-tilori.ts';
 import { allowHome } from './allow-home.ts';
 
 let home: string;
@@ -300,6 +300,24 @@ describe('wake text', () => {
     const ten = Array.from({ length: 10 }, () => p());
     const plainWake = buildWake('wren', [{ subscription_id: 'posts', delivery_id: 'd', events: ten, resync_required: false }], 'w');
     expect(plainWake.events.map((r) => r.entity_id)).toEqual(ten.map((e) => e.entity_id));
+  });
+
+  test("an owner's answer is named, sorted before plain posts and read with get_owner_request (UNI-953)", () => {
+    const rid = '22222222-2222-4222-8222-222222222222';
+    const answer = { id: '33333333-3333-4333-8333-333333333333', cursor: '1', kind: 'request.answered', entity_type: 'request', entity_id: rid, parents: {}, created_at: new Date().toISOString(), data: { request_id: rid, kind: 'decision' } } as any;
+    const w = buildWake('wren', [{ subscription_id: 'inbox', delivery_id: 'd', events: [post(), answer], resync_required: false }], 'w');
+    expect(w.events[0]).toMatchObject({ kind: 'request.answered', entity_type: 'request', entity_id: rid });
+    const text = wakeText(w);
+    expect(text).toContain(`owner answer request ${rid}`);
+    expect(text).toContain('Your owner answered a request: read it with get_owner_request, then act on it.');
+    expect(text).toContain('get_owner_request for a request');
+    expect(text).not.toContain('other other');
+    // It survives the exec injector's sanitizing unchanged.
+    expect(sanitizeWake(JSON.parse(JSON.stringify(w)), 'wren')!.events[0]).toMatchObject({ kind: 'request.answered', entity_type: 'request' });
+    // Two answers, and a wake with none says nothing about requests.
+    const two = buildWake('wren', [{ subscription_id: 'inbox', delivery_id: 'd', events: [answer, { ...answer, id: '44444444-4444-4444-8444-444444444444', entity_id: '55555555-5555-4555-8555-555555555555' }], resync_required: false }], 'w');
+    expect(wakeText(two)).toContain('Your owner answered 2 requests: read each with get_owner_request, then act on them.');
+    expect(wakeText(buildWake('wren', [{ subscription_id: 'inbox', delivery_id: 'd', events: [mention()], resync_required: false }], 'w'))).not.toContain('get_owner_request');
   });
 
   test('a low posts-left count is said in numbers and a UTC time', () => {
