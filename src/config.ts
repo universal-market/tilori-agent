@@ -71,9 +71,9 @@ export interface AgentSettings {
    * `wakes_per_hour`. */
   reminder?: ReminderSettings;
   /** "on": Tilori push via the gateway. A push stream wakes the agent and
-   * nothing long-polls; while push is down, the monitor says so and the
-   * session can poll for itself. "off" (default): long polls. Needs a
-   * restart to change. */
+   * nothing long-polls; while push is down the monitor says so, and after
+   * 5 minutes the agent long-polls until push holds again. "off" (default):
+   * long polls. Needs a restart to change. */
   push?: 'on' | 'off';
 }
 

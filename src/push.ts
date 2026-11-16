@@ -8,10 +8,11 @@
  * acknowledgements stay on the one path they already use.
  *
  * The key goes only to Tilori's own MCP endpoint, never to the gateway: the
- * gateway gets the ticket, in its header, and nothing else. There is no
- * long-poll fallback while push is down (Don): the stream is retried with
- * jittered backoff from 5 s to 5 min, and each reconnect is followed by one
- * zero-wait sweep.
+ * gateway gets the ticket, in its header, and nothing else. The stream is
+ * retried with jittered backoff from 5 s to 5 min, and each reconnect is
+ * followed by one zero-wait sweep. This class never polls: once push has been
+ * down for 5 min the router starts a long-poll fallback (router.ts) and stops
+ * it when `stable` fires.
  */
 
 /** The header a ticket travels in; never Authorization, never the URL. */

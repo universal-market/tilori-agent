@@ -34,6 +34,13 @@ import { KIND_RANK, MARKET_ENTITY_TYPES, buildWake, marketRefs, refKey, toRefs }
  * else asks for one, so a bug in the sweep logic is a slow poll, never a
  * spin against the account's rate budget (Bastion). */
 export const PUSH_POLL_GAP_MS = 1_000;
+/** Push mode: push down this long (and not refused) starts a long-poll
+ * fallback for the agent (Don, 2026-11: after 5 min, not at the 60 s "down"
+ * line). Each agent adds a random start delay of up to half of it, so a
+ * gateway outage doesn't turn every agent into a poller in the same second,
+ * and at most PUSH_FALLBACK_MAX agents of one router poll at once. */
+export const PUSH_FALLBACK_AFTER_MS = 5 * 60_000;
+export const PUSH_FALLBACK_MAX = 3;
 const RECENT_MS = 2 * 3600_000;
 /** Below this many posts left today, wakes say how many (UNI-393). */
 const POSTS_LOW = 100;
@@ -102,6 +109,11 @@ export interface RouterOptions {
   logger?: (message: string) => void;
   /** Long-poll wait per poll_events call (default 20 s, max 25 s). */
   waitMs?: number;
+  /** Push down this long starts the long-poll fallback (default 5 min). */
+  pushFallbackMs?: number;
+  /** Most agents of this router in the long-poll fallback at once (default 3). */
+  pushFallbackMax?: number;
+  random?: () => number;
   /** Base retry delay while a batch is held (no injector, busy). Busy
    * retries back off exponentially from here up to 60 s. Default 2 s. */
   retryMs?: number;
@@ -226,6 +238,11 @@ interface Lane {
     aliveAt: number;
     /** When this agent last started a push poll (the 1 s floor). */
     polledAt: number;
+    /** When the current outage began (0: none; kept until `stable`), when
+     * the long-poll fallback may start, and whether it is running. */
+    lostAt: number;
+    fallbackAt: number;
+    polling: boolean;
   };
 }
 
@@ -392,6 +409,11 @@ export class Router {
   readonly #agents = new Map<string, AgentState>();
   readonly #log: (m: string) => void;
   readonly #waitMs: number;
+  readonly #fallbackMs: number;
+  readonly #fallbackMax: number;
+  readonly #random: () => number;
+  /** Agents now in the long-poll fallback. */
+  readonly #pollers = new Set<string>();
   readonly #retryMs: number;
   readonly #renewEveryMs: number;
   readonly #coalesceMs: number;
@@ -409,6 +431,9 @@ export class Router {
   constructor(options: RouterOptions) {
     this.#log = options.logger ?? (() => {});
     this.#waitMs = options.waitMs ?? 20_000;
+    this.#fallbackMs = options.pushFallbackMs ?? PUSH_FALLBACK_AFTER_MS;
+    this.#fallbackMax = options.pushFallbackMax ?? PUSH_FALLBACK_MAX;
+    this.#random = options.random ?? Math.random;
     this.#retryMs = options.retryMs ?? 2_000;
     this.#renewEveryMs = options.renewEveryMs ?? 6 * 3600_000;
     this.#coalesceMs = options.coalesceMs ?? 3_000;
@@ -454,7 +479,7 @@ export class Router {
       };
       this.#agents.set(cfg.handle, st);
       const t = st.lanes.tilori;
-      if (cfg.push) t.push = { stream: this.#pushStream(st, cfg.push), seq: 0, kick: makeKick(), back: false, caught: 0, aliveAt: 0, polledAt: 0 };
+      if (cfg.push) t.push = { stream: this.#pushStream(st, cfg.push), seq: 0, kick: makeKick(), back: false, caught: 0, aliveAt: 0, polledAt: 0, lostAt: 0, fallbackAt: 0, polling: false };
     }
   }
 
@@ -487,6 +512,9 @@ export class Router {
       },
       stable: () => {
         const p = lane.push!;
+        // Push holds again: the outage and the fallback are over.
+        p.lostAt = 0;
+        this.#fallbackStop(handle, p);
         if (!p.back) return;
         p.back = false;
         this.#pushLine(st, { state: 'back', caught: p.caught });
@@ -502,7 +530,19 @@ export class Router {
         // Keeps `push-` fresh for `status` while nothing changes.
         this.#pushStatus(handle, lane.push!.stream.status);
       },
-      status: (s) => this.#pushStatus(handle, s),
+      status: (s) => {
+        this.#pushStatus(handle, s);
+        const p = lane.push;
+        // An outage starts at the first failed attempt and spans short-lived
+        // streams until `stable`. A refused key isn't an outage: a poll
+        // would be refused too. One extra zero-wait sweep (the nudge) wakes
+        // the poller so it learns when the fallback is due.
+        if (p && !p.lostAt && (s.state === 'reconnecting' || s.state === 'down')) {
+          p.lostAt = Date.now();
+          p.fallbackAt = p.lostAt + this.#fallbackMs + Math.round(this.#random() * (this.#fallbackMs / 2));
+          nudge();
+        }
+      },
       log: (m) => this.#log(`[${handle}] ${m}`),
     });
   }
@@ -634,6 +674,31 @@ export class Router {
     lane.pollFail = null;
     if (f.told && this.#monitorLine(st, { polls: { state: 'ok' } }))
       this.#log(`[${st.cfg.handle}] told the session that polls work again`);
+  }
+
+  /** Whether this agent polls instead of waiting for push: push has been out
+   * for the fallback delay, isn't refused, and a poller slot is free. Says
+   * "polling" once per outage when it starts. */
+  #fallbackOn(st: AgentState, p: NonNullable<Lane['push']>): boolean {
+    const { handle } = st.cfg;
+    if (!p.lostAt || p.stream.status.state === 'refused' || Date.now() < p.fallbackAt) {
+      this.#fallbackStop(handle, p);
+      return false;
+    }
+    if (p.polling) return true;
+    if (this.#pollers.size >= this.#fallbackMax) return false;
+    this.#pollers.add(handle);
+    p.polling = true;
+    this.#log(`[${handle}] push down; polling until it holds again`);
+    this.#pushLine(st, { state: 'down', since: p.lostAt, polling: true });
+    return true;
+  }
+
+  #fallbackStop(handle: string, p: NonNullable<Lane['push']>) {
+    if (!p.polling) return;
+    p.polling = false;
+    this.#pollers.delete(handle);
+    this.#log(`[${handle}] push holds; long-poll fallback stopped`);
   }
 
   /** Push mode: waits for a frame or a reconnect, or until `untilMs` from
@@ -904,6 +969,22 @@ export class Router {
     pending: Map<string, Held>,
     gen: AbortController,
   ): Promise<void> {
+    try {
+      await this.#pollAgentLoop(st, lane, subs, pending, gen);
+    } finally {
+      // A generation ending frees the agent's fallback slot; the next one
+      // takes it again if push is still down.
+      if (lane.push) this.#fallbackStop(st.cfg.handle, lane.push);
+    }
+  }
+
+  async #pollAgentLoop(
+    st: AgentState,
+    lane: Lane,
+    subs: AgentSubscription[],
+    pending: Map<string, Held>,
+    gen: AbortController,
+  ): Promise<void> {
     const { handle } = st.cfg;
     const { client } = lane;
     const tilori = lane.name === 'tilori';
@@ -913,7 +994,7 @@ export class Router {
     // generation sweeps once).
     let seen = -1;
     const push = lane.push;
-    const wait = push ? 0 : this.#waitMs;
+    let wait = push ? 0 : this.#waitMs;
     while (!signal.aborted) {
       const usable = subs.filter((s) => !lane.dropped.has(specKey(s)));
       if (!push && (lane.singleUntil > Date.now() || usable.length > MAX_POLL_SUBSCRIPTIONS)) {
@@ -937,12 +1018,18 @@ export class Router {
         await sleep(Math.min(this.#retryMs, ...resting), signal, lane.polled.promise);
         continue;
       }
-      if (push && push.seq === seen) {
+      // Push down for the fallback delay: long-poll like a non-push agent
+      // until the stream holds again.
+      const fallback = push ? this.#fallbackOn(st, push) : false;
+      wait = push && !fallback ? 0 : this.#waitMs;
+      if (push && push.seq === seen && !fallback) {
         // Nothing new since the last poll: wait for a frame or a reconnect.
-        // While push is down nothing polls (no long-poll fallback). A
+        // While push is down, nothing polls until the fallback is due (and,
+        // with every poller slot taken, re-checks every 30 s). A
         // subscription resting after a hand-off missed the sweeps during its
         // pause, so its end sweeps once more.
-        await this.#waitPush(lane, seen, signal, resting.length ? Math.min(...resting) : Infinity);
+        const due = push.lostAt && push.stream.status.state !== 'refused' ? (push.fallbackAt > Date.now() ? push.fallbackAt - Date.now() : 30_000) : Infinity;
+        await this.#waitPush(lane, seen, signal, Math.min(due, ...(resting.length ? [Math.min(...resting)] : [])));
         seen = -1;
         continue;
       }
@@ -1000,7 +1087,7 @@ export class Router {
       }
       try {
         if (tilori) this.#signal(handle, 'attempting');
-        const res = push
+        const res = push && !fallback
           ? await this.#pollNow(st, lane, idle, call.signal)
           : await client.pollMany(
               idle.map((s) => s.id),
