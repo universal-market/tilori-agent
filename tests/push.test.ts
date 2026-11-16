@@ -615,6 +615,112 @@ describe('router in push mode', () => {
     expect(fake.acks).toHaveLength(1);
   });
 
+  /** A router whose push stream fails every mint (`failing`, flipped by the
+   * test) or answers `status`, with a short fallback delay and real time. */
+  function fallbackRouter(handles: string[], opts: { status?: number; max?: number; open?: ReturnType<typeof sseBody> } = {}) {
+    const state = { failing: true };
+    const fakes = handles.map(() => new FakeTilori());
+    const t = fakeTime(Date.now());
+    const router = new Router({
+      agents: handles.map((handle, i) => {
+        const { f } = fakeFetch({ opens: opts.open ? [stream(opts.open)] : [] });
+        const wrapped = ((input: any, init?: RequestInit) =>
+          state.failing && String(input).endsWith('/stream-ticket') ? new Response('no', { status: opts.status ?? 503 }) : f(input, init)) as typeof fetch;
+        return {
+          handle,
+          client: fakes[i]!.client(),
+          subscriptions: desiredSubscriptions({ direct_messages: false }),
+          push: {
+            endpoint: ENDPOINT,
+            apiKey: KEY,
+            fetch: wrapped,
+            random: () => 0,
+            now: t.now,
+            sleep: async (ms: number, sig: AbortSignal) => {
+              await t.sleep(ms, sig);
+              await new Promise((r) => setTimeout(r, 20));
+            },
+          },
+        };
+      }),
+      waitMs: 10,
+      retryMs: 10,
+      coalesceMs: 0,
+      plainHoldMs: 0,
+      pushFallbackMs: 150,
+      pushFallbackMax: opts.max,
+      random: () => 0,
+    });
+    const injs = handles.map((h) => {
+      const inj = new Recorder();
+      router.register(h, inj);
+      return inj;
+    });
+    return { router, fakes, injs, state, t };
+  }
+  const longPolls = (fake: FakeTilori) => fake.waits.filter((w) => w > 0).length;
+
+  test('push down for the fallback delay: the agent long-polls, says so once, and stops when push holds', async () => {
+    const b = sseBody();
+    const { router, fakes, injs, state, t } = fallbackRouter(['wren'], { open: b });
+    const ac = new AbortController();
+    const done = router.run(ac.signal);
+    // Before the delay nothing long-polls.
+    await new Promise((r) => setTimeout(r, 60));
+    expect(longPolls(fakes[0]!)).toBe(0);
+    await until(() => longPolls(fakes[0]!) > 0);
+    fakes[0]!.push('inbox', [mention(), mention()]);
+    await until(() => injs[0]!.wakes.some((w) => w.events.length === 2));
+    const lines = injs[0]!.wakes.filter((w) => (w.push as { polling?: true } | undefined)?.polling);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]!.push).toMatchObject({ state: 'down', polling: true });
+    // Push comes back and holds: long polls stop.
+    state.failing = false;
+    await new Promise((r) => setTimeout(r, 100));
+    t.advance(MIN_LIVED_MS);
+    b.send(': ping\n\n');
+    await until(() => injs[0]!.wakes.some((w) => w.push?.state === 'back'));
+    await new Promise((r) => setTimeout(r, 50)); // a poll already in flight ends
+    const before = longPolls(fakes[0]!);
+    await new Promise((r) => setTimeout(r, 150));
+    expect(longPolls(fakes[0]!)).toBe(before);
+    ac.abort();
+    await done;
+  });
+
+  test('a refused key never starts the fallback', async () => {
+    const { router, fakes, injs } = fallbackRouter(['wren'], { status: 403 });
+    const ac = new AbortController();
+    const done = router.run(ac.signal);
+    await new Promise((r) => setTimeout(r, 400));
+    ac.abort();
+    await done;
+    expect(longPolls(fakes[0]!)).toBe(0);
+    expect(injs[0]!.wakes.some((w) => (w.push as { polling?: true } | undefined)?.polling)).toBe(false);
+  });
+
+  test('at most the cap of agents poll at once; the rest keep waiting for push', async () => {
+    const { router, fakes, injs } = fallbackRouter(['a', 'b', 'c'], { max: 2 });
+    const ac = new AbortController();
+    const done = router.run(ac.signal);
+    await until(() => injs.filter((i) => i.wakes.some((w) => (w.push as { polling?: true } | undefined)?.polling)).length === 2);
+    // The one-second floor between an agent's polls comes first.
+    await until(() => fakes.filter((f) => longPolls(f) > 0).length === 2);
+    await new Promise((r) => setTimeout(r, 300));
+    expect(injs.filter((i) => i.wakes.some((w) => (w.push as { polling?: true } | undefined)?.polling))).toHaveLength(2);
+    expect(fakes.filter((f) => longPolls(f) > 0)).toHaveLength(2);
+    ac.abort();
+    await done;
+  });
+
+  test('the "polling" line reads fixed words and survives sanitising', () => {
+    const since = Date.UTC(2026, 10, 4, 14, 3);
+    const line: Wake = { wake_id: 'w2', agent: 'wren', events: [], resync_required: false, push: { state: 'down', since, polling: true } };
+    expect(wakeText(line)).toBe('Tilori push for agent wren is down since 14:03 UTC; polling instead, so wakes should still arrive.');
+    expect(sanitizeWake({ wake_id: 'w', events: [], push: { state: 'down', since: Date.now(), polling: true } }, 'wren')?.push).toMatchObject({ polling: true });
+    expect(sanitizeWake({ wake_id: 'w', events: [], push: { state: 'down', since: Date.now(), polling: 'yes' } }, 'wren')?.push).toEqual({ state: 'down', since: expect.any(Number) });
+  });
+
   test('a "down" line and a "back" line reach the injector, outside the caps, never acknowledged', () => {
     const down: Wake = { wake_id: 'w1', agent: 'wren', events: [], resync_required: false, push: { state: 'down', since: Date.UTC(2026, 10, 4, 14, 3) } };
     expect(wakeText(down)).toBe(

@@ -364,6 +364,8 @@ function toolsText(wake: Wake): string {
 /** Juniper's push lines: fixed words, the agent's handle, a UTC time and a
  * count. While push is down nothing polls for the agent, so the session may. */
 export function pushText(agent: string, push: NonNullable<Wake['push']>): string {
+  if (push.state === 'down' && push.polling)
+    return `Tilori push for agent ${agent} is down since ${new Date(push.since).toISOString().slice(11, 16)} UTC; polling instead, so wakes should still arrive.`;
   if (push.state === 'down')
     return (
       `Tilori push for agent ${agent} is down since ${new Date(push.since).toISOString().slice(11, 16)} UTC; wakes may be late.` +
@@ -472,7 +474,7 @@ export function sanitizeWake(raw: any, agent: string): Wake | null {
     const p = raw.push;
     if (events.length || !p || typeof p !== 'object') return null;
     if (p.state === 'down' && Number.isInteger(p.since) && Math.abs(p.since - Date.now()) < 7 * 86_400_000)
-      wake.push = { state: 'down', since: p.since };
+      wake.push = p.polling === true ? { state: 'down', since: p.since, polling: true } : { state: 'down', since: p.since };
     else if (p.state === 'back' && (p.caught === 0 || count(p.caught))) wake.push = { state: 'back', caught: p.caught };
     else return null;
     return wake;

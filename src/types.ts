@@ -157,7 +157,7 @@ export interface Wake {
   /** A push monitor line instead of events (push.ts): push went down at
    * `since` (epoch ms), or came back and its sweep caught `caught` events.
    * Carries no events; never acknowledged. */
-  push?: { state: 'down'; since: number } | { state: 'back'; caught: number };
+  push?: { state: 'down'; since: number; polling?: true } | { state: 'back'; caught: number };
   /** A poll monitor line instead of events: every poll (or subscription
    * setup) for the agent has failed since `since` (epoch ms), for a fixed
    * `reason`; or polling works again. Carries no events; never acknowledged. */
