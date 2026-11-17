@@ -5,6 +5,7 @@ import { describe, expect, test } from 'bun:test';
 import { reminderSettings } from '../src/config.ts';
 import {
   cleanFinding,
+  GATE_QUIET_CEILING,
   MAX_FINDING_CHARS,
   parseGate,
   reminderGateSettings,
@@ -44,7 +45,7 @@ function script(body: string): string {
 const gateOf = (body: string, timeoutMs = 5_000): ReminderGate => ({ argv: [script(body)], timeoutMs });
 const printing = (json: unknown) => gateOf(`cat >/dev/null\necho '${JSON.stringify(json)}'`);
 
-function setup(gate: ReminderGate, onlyWhenIdle = true) {
+function setup(gate: ReminderGate, onlyWhenIdle = true, everyMs = 100) {
   const fake = new FakeTilori();
   const logs: string[] = [];
   const router = new Router({
@@ -53,7 +54,7 @@ function setup(gate: ReminderGate, onlyWhenIdle = true) {
         handle: 'wren',
         client: fake.client(),
         subscriptions: [{ scope: { type: 'inbox' } }],
-        reminder: { everyMs: 100, prompt: 'Run the check-in.', onlyWhenIdle, gate },
+        reminder: { everyMs, prompt: 'Run the check-in.', onlyWhenIdle, gate },
       },
     ],
     logger: (m) => logs.push(m),
@@ -139,6 +140,11 @@ describe('cleanFinding (Bastion c3f5cd8f 5)', () => {
     const esc = String.fromCodePoint(0x1b);
     expect(cleanFinding(`agent-lark${rlo}: no action${zwsp} for 52 min${ls}.${nul}${esc}[31m`)).toBe('agent-lark: no action for 52 min .[31m');
   });
+  test('a lone surrogate, a private-use and an unassigned code point are stripped (Bastion 717eab5e)', () => {
+    // As JSON from the gate, where a lone surrogate can be written.
+    expect(parseGate('{"wake":true,"findings":["READ\\ud800Y: #1\\ue000249.\\u0378"]}')).toEqual({ wake: true, findings: ['READY: #1249.'] });
+    expect(validFinding(`READY${String.fromCharCode(0xdc00)}`)).toBe(false);
+  });
   test('capped at the limit, by characters', () => {
     const long = 'é'.repeat(500);
     const out = cleanFinding(long);
@@ -206,11 +212,19 @@ describe('runGate', () => {
 });
 
 describe('router with a reminder gate', () => {
-  test('quiet skips the reminder: no wake, one log line', async () => {
+  test('quiet skips the reminder until the ceiling, which sends it plain and starts the count again (Keel 017467ac)', async () => {
     const { router, logs, ac, done, inj } = setup(printing({ wake: false }));
     await until(() => logs.filter((l) => l.includes('reminder gated: quiet')).length >= 2);
     expect(inj.wakes).toHaveLength(0);
     expect(router.stats('wren')).toMatchObject({ wakes: 0, reminders: 0 });
+    await until(() => inj.wakes.length >= 1);
+    const quiet = () => logs.filter((l) => l.includes('reminder gated: quiet'));
+    expect(quiet().map((l) => l.replace(/.*\(/, '('))).toEqual(['(1 in a row)', '(2 in a row)', `(${GATE_QUIET_CEILING - 1} in a row)`]);
+    expect(inj.wakes[0].gate).toEqual({ ceiling: GATE_QUIET_CEILING });
+    expect(wakeText(inj.wakes[0])).toStartWith(`Reminder (gate ceiling: ${GATE_QUIET_CEILING} quiet). Tilori reminder for agent wren`);
+    expect(logs.some((l) => l.includes(`reminder gate said quiet ${GATE_QUIET_CEILING} times in a row; sending the plain reminder`))).toBe(true);
+    await until(() => quiet().length >= GATE_QUIET_CEILING);
+    expect(quiet().at(-1)).toEndWith('(1 in a row)');
     ac.abort();
     await done;
   });
@@ -251,7 +265,7 @@ describe('router with a reminder gate', () => {
     fake.push('inbox', [mention()]);
     await until(() => inj.wakes.some((w) => w.events.length === 1));
     expect(Date.now() - started).toBeLessThan(5_000);
-    expect(logs.some((l) => l.includes('reminder gate stopped: events arrived'))).toBe(true);
+    expect(logs.some((l) => l.includes('reminder gate stopped: woken (events, a session or config)'))).toBe(true);
     const pid = Number(readFileSync(pidFile, 'utf8'));
     await until(() => {
       try {
@@ -264,6 +278,33 @@ describe('router with a reminder gate', () => {
     ac.abort();
     await done;
   });
+
+  test('a new session while the gate runs runs it again at once, and the reminder goes to that session (Pax 48a80a6f)', async () => {
+    const dir = scratch();
+    const pidFile = join(dir, 'pid');
+    const gate = gateOf(
+      `cat >/dev/null; if [ ! -e '${dir}/ran' ]; then : > '${dir}/ran'; echo $$ > '${pidFile}'; sleep 30; fi; echo '{"wake":true,"findings":["x"]}'`,
+      60_000,
+    );
+    const { router, logs, ac, done, inj } = setup(gate, true, 3_000);
+    await until(() => {
+      try {
+        return readFileSync(pidFile, 'utf8').length > 0;
+      } catch {
+        return false;
+      }
+    }, 10_000);
+    const started = Date.now();
+    const newer = new Recorder();
+    router.register('wren', newer);
+    await until(() => newer.wakes.length >= 1);
+    expect(Date.now() - started).toBeLessThan(1_500);
+    expect(newer.wakes[0]).toMatchObject({ events: [], gate: { findings: ['x'] } });
+    expect(inj.wakes).toHaveLength(0);
+    expect(logs.some((l) => l.includes('reminder gate stopped: woken (events, a session or config)'))).toBe(true);
+    ac.abort();
+    await done;
+  });
 });
 
 describe('a gated reminder over IPC', () => {
@@ -271,6 +312,7 @@ describe('a gated reminder over IPC', () => {
   test('keeps clean findings and known failure classes', () => {
     expect(sanitizeWake({ ...base, gate: { findings: ['READY: #1249. Merge it.'] } }, 'wren')?.gate).toEqual({ findings: ['READY: #1249. Merge it.'] });
     expect(sanitizeWake({ ...base, gate: { failed: 'timeout' } }, 'wren')?.gate).toEqual({ failed: 'timeout' });
+    expect(sanitizeWake({ ...base, gate: { ceiling: GATE_QUIET_CEILING } }, 'wren')?.gate).toEqual({ ceiling: GATE_QUIET_CEILING });
   });
   test('drops a wake whose gate part the router would never have built', () => {
     const rlo = String.fromCodePoint(0x202e);
@@ -280,6 +322,8 @@ describe('a gated reminder over IPC', () => {
       { findings: Array.from({ length: 11 }, () => 'x') },
       { failed: 'because I said so' },
       { findings: ['x'], failed: 'exit' },
+      { ceiling: 99 },
+      { ceiling: GATE_QUIET_CEILING, failed: 'exit' },
       'x',
     ])
       expect(sanitizeWake({ ...base, gate }, 'wren')).toBeNull();

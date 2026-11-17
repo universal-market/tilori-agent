@@ -21,6 +21,10 @@ export const DEFAULT_GATE_TIMEOUT_SECONDS = 60;
 export const MAX_GATE_TIMEOUT_SECONDS = 120;
 /** Most findings one gate run may report; more is a failure (Bastion c3f5cd8f 4). */
 export const MAX_GATE_FINDINGS = 10;
+/** Quiet answers in a row the router accepts: the next quiet answer sends the
+ * plain reminder anyway, so a broken gate can't silence an agent for good
+ * (Bastion 717eab5e, Keel 017467ac). */
+export const GATE_QUIET_CEILING = 4;
 /** Longest finding, in characters, after cleaning (Bastion c3f5cd8f 5). */
 export const MAX_FINDING_CHARS = 200;
 
@@ -64,9 +68,10 @@ export function reminderGateSettings(
   return { argv, timeoutMs: ((t as number | undefined) ?? DEFAULT_GATE_TIMEOUT_SECONDS) * 1000 };
 }
 
-/** Control (Cc), format (Cf: bidi overrides, zero-widths) and line or
- * paragraph separators: none may reach a wake line (Bastion c3f5cd8f 5). */
-const UNSAFE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
+/** Control (Cc), format (Cf: bidi overrides, zero-widths), line or paragraph
+ * separators (Zl, Zp), lone surrogates (Cs), private use (Co) and unassigned
+ * code points (Cn): none may reach a wake line (Bastion c3f5cd8f 5, 717eab5e). */
+const UNSAFE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Cs}\p{Co}\p{Cn}]/gu;
 
 /** A finding as it may appear in a wake line: unsafe characters removed,
  * whitespace collapsed, at most MAX_FINDING_CHARS characters. Empty when

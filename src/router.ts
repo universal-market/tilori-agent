@@ -41,7 +41,7 @@ import {
   type FilterReason,
   type WakeFilter,
 } from './wake-filter.ts';
-import { runGate } from './reminder-gate.ts';
+import { GATE_QUIET_CEILING, runGate } from './reminder-gate.ts';
 
 /** How long a delivered post or conversation is remembered. Longer than the
  * wake cap can hold a batch (one hour), so a held copy of something that went
@@ -355,6 +355,8 @@ interface AgentState {
   /** When the next reminder is due (unused without a reminder). An event
    * wake pushes it back when the reminder is only for idle agents. */
   reminderAt: number;
+  /** UNI-1044: quiet gate answers in a row since a reminder last went out. */
+  gateQuiet: number;
   stats: { wakes: number; events: number; delayed: number; reminders: number };
   /** UNI-1029 wake filter state (unused without a filter). */
   filter: FilterState;
@@ -543,6 +545,7 @@ export class Router {
         restSignalAt: 0,
         heldNotice: '',
         reminderAt: cfg.reminder ? Date.now() + cfg.reminder.everyMs : 0,
+        gateQuiet: 0,
         stats: { wakes: 0, events: 0, delayed: 0, reminders: 0 },
         filter: {
           passed: new Set(),
@@ -1497,17 +1500,24 @@ export class Router {
       signal?.removeEventListener('abort', onOuter);
       if (signal?.aborted) return;
       if (!r.ok && r.why === 'stopped' && kicked) {
-        this.#log(`[${handle}] reminder gate stopped: events arrived`);
-        // An event wake re-times an idle-only reminder; any other comes
-        // straight after the events.
-        if (!reminder!.onlyWhenIdle) st.reminderAt = Date.now();
+        this.#log(`[${handle}] reminder gate stopped: woken (events, a session or config)`);
+        // Due again at once (Pax 48a80a6f). Events are already pending, so
+        // they go first and their wake re-times an idle-only reminder; a
+        // session or config kick sends no wake, so the gate runs again, and
+        // the reminder goes to whichever session is newest by then.
+        st.reminderAt = Date.now();
         return;
       }
       if (r.ok && !r.wake) {
-        this.#log(`[${handle}] reminder gated: quiet`);
-        return;
-      }
-      if (r.ok) gate = { findings: r.findings };
+        // A ceiling, so a gate that always says quiet can't silence the
+        // agent for good (Bastion 717eab5e, Keel 017467ac).
+        if (++st.gateQuiet < GATE_QUIET_CEILING) {
+          this.#log(`[${handle}] reminder gated: quiet (${st.gateQuiet} in a row)`);
+          return;
+        }
+        this.#log(`[${handle}] reminder gate said quiet ${GATE_QUIET_CEILING} times in a row; sending the plain reminder`);
+        gate = { ceiling: GATE_QUIET_CEILING };
+      } else if (r.ok) gate = { findings: r.findings };
       else {
         this.#log(`[${handle}] reminder gate failed (${r.why}); sending the plain reminder`);
         gate = { failed: r.why };
@@ -1515,6 +1525,7 @@ export class Router {
     }
     const wake: Wake = { wake_id: randomUUID(), agent: handle, events: [], resync_required: false, reminder: reminder!.prompt };
     if (gate) wake.gate = gate;
+    st.gateQuiet = 0;
     if (st.backlog) wake.backlog = structuredClone(st.backlog);
     if (st.filter.dropped) wake.filter_dropped = structuredClone(st.filter.dropped);
     this.#noteLastWake(st, wake, st.limiter);

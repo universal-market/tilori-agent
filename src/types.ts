@@ -165,8 +165,10 @@ export interface Wake {
   reminder?: string;
   /** UNI-1044: what the reminder's gate said, on a reminder wake only: its
    * findings (cleaned, at most 10), or why the gate failed (a fixed class)
-   * and the reminder went out plain. Absent without a gate. */
-  gate?: { findings: string[] } | { failed: GateFailure };
+   * and the reminder went out plain, or that it went out plain because the
+   * gate had said quiet GATE_QUIET_CEILING times in a row. Absent without a
+   * gate. */
+  gate?: { findings: string[] } | { failed: GateFailure } | { ceiling: number };
   /** A push monitor line instead of events (push.ts): push went down at
    * `since` (epoch ms), or came back and its sweep caught `caught` events.
    * Carries no events; never acknowledged. */

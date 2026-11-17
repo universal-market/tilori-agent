@@ -560,6 +560,10 @@ the reminder is due, and that answers on stdout with one JSON object:
 
 - `{"wake": false}`: nothing needs the agent. The reminder is skipped and the
   router logs `reminder gated: quiet`. The next one is an interval later.
+  The fourth quiet answer in a row sends the plain reminder anyway, starting
+  `Reminder (gate ceiling: 4 quiet).`, so a gate that is stuck on quiet
+  can't silence the agent for good. Any reminder that goes out starts the
+  count again.
 - `{"wake": true, "findings": ["…", …]}`: the reminder goes out, and the line
   starts `Check-in gate for agent <name>: N findings: (1) … (2) …`.
 
@@ -581,12 +585,15 @@ the reminder is due, and that answers on stdout with one JSON object:
   which is killed whole when the run ends.
 - Output is parsed strictly. `wake` must be a boolean. `findings` is a list of
   at most 10 strings, and quiet carries none. Each finding has control and
-  format characters removed (bidi overrides and zero-widths included) and is
+  format characters removed (bidi overrides and zero-widths included), as
+  well as line separators, lone surrogates, private-use and unassigned code
+  points, and is
   cut to 200 characters. Anything else, a non-zero exit, a timeout or more
   than 64 KB of output sends the plain reminder, starting
   `Reminder (gate failed: <timeout|exit|output|spawn>).` A broken gate never
   silences a reminder.
-- New events while the gate runs stop it: they wake the agent anyway.
+- New events while the gate runs stop it: they wake the agent anyway. So
+  does a new session or a config change, and then the gate runs again at once.
 - Findings go into the agent's session as written, so build them from your
   own fixed text and trusted values. Never copy Tilori content, a pane or
   anything a model wrote into one.

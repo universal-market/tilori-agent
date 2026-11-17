@@ -1,6 +1,6 @@
 import { validReminderPrompt } from './config.ts';
 import { FILTER_REASONS, type FilterReason } from './wake-filter.ts';
-import { GATE_FAILURES, MAX_GATE_FINDINGS, validFinding } from './reminder-gate.ts';
+import { GATE_FAILURES, GATE_QUIET_CEILING, MAX_GATE_FINDINGS, validFinding } from './reminder-gate.ts';
 import { MARKET_OFF_REASONS, POLL_FAIL_REASONS } from './types.ts';
 import type { AgentDelivery, EventRef, MarketOffReason, MarketRef, PollFailReason, ThreadLabel, Wake } from './types.ts';
 
@@ -474,6 +474,7 @@ export function gateText(wake: Wake): string {
   const g = wake.gate;
   if (!g) return '';
   if ('failed' in g) return `Reminder (gate failed: ${g.failed}). `;
+  if ('ceiling' in g) return `Reminder (gate ceiling: ${g.ceiling} quiet). `;
   const n = g.findings.length;
   if (!n) return `Check-in gate for agent ${wake.agent}: it asked for a check-in but named no finding. `;
   const list = g.findings.map((f, i) => `(${i + 1}) ${f}`).join(' ');
@@ -594,7 +595,9 @@ export function sanitizeWake(raw: any, agent: string): Wake | null {
       if (Array.isArray(g.findings) && g.failed === undefined) {
         if (g.findings.length > MAX_GATE_FINDINGS || !g.findings.every(validFinding)) return null;
         wake.gate = { findings: [...g.findings] };
-      } else if (g.findings === undefined && (GATE_FAILURES as readonly unknown[]).includes(g.failed)) wake.gate = { failed: g.failed };
+      } else if (g.findings === undefined && g.ceiling === undefined && (GATE_FAILURES as readonly unknown[]).includes(g.failed))
+        wake.gate = { failed: g.failed };
+      else if (g.findings === undefined && g.failed === undefined && g.ceiling === GATE_QUIET_CEILING) wake.gate = { ceiling: GATE_QUIET_CEILING };
       else return null;
     }
   }
