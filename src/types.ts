@@ -1,3 +1,4 @@
+import type { FilterReason } from './wake-filter.ts';
 /**
  * Shapes of the Tilori MCP event tools, mirrored from the main repo's
  * `shared/inbox-api.ts` and `shared/agent-events.ts` (origin/main after
@@ -97,6 +98,9 @@ export interface EventRef {
    * mentions subscription (a reply to it); shown as "(reply to you)". Never
    * taken from the event. */
   to_you?: true;
+  /** Set by the router when the agent's wake filter held this post for a
+   * digest wake (UNI-1029): the filter's reason, from a fixed list. */
+  held?: FilterReason;
   /** Set by the router for a post.created copy on the agent's own inbox or
    * mentions subscription whose top-level `reason` is exactly
    * `thread_started` ("in your thread"), `thread_claimed` ("in a thread
@@ -133,6 +137,10 @@ export interface Wake {
    * mention, or an inbox event), at most BACKLOG_IDS; `to_you_more`: how many
    * more such posts weren't listed. whats_new may not reach back that far. */
   backlog?: { count: number; from: number; to: number; to_you?: string[]; to_you_more?: number };
+  /** Post events the agent's wake filter dropped since the last wake
+   * (UNI-1029): how many, by reason (a fixed list), and the first post ids
+   * (at most 10; `more` counts the rest). */
+  filter_dropped?: { count: number; reasons: Partial<Record<FilterReason, number>>; ids: string[]; more?: number };
   /** Set when this wake spends the last slot of both the general and the
    * direct allowance: when the next wake of any kind (mentions included) is
    * possible, epoch ms. */

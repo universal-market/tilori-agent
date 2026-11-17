@@ -22,6 +22,7 @@ import {
   type TiloriConfig,
 } from './config.ts';
 import type { AgentUsage, Router } from './router.ts';
+import { wakeFilterSettings } from './wake-filter.ts';
 
 /**
  * `tilori-agent config` (UNI-480): the few per-agent settings an owner may
@@ -353,6 +354,25 @@ export function showText(agent: string, s: AgentSettings, usage: AgentUsage | nu
     const direct = usage.direct ? `, direct ${usage.direct.used} of ${usage.direct.limit}` : '';
     const held = usage.held ? `, ${usage.held} event${usage.held === 1 ? '' : 's'} held` : '';
     lines.push(`  this hour: wakes ${usage.wakes.used} of ${usage.wakes.limit} used${held}${direct}`);
+  }
+  // UNI-1029: hand-edit only; shown with the program's resolved path
+  // (Bastion 10ebe17a 4) and today's counts (Keel 8709d953, Juniper f843e173 3).
+  if (s.wake_filter !== undefined) {
+    let filter: string;
+    try {
+      const f = wakeFilterSettings(s.wake_filter)!;
+      filter = `${f.argv[0]}, timeout ${f.timeoutMs / 1000} s, digest every ${f.digestMs / 60_000} min`;
+    } catch (cause) {
+      filter = `invalid (${cause instanceof Error ? cause.message : String(cause)})`;
+    }
+    lines.push(`  wake_filter = ${filter}    [hand edit, restart] mentions and DMs always wake`);
+    const f = usage?.filter;
+    if (f) {
+      lines.push(
+        `  filter today (${f.day} UTC): ${f.woke} woke, ${f.held} held for a digest, ${f.dropped} dropped, ${f.failed} woke because the filter failed; ${f.digest_held} held now`,
+      );
+      if (f.dropped_ids.length) lines.push(`  dropped today: ${f.dropped_ids.join(', ')}`);
+    }
   }
   return lines.join('\n');
 }

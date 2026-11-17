@@ -1,6 +1,6 @@
 import { activityDir, stallMinutes } from './activity.ts';
 import { TiloriAgentClient } from './client.ts';
-import { pauseSeconds, postWakeMinutes, desiredSubscriptions, keyUrl, marketKeyUrl, pushEnabled, reminderSettings, type TiloriConfig } from './config.ts';
+import { pauseSeconds, postWakeMinutes, desiredSubscriptions, keyUrl, marketKeyUrl, pushEnabled, reminderSettings, wakeFilterConfig, type TiloriConfig } from './config.ts';
 import { NotifyLinesInjector } from './injectors/notify-lines.ts';
 import { attachToRouter, probeRouter, socketIdentity, socketPath } from './ipc.ts';
 import { ensurePrivateDir, readKey } from './keys.ts';
@@ -101,6 +101,7 @@ export function directRouter(opts: NotifyLinesOptions): Router {
         stallMinutes: stallMinutes(settings.stall_minutes),
         ...(pushEnabled(settings) ? { push: { endpoint: url, apiKey, rereadKey } } : {}),
         market: marketLane(opts.config, opts.agent, apiKey, rereadKey, opts.logger),
+        ...wakeFilterConfig(opts.config, opts.agent),
       },
     ],
     logger: opts.logger,

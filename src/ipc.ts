@@ -6,6 +6,7 @@ import { assertPrivate, ensurePrivateDir, isOtherHome, tiloriHome, validateHandl
 import type { AgentUsage, Router } from './router.ts';
 import type { DeliverResult, Injector, Wake } from './types.ts';
 import { sanitizeWake } from './wake.ts';
+import { isUuid } from './wake-filter.ts';
 
 /**
  * Local IPC between the router and per-host injectors (newline-delimited
@@ -298,7 +299,21 @@ export function routerUsage(agent: string, path = socketPath()): Promise<AgentUs
       const direct = msg.direct === null ? null : pair(msg.direct);
       const held = count(msg.held);
       if (!wakes || held === null || (msg.direct !== null && !direct)) return done(null);
-      done({ wakes, direct, held });
+      const usage: AgentUsage = { wakes, direct, held };
+      // UNI-1029: counts and post ids only, re-checked here.
+      const f = msg.filter;
+      const n = ['woke', 'held', 'dropped', 'failed', 'digest_held'].map((k) => count(f?.[k]));
+      if (f && typeof f === 'object' && typeof f.day === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(f.day) && n.every((x) => x !== null))
+        usage.filter = {
+          day: f.day,
+          woke: n[0]!,
+          held: n[1]!,
+          dropped: n[2]!,
+          failed: n[3]!,
+          digest_held: n[4]!,
+          dropped_ids: Array.isArray(f.dropped_ids) ? f.dropped_ids.filter(isUuid).slice(0, 50) : [],
+        };
+      done(usage);
     });
   });
 }

@@ -25,7 +25,22 @@ import type {
   SubscriptionSpec,
   Wake,
 } from './types.ts';
-import { KIND_RANK, MARKET_ENTITY_TYPES, buildWake, marketRefs, refKey, toRefs } from './wake.ts';
+import { KIND_RANK, MARKET_ENTITY_TYPES, MAX_DROPPED_IDS, buildWake, marketRefs, refKey, toRefs } from './wake.ts';
+import {
+  FILTERABLE_KINDS,
+  MAX_DIGEST_ITEMS,
+  MAX_FLOOR_READS,
+  digestItem,
+  digestRef,
+  isUuid,
+  loadDigest,
+  runFilter,
+  saveDigest,
+  type DigestItem,
+  type FilterEvent,
+  type FilterReason,
+  type WakeFilter,
+} from './wake-filter.ts';
 
 /** How long a delivered post or conversation is remembered. Longer than the
  * wake cap can hold a batch (one hour), so a held copy of something that went
@@ -98,6 +113,14 @@ export interface RouterAgentConfig {
    * market_url: its own client for that address, with the same key. Long
    * polls only; push stays on the Tilori lane. */
   market?: { client: TiloriAgentClient };
+  /** UNI-1029: the operator's wake filter (validated by wakeFilterSettings). */
+  wakeFilter?: WakeFilter;
+  /** Usernames or user ids whose posts the filter can never hold or drop
+   * (config.json trusted_owners). */
+  trustedOwners?: string[];
+  /** trust_server applies: every account is trusted, so only the account's
+   * own agents' posts can be held or dropped. */
+  trustAll?: boolean;
 }
 
 /** This hour's wake counts for `tilori-agent config show`: counts only. */
@@ -107,6 +130,8 @@ export interface AgentUsage {
   direct: { used: number; limit: number } | null;
   /** Events the wake cap is holding right now. */
   held: number;
+  /** UNI-1029: today's wake filter counts; absent without a filter. */
+  filter?: FilterDay & { digest_held: number };
 }
 
 export interface RouterOptions {
@@ -330,12 +355,43 @@ interface AgentState {
    * wake pushes it back when the reminder is only for idle agents. */
   reminderAt: number;
   stats: { wakes: number; events: number; delayed: number; reminders: number };
+  /** UNI-1029 wake filter state (unused without a filter). */
+  filter: FilterState;
   /** The last get_my_profile reading and when it was taken. */
   profile: { at: number; value: ProfileNotes; reading?: Promise<void> };
   /** The prompt the session is blocked on (by its signal's mtime), the wakes
    * accepted since, and whether the stall line was logged for it. */
   blocked: { since: number; wakes: number; logged: boolean };
 }
+
+/** UNI-1029: what the wake filter decided, held and dropped for one agent. */
+interface FilterState {
+  /** Batches (by delivery id) already filtered and woken, so a batch the cap
+   * delays isn't filtered again. Pruned to what `pending` still holds. */
+  passed: Set<string>;
+  /** Posts held for the next digest wake: acknowledged already (a held batch
+   * would block its subscription), kept in the run directory so a restart
+   * still delivers them. */
+  digest: DigestItem[];
+  /** When the digest is due (Date.now; 0 = nothing held). */
+  digestDue: number;
+  /** Dropped since the last wake, for the next wake's line. */
+  dropped: NonNullable<Wake['filter_dropped']> | null;
+  /** Today's (UTC) counts for `config show`, and the dropped ids. */
+  today: FilterDay;
+}
+
+export interface FilterDay {
+  day: string;
+  woke: number;
+  held: number;
+  dropped: number;
+  failed: number;
+  dropped_ids: string[];
+}
+
+const MAX_DAY_IDS = 50;
+const newFilterDay = (): FilterDay => ({ day: new Date().toISOString().slice(0, 10), woke: 0, held: 0, dropped: 0, failed: 0, dropped_ids: [] });
 
 /** Scopes whose events are addressed to the agent itself. */
 const DIRECT_SCOPES = new Set(['inbox', 'mentions', 'direct_messages']);
@@ -487,9 +543,19 @@ export class Router {
         heldNotice: '',
         reminderAt: cfg.reminder ? Date.now() + cfg.reminder.everyMs : 0,
         stats: { wakes: 0, events: 0, delayed: 0, reminders: 0 },
+        filter: {
+          passed: new Set(),
+          digest: cfg.wakeFilter && this.#signalDir !== undefined ? loadDigest(this.#signalDir, cfg.handle) : [],
+          digestDue: 0,
+          dropped: null,
+          today: newFilterDay(),
+        },
         profile: { at: -Infinity, value: { postsLeft: null, toolsHash: null, askOwner: null } },
         blocked: { since: 0, wakes: 0, logged: false },
       };
+      // A digest reloaded after a restart is due from when it was first held.
+      if (st.filter.digest.length && cfg.wakeFilter)
+        st.filter.digestDue = Math.min(...st.filter.digest.map((it) => it.at)) + cfg.wakeFilter.digestMs;
       this.#agents.set(cfg.handle, st);
       const t = st.lanes.tilori;
       if (cfg.push) t.push = { stream: this.#pushStream(st, cfg.push), seq: 0, kick: makeKick(), back: false, caught: 0, aliveAt: 0, polledAt: 0, lostAt: 0, fallbackAt: 0, polling: false };
@@ -806,6 +872,7 @@ export class Router {
       wakes: { used: st.limiter.used, limit: st.limiter.perHour },
       direct: d ? { used: d.used, limit: d.perHour } : null,
       held: st.capHeld.size ? st.stats.delayed : 0,
+      ...(st.cfg.wakeFilter ? { filter: { ...this.#filterDay(st), digest_held: st.filter.digest.length } } : {}),
     };
   }
 
@@ -1357,8 +1424,13 @@ export class Router {
     while (!signal.aborted) {
       if (!pending.size) {
         const due = st.cfg.reminder ? st.reminderAt - Date.now() : Infinity;
-        if (due <= 0) await this.#remind(st, signal);
-        else await sleep(Math.min(60_000, due), signal, st.kick.promise);
+        // UNI-1029: held posts go out as one digest wake when due.
+        const digestDue = st.filter.digest.length ? st.filter.digestDue - Date.now() : Infinity;
+        if (digestDue <= 0) {
+          const wait = await this.#digestWake(st, signal);
+          if (wait > 0) await sleep(Math.min(60_000, wait), signal, st.kick.promise);
+        } else if (due <= 0) await this.#remind(st, signal);
+        else await sleep(Math.min(60_000, due, digestDue), signal, st.kick.promise);
         continue;
       }
       let waitMs: number;
@@ -1409,6 +1481,7 @@ export class Router {
     }
     const wake: Wake = { wake_id: randomUUID(), agent: handle, events: [], resync_required: false, reminder: reminder!.prompt };
     if (st.backlog) wake.backlog = structuredClone(st.backlog);
+    if (st.filter.dropped) wake.filter_dropped = structuredClone(st.filter.dropped);
     this.#noteLastWake(st, wake, st.limiter);
     await this.#noteProfile(st, wake, signal);
     const result = await settle(injector.deliver(wake));
@@ -1427,6 +1500,7 @@ export class Router {
     st.stats.wakes++;
     st.stats.reminders++;
     if (wake.backlog) st.backlog = null;
+    if (wake.filter_dropped) st.filter.dropped = null;
     this.#log(`[${handle}] woke ${injector.kind} with a reminder`);
   }
 
@@ -1507,6 +1581,246 @@ export class Router {
     return (KIND_RANK[r.kind] ?? 0) <= prev.rank;
   }
 
+  /** Today's (UTC) filter counts, started afresh at midnight. */
+  #filterDay(st: AgentState): FilterDay {
+    const day = new Date().toISOString().slice(0, 10);
+    if (st.filter.today.day !== day) st.filter.today = newFilterDay();
+    return st.filter.today;
+  }
+
+  /**
+   * UNI-1029: asks the agent's wake filter about the post events of batches
+   * not yet filtered, applies the router's floors, and returns `fresh` with
+   * held and dropped events taken out. Held events go to the digest, dropped
+   * ones to the next wake's count; a batch left empty is acknowledged with no
+   * wake. Any filter failure leaves everything to wake (fail open). Market
+   * batches, resyncs and non-post events never reach the filter.
+   */
+  async #applyFilter(st: AgentState, pending: Map<string, Held>, fresh: Held[], signal?: AbortSignal): Promise<Held[]> {
+    const { handle } = st.cfg;
+    const F = st.filter;
+    const live = new Set([...pending.values()].map((d) => d.delivery_id));
+    for (const id of F.passed) if (!live.has(id)) F.passed.delete(id);
+    const todo = fresh.filter(
+      (d) => d.lane === 'tilori' && !d.resync_required && !F.passed.has(d.delivery_id) && d.events.some((e) => e.entity_type === 'post'),
+    );
+    if (!todo.length) return fresh;
+    for (const d of todo) F.passed.add(d.delivery_id);
+    // Ids, kinds and labels only, as in the wake line: the filter reads
+    // anything else itself, with its own access.
+    const events: FilterEvent[] = [];
+    const evKey = new Map<object, string>();
+    const byKey = new Map<string, { ref: EventRef; parent: unknown }>();
+    for (const d of todo)
+      for (const e of d.events) {
+        if (e.entity_type !== 'post') continue;
+        const ref = toRefs([{ ...d, events: [e] }], st.directSubs)[0];
+        if (!isUuid(ref.id) || !isUuid(ref.entity_id)) continue;
+        const key = `event:${ref.id}`;
+        evKey.set(e, key);
+        if (byKey.has(key)) continue;
+        const parent = e.parents?.parent_post_id;
+        byKey.set(key, { ref, parent });
+        events.push({
+          key,
+          kind: ref.kind,
+          entity_type: 'post',
+          entity_id: ref.entity_id,
+          ...(isUuid(parent) ? { parent_post_id: parent } : {}),
+          created_at: typeof e.created_at === 'string' ? e.created_at.slice(0, 40) : '',
+          direct: st.directSubs.has(d.subscription_id),
+          forced: !FILTERABLE_KINDS.has(ref.kind),
+        });
+      }
+    if (!events.length) return fresh;
+    const day = this.#filterDay(st);
+    const result = await runFilter(st.cfg.wakeFilter!, { v: 1, agent: { handle }, wake_id: randomUUID(), events }, signal);
+    if (!result.ok) {
+      day.failed += events.length;
+      this.#log(`[${handle}] wake filter gave no decisions (${result.why}); waking for ${events.length} event(s)`);
+      return fresh;
+    }
+    const demoted = new Map<string, { action: 'digest' | 'drop'; reason: FilterReason }>();
+    for (const ev of events) {
+      const dec = result.decisions.get(ev.key);
+      if (ev.forced || !dec || dec.action === 'wake') continue;
+      demoted.set(ev.key, { action: dec.action, reason: dec.reason ?? 'other' });
+    }
+    // Floors (Bastion 10ebe17a, Keel 2fc2d4e2): a post written by a person,
+    // or by an agent of a trusted owner, always wakes, whatever the filter
+    // said. Decided by the author's account as get_post reports it, never by
+    // text; any doubt wakes.
+    const posts = [...new Set([...demoted.keys()].map((k) => byKey.get(k)!.ref.entity_id))];
+    const mustWake = new Set<string>();
+    if (posts.length > MAX_FLOOR_READS) for (const id of posts) mustWake.add(id);
+    else for (const id of posts) if (!(await this.#mayDemote(st, id, signal))) mustWake.add(id);
+    for (const [k] of demoted) if (mustWake.has(byKey.get(k)!.ref.entity_id)) demoted.delete(k);
+    day.woke += events.length - demoted.size;
+    if (!demoted.size) return fresh;
+    const now = Date.now();
+    let held = 0;
+    let dropped = 0;
+    const out: Held[] = [];
+    for (const d of fresh) {
+      if (!todo.includes(d)) {
+        out.push(d);
+        continue;
+      }
+      const kept = d.events.filter((e) => {
+        const key = evKey.get(e);
+        const dec = key ? demoted.get(key) : undefined;
+        if (!dec) return true;
+        const { ref, parent } = byKey.get(key!)!;
+        if (dec.action === 'digest' && this.#hold(st, ref, dec.reason, parent, now)) held++;
+        else if (dec.action === 'drop') {
+          this.#noteDropped(st, ref, dec.reason);
+          dropped++;
+        } else return true;
+        return false;
+      });
+      if (!kept.length) {
+        // Nothing in it wakes: acknowledged now, like a backlog batch.
+        st.handedOff.add(d.delivery_id);
+        st.capHeld.delete(d.delivery_id);
+        continue;
+      }
+      const trimmed: Held = { ...d, events: kept };
+      if (pending.get(d.subscription_id)?.delivery_id === d.delivery_id) pending.set(d.subscription_id, trimmed);
+      out.push(trimmed);
+    }
+    if (held) this.#saveDigest(st);
+    this.#log(`[${handle}] wake filter: ${held} held for the digest, ${dropped} dropped, ${events.length - held - dropped} to wake`);
+    return out;
+  }
+
+  /** Whether a post may be held or dropped: written by an agent (not a
+   * person) of an account that isn't a trusted owner. Reads the author's
+   * account ids only; any failure means no. */
+  async #mayDemote(st: AgentState, postId: string, signal?: AbortSignal): Promise<boolean> {
+    if (st.cfg.trustAll) return false;
+    try {
+      const r = await st.lanes.tilori.client.getPost(postId, { signal, timeout: 5_000 });
+      const p = r?.result ?? r;
+      if (p?.posted_by !== 'agent') return false;
+      const a = p.author;
+      if (!a || typeof a.user_id !== 'string' || typeof a.username !== 'string') return false;
+      const owners = st.cfg.trustedOwners ?? [];
+      return !owners.some((o) => o === a.user_id || o.toLowerCase() === a.username.toLowerCase());
+    } catch {
+      return false;
+    }
+  }
+
+  /** Puts a post on the digest. False when it can't be held (then it wakes). */
+  #hold(st: AgentState, ref: EventRef, reason: FilterReason, parent: unknown, now: number): boolean {
+    const item = digestItem(ref, reason, parent, now);
+    if (!item) return false;
+    const F = st.filter;
+    if (F.digest.length >= MAX_DIGEST_ITEMS) return false;
+    F.digest.push(item);
+    if (!F.digestDue) F.digestDue = now + st.cfg.wakeFilter!.digestMs;
+    const day = this.#filterDay(st);
+    day.held++;
+    return true;
+  }
+
+  #noteDropped(st: AgentState, ref: EventRef, reason: FilterReason): void {
+    const f = (st.filter.dropped ??= { count: 0, reasons: {}, ids: [] });
+    f.count++;
+    f.reasons[reason] = (f.reasons[reason] ?? 0) + 1;
+    if (!f.ids.includes(ref.entity_id)) {
+      if (f.ids.length < MAX_DROPPED_IDS) f.ids.push(ref.entity_id);
+      else f.more = (f.more ?? 0) + 1;
+    }
+    const day = this.#filterDay(st);
+    day.dropped++;
+    if (day.dropped_ids.length < MAX_DAY_IDS && !day.dropped_ids.includes(ref.entity_id)) day.dropped_ids.push(ref.entity_id);
+  }
+
+  #saveDigest(st: AgentState): void {
+    if (this.#signalDir === undefined) return;
+    if (!saveDigest(this.#signalDir, st.cfg.handle, st.filter.digest))
+      this.#log(`[${st.cfg.handle}] could not save the wake filter digest; a restart before it goes out would lose it`);
+  }
+
+  /** Adds the held digest and the dropped count to a wake about to go out.
+   * Returns the digest items it covers, for #filterSent. Posts an earlier
+   * wake (or this one) already names are covered without being repeated.
+   * Grouped by thread, threads in the order they were first held (Juniper
+   * f843e173 5). */
+  #attachFilter(st: AgentState, wake: Wake): DigestItem[] {
+    const F = st.filter;
+    if (F.dropped) wake.filter_dropped = structuredClone(F.dropped);
+    if (!F.digest.length) return [];
+    const items = F.digest.slice();
+    const have = new Set(wake.events.map(refKey));
+    const order = new Map<string, number>();
+    for (const it of items) if (!order.has(it.parent ?? '')) order.set(it.parent ?? '', order.size);
+    const add = items
+      .map((it) => ({ it, ref: digestRef(it) }))
+      .filter(({ ref }) => {
+        if (have.has(refKey(ref)) || this.#seen(st, ref)) return false;
+        have.add(refKey(ref));
+        return true;
+      })
+      .map((x, i) => ({ ...x, i }))
+      .sort((a, b) => order.get(a.it.parent ?? '')! - order.get(b.it.parent ?? '')! || a.i - b.i);
+    wake.events.push(...add.map(({ ref }) => ref));
+    return items;
+  }
+
+  /** After an accepted wake: what it carried from the filter is done. */
+  #filterSent(st: AgentState, items: DigestItem[], wake: Wake): void {
+    const F = st.filter;
+    if (wake.filter_dropped) F.dropped = null;
+    if (!items.length) return;
+    const sent = new Set(items);
+    F.digest = F.digest.filter((it) => !sent.has(it));
+    if (!F.digest.length) F.digestDue = 0;
+    this.#saveDigest(st);
+  }
+
+  /** The digest wake (UNI-1029): held posts, grouped by thread, once due and
+   * no batch is pending. Returns how long to wait before trying again, or 0. */
+  async #digestWake(st: AgentState, signal?: AbortSignal): Promise<number> {
+    const { handle } = st.cfg;
+    const injector = st.injectors.at(-1);
+    if (!injector) return this.#retryMs * 5;
+    const cap = st.limiter.waitMs();
+    if (cap > 0) return cap;
+    const wake: Wake = { wake_id: randomUUID(), agent: handle, events: [], resync_required: false };
+    const items = this.#attachFilter(st, wake);
+    if (!wake.events.length) {
+      // Everything held already went out in other wakes.
+      this.#filterSent(st, items, { ...wake, filter_dropped: undefined });
+      return 0;
+    }
+    if (st.backlog) wake.backlog = structuredClone(st.backlog);
+    this.#noteLastWake(st, wake, st.limiter);
+    await this.#noteProfile(st, wake, signal);
+    const result = await settle(injector.deliver(wake));
+    if (result === 'gone') {
+      this.#drop(st, injector);
+      return st.injectors.length ? 1 : this.#retryMs;
+    }
+    if (result !== 'accepted') return Math.min(60_000, this.#retryMs * 4);
+    this.#signal(handle, 'woke');
+    st.limiter.record();
+    st.stats.wakes++;
+    st.stats.events += wake.events.length;
+    if (wake.backlog) st.backlog = null;
+    this.#filterSent(st, items, wake);
+    const at = this.#now();
+    for (const r of wake.events) {
+      const prev = st.recent.get(refKey(r));
+      st.recent.delete(refKey(r));
+      st.recent.set(refKey(r), { at, rank: Math.max(KIND_RANK[r.kind] ?? 0, prev?.rank ?? 0), ...(prev?.revision ? { revision: prev.revision } : {}) });
+    }
+    while (st.recent.size > MAX_RECENT) st.recent.delete(st.recent.keys().next().value!);
+    this.#log(`[${handle}] woke ${injector.kind} with a digest of ${wake.events.length} held event(s)`);
+    return 0;
+  }
+
   /** Tries to hand held batches to the agent's injector. Returns 0 when done,
    * else how long to wait before retrying. Logs counts only, never content. */
   async #flush(st: AgentState, pending: Map<string, Held>, signal?: AbortSignal): Promise<number> {
@@ -1572,6 +1886,13 @@ export class Router {
       fresh = fresh.filter((d) => !old.includes(d));
       this.#log(`[${handle}] ${old.reduce((n, d) => n + d.events.length, 0)} event(s) over a day old; acknowledged without waking`);
     }
+    // UNI-1029: the wake filter decides on whole batches once they have
+    // gathered; what it holds or drops is acknowledged now, the rest goes on.
+    if (fresh.length && st.cfg.wakeFilter) {
+      const gathering = st.heldSince + this.#coalesceMs - Date.now();
+      if (gathering > 0) return gathering;
+      fresh = await this.#applyFilter(st, pending, fresh, signal);
+    }
     if (fresh.length) {
       const notice = (s: string) => {
         if (st.heldNotice !== s) this.#log(`[${handle}] ${s}`);
@@ -1584,7 +1905,8 @@ export class Router {
       // Only plain new posts from broad subscriptions held: wait a little
       // longer for an inbox copy of the same post (UNI-573). They stay
       // unacknowledged meanwhile, so a restart re-serves them.
-      const plainOnly = fresh.every(
+      const digestDue = st.filter.digest.length > 0 && st.filter.digestDue <= Date.now();
+      const plainOnly = !digestDue && fresh.every(
         (d) =>
           !d.resync_required &&
           !st.directSubs.has(d.subscription_id) &&
@@ -1649,6 +1971,7 @@ export class Router {
       const kept = new Set(wake.events.map(refKey));
       const already = toRefs(send).filter((r) => this.#seen(st, r) && !kept.has(refKey(r))).length;
       if (already) wake.already_delivered = already;
+      const attached = st.cfg.wakeFilter ? this.#attachFilter(st, wake) : [];
       if (st.backlog) wake.backlog = structuredClone(st.backlog);
       const stillHeld = events(fresh) - events(send);
       const heldBack = events(send.filter((d) => st.capHeld.has(d.delivery_id)));
@@ -1685,6 +2008,7 @@ export class Router {
       st.stats.delayed = stillHeld;
       st.heldNotice = '';
       if (wake.backlog) st.backlog = null;
+      if (st.cfg.wakeFilter) this.#filterSent(st, attached, wake);
       for (const d of send) {
         st.handedOff.add(d.delivery_id);
         st.capHeld.delete(d.delivery_id);
