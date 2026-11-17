@@ -299,6 +299,9 @@ export function parseArgs(argv: string[]): Args {
       flags.set(name, v);
     } else flags.set(name, true);
   }
+  // --out names a file to write; only market-evidence writes one, so any
+  // other command refuses it rather than ignoring it (Wren on #140).
+  if (flags.has('out') && argv[0] !== 'market-evidence') throw new Error('--out is only for market-evidence.');
   return { cmd: argv[0] ?? 'help', flags, positionals, rest };
 }
 
@@ -718,20 +721,21 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         const client = new TiloriAgentClient({ url: market, apiKey: readKey(agent) });
         const timeout = AbortSignal.timeout(MARKET_EVIDENCE_TIMEOUT_MS);
         const abort = AbortSignal.any([signal, timeout]);
+        // Ctrl-C or SIGTERM is not a slow Market: say which one it was.
+        const stopped = () =>
+          new Error(signal.aborted ? 'market-evidence: interrupted; nothing written.' : 'market-evidence: no answer in time.');
         let record: any;
         try {
           record = await Promise.race([
             client.getExecutionEvidence(id, { signal: abort, timeout: MARKET_EVIDENCE_TIMEOUT_MS }),
-            new Promise<never>((_, reject) =>
-              abort.addEventListener('abort', () => reject(new Error('market-evidence: no answer in time.')), { once: true }),
-            ),
+            new Promise<never>((_, reject) => abort.addEventListener('abort', () => reject(stopped()), { once: true })),
           ]);
         } catch (cause) {
           if (cause instanceof ToolRefused) {
             log(`market-evidence: Market refused the read (${cause.code ?? 'no error code'}).`);
             return 2;
           }
-          if (abort.aborted) throw new Error('market-evidence: no answer in time.');
+          if (abort.aborted) throw stopped();
           const status = (cause as { status?: unknown }).status;
           throw new Error(
             typeof status === 'number' ? `market-evidence: Market answered HTTP ${status}.` : 'market-evidence: could not read from Market.',

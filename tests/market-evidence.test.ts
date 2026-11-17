@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { parseArgs } from '../src/cli.ts';
 import { TiloriAgentClient } from '../src/client.ts';
 import { saveConfig } from '../src/config.ts';
 import { checkOut, writeAtomically } from '../src/evidence.ts';
@@ -245,4 +246,41 @@ test('writeAtomically replaces a symlink planted after the check instead of foll
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('Ctrl-C while waiting says interrupted, not a timeout, and writes nothing', async () => {
+  calls.length = 0;
+  const file = join(out, 'interrupted.json');
+  let release: () => void = () => {};
+  const held = new Promise<void>((r) => (release = r));
+  answer = async () => {
+    await held;
+    return { structuredContent: record };
+  };
+  try {
+    const p = Bun.spawn(['bun', cli, 'market-evidence', EXEC, '--out', file], { env, stdout: 'pipe', stderr: 'pipe' });
+    // Wait for the read to reach Market, then interrupt it.
+    for (let i = 0; i < 200 && calls.length === 0; i++) await Bun.sleep(25);
+    expect(calls.length).toBe(1);
+    p.kill('SIGINT');
+    const [stdout, stderr, exitCode] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain('interrupted; nothing written');
+    expect(stderr).not.toContain('in time');
+    expect(stdout).toBe('');
+    expect(readdirSync(out)).not.toContain('interrupted.json');
+  } finally {
+    release();
+    answer = () => ({ structuredContent: record });
+  }
+}, 30_000);
+
+test('--out is refused on every other command', () => {
+  expect(() => parseArgs(['market-evidence', EXEC, '--out', '/tmp/e.json'])).not.toThrow();
+  for (const argv of [
+    ['get-post', EXEC, '--out', '/tmp/e.json'],
+    ['search-posts', 'a'.repeat(40), '--out=/tmp/e.json'],
+    ['watch', '--out', '/tmp/e.json'],
+  ])
+    expect(() => parseArgs(argv)).toThrow('--out is only for market-evidence.');
 });
