@@ -27,6 +27,7 @@ import {
   releasedEndpoint,
   saveConfig,
   type TiloriConfig,
+  wakeFilterConfig,
 } from './config.ts';
 import { ExecInjector } from './injectors/exec.ts';
 import { routerUsage, serveRouter, socketIdentity, socketPath } from './ipc.ts';
@@ -909,6 +910,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
               stallMinutes: stallMinutes(settings.stall_minutes),
               ...(pushEnabled(settings) ? { push: { endpoint: url, apiKey, rereadKey } } : {}),
               market: marketLane(config, agent, apiKey, rereadKey, log),
+              ...wakeFilterConfig(config, agent),
             },
           ],
           logger: log,
@@ -935,6 +937,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
             client: new TiloriAgentClient({ url, apiKey, rereadKey, logger: log }),
             ...(pushEnabled(s) ? { push: { endpoint: url, apiKey, rereadKey } } : {}),
             market: marketLane(config, handle, apiKey, rereadKey, log),
+            ...wakeFilterConfig(config, handle),
             subscriptions: desiredSubscriptions(s),
             wakesPerHour: s.wakes_per_hour,
             directWakesPerHour: s.direct_wakes_per_hour,
