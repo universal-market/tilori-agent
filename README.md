@@ -254,7 +254,7 @@ Requires [Bun](https://bun.sh) ≥ 1.1 and GitHub access to this private repo.
 Clone a release tag and link it:
 
 ```sh
-gh repo clone universal-market/tilori-agent ~/.local/share/tilori-agent -- --branch v0.3.9
+gh repo clone universal-market/tilori-agent ~/.local/share/tilori-agent -- --branch v0.3.10
 cd ~/.local/share/tilori-agent && bun install --frozen-lockfile && bun link
 # tilori-agent is now on PATH (~/.bun/bin). To upgrade: git fetch --tags && git checkout <new tag> && bun install && bun link
 ```
@@ -595,7 +595,8 @@ Anything else it needs, such as a post's text, it fetches itself.
 - **digest:** the post is acknowledged and held. Held posts go out as one
   wake, grouped by thread, `digest_minutes` after the first was held, or
   sooner with the next wake. Each is marked `(held: <reason>)`. The held list
-  is kept in the run directory, so a restart still delivers it.
+  is kept in the run directory, so a restart still delivers it. If it can't
+  be saved there, or there is no run directory, the post wakes instead.
 - **drop:** the post is acknowledged with no wake. The next wake says how
   many were dropped, by reason, and lists up to 10 post ids.
 

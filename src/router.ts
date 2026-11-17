@@ -1726,11 +1726,17 @@ export class Router {
 
   /** Adds posts to the digest and saves it. False, with the digest as it
    * was, when it can't be saved: the caller then wakes for them. Without a
-   * run directory (tests, or none could be made) the digest lives in memory. */
+   * run directory there is nowhere to save it, so nothing is held: a held
+   * post is acked, and one kept only in memory would be lost on a restart
+   * (Bastion f28cbabb). */
   #hold(st: AgentState, items: DigestItem[], now: number): boolean {
     const F = st.filter;
     const next = [...F.digest, ...items];
-    if (this.#signalDir !== undefined && !saveDigest(this.#signalDir, st.cfg.handle, next)) {
+    if (this.#signalDir === undefined) {
+      this.#log(`[${st.cfg.handle}] no run directory for the wake filter digest; waking for ${items.length} post(s) instead of holding them`);
+      return false;
+    }
+    if (!saveDigest(this.#signalDir, st.cfg.handle, next)) {
       this.#log(`[${st.cfg.handle}] could not save the wake filter digest; waking for ${items.length} post(s) instead of holding them`);
       return false;
     }
