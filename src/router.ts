@@ -1525,7 +1525,6 @@ export class Router {
     }
     const wake: Wake = { wake_id: randomUUID(), agent: handle, events: [], resync_required: false, reminder: reminder!.prompt };
     if (gate) wake.gate = gate;
-    st.gateQuiet = 0;
     if (st.backlog) wake.backlog = structuredClone(st.backlog);
     if (st.filter.dropped) wake.filter_dropped = structuredClone(st.filter.dropped);
     this.#noteLastWake(st, wake, st.limiter);
@@ -1541,6 +1540,9 @@ export class Router {
       this.#log(`[${handle}] reminder skipped: injector ${injector.kind} busy`);
       return;
     }
+    // Only a reminder the session took starts the quiet count again (Pax
+    // b60b6fc1): a forced one that met a busy or gone session is forced again.
+    st.gateQuiet = 0;
     this.#signal(handle, 'woke');
     st.limiter.record();
     st.stats.wakes++;

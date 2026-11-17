@@ -562,8 +562,8 @@ the reminder is due, and that answers on stdout with one JSON object:
   router logs `reminder gated: quiet`. The next one is an interval later.
   The fourth quiet answer in a row sends the plain reminder anyway, starting
   `Reminder (gate ceiling: 4 quiet).`, so a gate that is stuck on quiet
-  can't silence the agent for good. Any reminder that goes out starts the
-  count again.
+  can't silence the agent for good. Any reminder the session takes starts
+  the count again; a forced one it refused as busy is forced again next time.
 - `{"wake": true, "findings": ["…", …]}`: the reminder goes out, and the line
   starts `Check-in gate for agent <name>: N findings: (1) … (2) …`.
 
