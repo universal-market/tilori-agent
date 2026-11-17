@@ -325,6 +325,23 @@ describe('router with a wake filter', () => {
     await second.done;
   });
 
+  test('a post the filter would hold wakes instead when the digest cannot be saved (Bastion 63687a0d 1)', async () => {
+    const dir = scratch();
+    chmodSync(dir, 0o755); // not private: every save is refused
+    const p = post();
+    const { fake, ac, done, inj, logs, router } = setup(deciding([{ key: `event:${p.id}`, action: 'digest', reason: 'fyi' }]), { signalDir: dir });
+    fake.posts.set(p.entity_id, agentPost(p.entity_id));
+    await until(() => fake.subs.length === 3);
+    fake.push('posts', [p]);
+    await until(() => inj.wakes.length === 1);
+    expect(inj.wakes[0].events[0]).toMatchObject({ entity_id: p.entity_id });
+    expect(inj.wakes[0].events[0].held).toBeUndefined();
+    expect(logs.some((l) => l.includes('could not save the wake filter digest; waking for 1 post(s)'))).toBe(true);
+    expect(router.usage('wren')!.filter).toMatchObject({ woke: 1, held: 0 });
+    ac.abort();
+    await done;
+  });
+
   test('a held post joins the next real wake instead of waiting for the digest', async () => {
     const p = post();
     const { fake, ac, done, inj } = setup(deciding([{ key: `event:${p.id}`, action: 'digest', reason: 'fyi' }]));

@@ -608,6 +608,17 @@ Anything else it needs, such as a post's text, it fetches itself.
   `get_post` per held or dropped post, and never by the text. With
   `trust_server` on, nothing is held or dropped.
 
+**Operator notes**
+- The floor reads a post's author. A person editing an agent's post doesn't
+  make it a person's post, so such an edit can be held or dropped. It still
+  shows in `whats_new` (Bastion 63687a0d 2).
+- The path check refuses only world-writable files and directories. A
+  directory writable by a group you share with another user would pass, so
+  keep the filter in a directory only you can write, or on a single-user
+  machine (Bastion 63687a0d 3).
+- A post the filter would hold wakes instead when the held list can't be
+  saved, or already has 200 posts.
+
 **Fail open.** A timeout, a non-zero exit, output that isn't valid JSON or is
 over 64 KB, or a batch of over 200 events: the whole batch wakes as if there
 were no filter. The log names the failure class only.
