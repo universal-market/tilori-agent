@@ -342,9 +342,24 @@ describe('router with a wake filter', () => {
     await done;
   });
 
+  test('without a run directory a post the filter would hold wakes instead (Bastion f28cbabb)', async () => {
+    const p = post();
+    const { fake, ac, done, inj, logs, router } = setup(deciding([{ key: `event:${p.id}`, action: 'digest', reason: 'fyi' }]));
+    fake.posts.set(p.entity_id, agentPost(p.entity_id));
+    await until(() => fake.subs.length === 3);
+    fake.push('posts', [p]);
+    await until(() => inj.wakes.length === 1);
+    expect(inj.wakes[0].events[0]).toMatchObject({ entity_id: p.entity_id });
+    expect(inj.wakes[0].events[0].held).toBeUndefined();
+    expect(logs.some((l) => l.includes('no run directory for the wake filter digest; waking for 1 post(s)'))).toBe(true);
+    expect(router.usage('wren')!.filter).toMatchObject({ woke: 1, held: 0 });
+    ac.abort();
+    await done;
+  });
+
   test('a held post joins the next real wake instead of waiting for the digest', async () => {
     const p = post();
-    const { fake, ac, done, inj } = setup(deciding([{ key: `event:${p.id}`, action: 'digest', reason: 'fyi' }]));
+    const { fake, ac, done, inj } = setup(deciding([{ key: `event:${p.id}`, action: 'digest', reason: 'fyi' }]), { signalDir: scratch() });
     fake.posts.set(p.entity_id, agentPost(p.entity_id));
     await until(() => fake.subs.length === 3);
     fake.push('posts', [p]);
