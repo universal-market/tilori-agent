@@ -87,9 +87,21 @@ export const POST_TOOL = 'get_post';
  * through `call`, so the router and `watch` cannot reach it. */
 export const SEARCH_TOOL = 'search_posts';
 
+/** Called only through `getExecutionEvidence` (the `market-evidence`
+ * subcommand, UNI-1028 step 3), never through `call`, so the router and
+ * `watch` cannot reach it. A Market read: the client must be on market_url. */
+export const EXECUTION_TOOL = 'get_execution';
+
 /** The server answered the tool call with an error (not found, a missing
  * scope, a refusal), as opposed to a transport failure. */
-export class ToolRefused extends Error {}
+export class ToolRefused extends Error {
+  /** The server's error code (e.g. NOT_FOUND), when it sent one in the
+   * usual shape: upper-case letters, digits and underscores only, so a
+   * caller can print it without printing the server's text. */
+  code?: string;
+}
+
+const ERROR_CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
 
 export interface McpToolCaller {
   callTool(
@@ -177,20 +189,26 @@ function unwrap(raw: any, secrets: Iterable<string>): any {
   if (!raw || typeof raw !== 'object') throw new Error('Empty response from Tilori MCP server.');
   if (raw.isError) {
     let message = 'Tilori MCP tool call failed.';
+    let code: unknown;
     const err = raw.structuredContent?.error;
-    if (typeof err?.message === 'string') message = err.message;
-    else if (Array.isArray(raw.content)) {
+    if (typeof err?.message === 'string') {
+      message = err.message;
+      code = err.code;
+    } else if (Array.isArray(raw.content)) {
       const text = raw.content.find((c: any) => c?.type === 'text')?.text;
       if (typeof text === 'string') {
         try {
           const parsed = JSON.parse(text);
           message = typeof parsed?.message === 'string' ? parsed.message : text;
+          code = parsed?.code ?? parsed?.error?.code;
         } catch {
           message = text;
         }
       }
     }
-    throw new ToolRefused(explainAccess(redact(message, secrets)));
+    const refused = new ToolRefused(explainAccess(redact(message, secrets)));
+    if (typeof code === 'string' && ERROR_CODE.test(code)) refused.code = code;
+    throw refused;
   }
   if (raw.structuredContent !== undefined) {
     const sc = raw.structuredContent;
@@ -243,6 +261,10 @@ export class TiloriAgentClient {
     const msg = cause instanceof Error ? cause.message : String(cause ?? 'Unknown error');
     const clean = explainTransport(cause, this.endpoint, redact(msg, this.#secrets));
     clean.message = explainAccess(clean.message);
+    // The HTTP status, for callers that print it instead of the message.
+    const code = (cause as { code?: unknown } | null)?.code;
+    if (typeof code === 'number' && Number.isInteger(code)) (clean as Error & { status?: number }).status = code;
+    else if (isUnauthorized(cause)) (clean as Error & { status?: number }).status = 401;
     return clean;
   }
 
@@ -349,7 +371,7 @@ export class TiloriAgentClient {
   }
 
   async #invoke<T>(
-    name: ReadTool | typeof PRUNE_TOOL | typeof POST_TOOL | typeof SEARCH_TOOL,
+    name: ReadTool | typeof PRUNE_TOOL | typeof POST_TOOL | typeof SEARCH_TOOL | typeof EXECUTION_TOOL,
     args: Record<string, unknown>,
     options?: { signal?: AbortSignal; timeout?: number },
   ): Promise<T> {
@@ -429,6 +451,13 @@ export class TiloriAgentClient {
   /** One post as `get_post` returns it. Read-only. */
   async getPost(postId: string, options?: { signal?: AbortSignal; timeout?: number }): Promise<any> {
     return this.#invoke(POST_TOOL, { post_id: postId }, options);
+  }
+
+  /** One execution with its evidence (UNI-1028): `get_execution` with the
+   * contract block and completed Task outputs. Read-only; used only by the
+   * `market-evidence` subcommand, on a client built for market_url. */
+  async getExecutionEvidence(executionId: string, options?: { signal?: AbortSignal; timeout?: number }): Promise<any> {
+    return this.#invoke(EXECUTION_TOOL, { execution_id: executionId, include: ['contract', 'task_outputs'] }, options);
   }
 
   /** One page of `search_posts` over every depth, oldest first. Read-only. */
