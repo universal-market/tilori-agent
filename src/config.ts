@@ -10,6 +10,7 @@ import type {
 } from './types.ts';
 import { VERSION } from './version.ts';
 import { wakeFilterSettings, type WakeFilter, type WakeFilterSettings } from './wake-filter.ts';
+import { reminderGateSettings, type ReminderGate, type ReminderGateSettings } from './reminder-gate.ts';
 
 export const DEFAULT_WAKES_PER_HOUR = 20;
 export const DEFAULT_DIRECT_WAKES_PER_HOUR = 10;
@@ -61,6 +62,9 @@ export interface ReminderSettings {
   prompt: string;
   /** Skip the reminder when the agent had any wake within the interval (default true). */
   only_when_idle?: boolean;
+  /** UNI-1044: a command run before each due reminder that decides whether it
+   * wakes, and adds its findings to the line. Any failure sends it plain. */
+  gate?: ReminderGateSettings;
 }
 
 export interface AgentSettings {
@@ -129,6 +133,7 @@ export interface Reminder {
   everyMs: number;
   prompt: string;
   onlyWhenIdle: boolean;
+  gate?: ReminderGate;
 }
 
 /** Whether a reminder prompt may go into a wake: a nonblank string of at
@@ -161,7 +166,8 @@ export function reminderSettings(settings: AgentSettings = {}): Reminder | undef
   if (r.only_when_idle !== undefined && typeof r.only_when_idle !== 'boolean') {
     throw new Error('reminder.only_when_idle must be true or false.');
   }
-  return { everyMs: r.every_minutes * 60_000, prompt: r.prompt, onlyWhenIdle: r.only_when_idle ?? true };
+  const gate = reminderGateSettings(r.gate);
+  return { everyMs: r.every_minutes * 60_000, prompt: r.prompt, onlyWhenIdle: r.only_when_idle ?? true, ...(gate ? { gate } : {}) };
 }
 
 export interface TiloriConfig {

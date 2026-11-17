@@ -1,4 +1,5 @@
 import type { FilterReason } from './wake-filter.ts';
+import type { GateFailure } from './reminder-gate.ts';
 /**
  * Shapes of the Tilori MCP event tools, mirrored from the main repo's
  * `shared/inbox-api.ts` and `shared/agent-events.ts` (origin/main after
@@ -162,6 +163,12 @@ export interface Wake {
   /** Set on a reminder wake: the operator's own reminder text from config,
    * never server data. A reminder wake has no events. */
   reminder?: string;
+  /** UNI-1044: what the reminder's gate said, on a reminder wake only: its
+   * findings (cleaned, at most 10), or why the gate failed (a fixed class)
+   * and the reminder went out plain, or that it went out plain because the
+   * gate had said quiet GATE_QUIET_CEILING times in a row. Absent without a
+   * gate. */
+  gate?: { findings: string[] } | { failed: GateFailure } | { ceiling: number };
   /** A push monitor line instead of events (push.ts): push went down at
    * `since` (epoch ms), or came back and its sweep caught `caught` events.
    * Carries no events; never acknowledged. */
