@@ -21,7 +21,13 @@ import { FakeTilori, mention, until } from './fake-tilori.ts';
 class Recorder implements Injector {
   readonly kind = 'test';
   wakes: Wake[] = [];
+  /** Answers 'busy' this many times first, recording nothing. */
+  busyFirst = 0;
   async deliver(wake: Wake): Promise<DeliverResult> {
+    if (this.busyFirst > 0) {
+      this.busyFirst--;
+      return 'busy';
+    }
     this.wakes.push(wake);
     return 'accepted';
   }
@@ -225,6 +231,40 @@ describe('router with a reminder gate', () => {
     expect(logs.some((l) => l.includes(`reminder gate said quiet ${GATE_QUIET_CEILING} times in a row; sending the plain reminder`))).toBe(true);
     await until(() => quiet().length >= GATE_QUIET_CEILING);
     expect(quiet().at(-1)).toEndWith('(1 in a row)');
+    ac.abort();
+    await done;
+  });
+
+  test('a forced reminder a busy session refused is forced again next time, not after another ceiling (Pax b60b6fc1)', async () => {
+    const fake = new FakeTilori();
+    const logs: string[] = [];
+    const router = new Router({
+      agents: [
+        {
+          handle: 'wren',
+          client: fake.client(),
+          subscriptions: [{ scope: { type: 'inbox' } }],
+          reminder: { everyMs: 100, prompt: 'Run the check-in.', onlyWhenIdle: false, gate: printing({ wake: false }) },
+        },
+      ],
+      logger: (m) => logs.push(m),
+      waitMs: 10,
+      retryMs: 10,
+      coalesceMs: 0,
+      plainHoldMs: 0,
+      directPauseMs: 0,
+      broadPauseMs: 0,
+    });
+    const inj = new Recorder();
+    inj.busyFirst = 1;
+    router.register('wren', inj);
+    const ac = new AbortController();
+    const done = router.run(ac.signal);
+    await until(() => inj.wakes.length >= 1);
+    expect(inj.wakes[0].gate).toEqual({ ceiling: GATE_QUIET_CEILING });
+    // Three quiet answers, the refused forced one, then the forced one again.
+    expect(logs.filter((l) => l.includes('reminder gated: quiet'))).toHaveLength(GATE_QUIET_CEILING - 1);
+    expect(logs.filter((l) => l.includes(`said quiet ${GATE_QUIET_CEILING} times`))).toHaveLength(2);
     ac.abort();
     await done;
   });
