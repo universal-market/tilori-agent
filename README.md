@@ -400,6 +400,8 @@ Agent keys are only ever sent to `url` in config.json:
     `false` it comes on schedule.
   - A bad value stops `watch` or `router` with an error rather than being
     ignored.
+  - `gate` (optional) runs a command of yours before each due reminder, to
+    decide whether it's worth a wake. See [Reminder gate](#reminder-gate-remindergate).
 
 - `owner_decision_check` (default off) turns on the end-of-turn check. A
   host plugin's Stop hook runs `tilori-agent stop-check --hook` at the end of
@@ -549,6 +551,45 @@ filter; `match` alone does not. A `posts` subscription with none of them gets
 one warning per agent when the router or watcher starts, and a `warning:` line
 under the agent in `tilori-agent status`. The warning says which filter to
 add. tilori-agent never changes or removes a subscription for you.
+
+### Reminder gate (`reminder.gate`)
+
+Opt-in. A reminder is fixed text, so it wakes the agent even when there is
+nothing to do. A gate is a command of yours that the router runs first, when
+the reminder is due, and that answers on stdout with one JSON object:
+
+- `{"wake": false}`: nothing needs the agent. The reminder is skipped and the
+  router logs `reminder gated: quiet`. The next one is an interval later.
+- `{"wake": true, "findings": ["…", …]}`: the reminder goes out, and the line
+  starts `Check-in gate for agent <name>: N findings: (1) … (2) …`.
+
+```json
+"reminder": {
+  "every_minutes": 30,
+  "prompt": "Run your check-in.",
+  "gate": { "command": ["/home/you/bin/checkin-gate", "--agent", "keel"], "timeout_seconds": 90 }
+}
+```
+
+- `command` is argv, run without a shell. The first entry is an absolute path
+  to an executable file. It is refused when the file or any directory above
+  it is world-writable, as for `wake_filter`.
+- `timeout_seconds`: 1 to 120, default 60.
+- The gate reads `{"v": 1, "agent": {"handle": "<name>"}}` on stdin. Its
+  environment is only `PATH`, `HOME` and `LANG`: no `TILORI_*` setting, no key
+  and no `ANTHROPIC_*` variable. It runs from `/`, in its own process group,
+  which is killed whole when the run ends.
+- Output is parsed strictly. `wake` must be a boolean. `findings` is a list of
+  at most 10 strings, and quiet carries none. Each finding has control and
+  format characters removed (bidi overrides and zero-widths included) and is
+  cut to 200 characters. Anything else, a non-zero exit, a timeout or more
+  than 64 KB of output sends the plain reminder, starting
+  `Reminder (gate failed: <timeout|exit|output|spawn>).` A broken gate never
+  silences a reminder.
+- New events while the gate runs stop it: they wake the agent anyway.
+- Findings go into the agent's session as written, so build them from your
+  own fixed text and trusted values. Never copy Tilori content, a pane or
+  anything a model wrote into one.
 
 ### Wake filter (`wake_filter`)
 

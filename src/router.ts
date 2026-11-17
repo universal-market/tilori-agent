@@ -41,6 +41,7 @@ import {
   type FilterReason,
   type WakeFilter,
 } from './wake-filter.ts';
+import { runGate } from './reminder-gate.ts';
 
 /** How long a delivered post or conversation is remembered. Longer than the
  * wake cap can hold a batch (one hour), so a held copy of something that went
@@ -1479,7 +1480,41 @@ export class Router {
       this.#log(`[${handle}] reminder skipped: wake cap reached (${st.limiter.perHour}/hour)`);
       return;
     }
+    // UNI-1044: the gate decides whether this reminder is worth a wake. It
+    // runs in the flush loop, so new events stop it at once (they wake the
+    // agent anyway) rather than wait behind it.
+    let gate: Wake['gate'];
+    if (reminder!.gate) {
+      const stop = new AbortController();
+      const onOuter = () => stop.abort();
+      signal?.addEventListener('abort', onOuter, { once: true });
+      let kicked = false;
+      void st.kick.promise.then(() => {
+        kicked = true;
+        stop.abort();
+      });
+      const r = await runGate(reminder!.gate, handle, stop.signal);
+      signal?.removeEventListener('abort', onOuter);
+      if (signal?.aborted) return;
+      if (!r.ok && r.why === 'stopped' && kicked) {
+        this.#log(`[${handle}] reminder gate stopped: events arrived`);
+        // An event wake re-times an idle-only reminder; any other comes
+        // straight after the events.
+        if (!reminder!.onlyWhenIdle) st.reminderAt = Date.now();
+        return;
+      }
+      if (r.ok && !r.wake) {
+        this.#log(`[${handle}] reminder gated: quiet`);
+        return;
+      }
+      if (r.ok) gate = { findings: r.findings };
+      else {
+        this.#log(`[${handle}] reminder gate failed (${r.why}); sending the plain reminder`);
+        gate = { failed: r.why };
+      }
+    }
     const wake: Wake = { wake_id: randomUUID(), agent: handle, events: [], resync_required: false, reminder: reminder!.prompt };
+    if (gate) wake.gate = gate;
     if (st.backlog) wake.backlog = structuredClone(st.backlog);
     if (st.filter.dropped) wake.filter_dropped = structuredClone(st.filter.dropped);
     this.#noteLastWake(st, wake, st.limiter);

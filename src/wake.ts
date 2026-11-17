@@ -1,5 +1,6 @@
 import { validReminderPrompt } from './config.ts';
 import { FILTER_REASONS, type FilterReason } from './wake-filter.ts';
+import { GATE_FAILURES, MAX_GATE_FINDINGS, validFinding } from './reminder-gate.ts';
 import { MARKET_OFF_REASONS, POLL_FAIL_REASONS } from './types.ts';
 import type { AgentDelivery, EventRef, MarketOffReason, MarketRef, PollFailReason, ThreadLabel, Wake } from './types.ts';
 
@@ -230,7 +231,7 @@ export function wakeText(wake: Wake): string {
   if (wake.market_off !== undefined) return marketOffText(wake.market_off) + updateText(wake);
   if (wake.reminder !== undefined)
     return (
-      reminderText(wake.agent, wake.reminder) + droppedText(wake) + backlogText(wake) + resumeText(wake) + postsLeftText(wake) + updateText(wake) + toolsText(wake)
+      gateText(wake) + reminderText(wake.agent, wake.reminder) + droppedText(wake) + backlogText(wake) + resumeText(wake) + postsLeftText(wake) + updateText(wake) + toolsText(wake)
     );
   const n = wake.events.length;
   const shown = wake.events.slice(0, MAX_REFS_IN_LINE).map(describe);
@@ -464,6 +465,21 @@ export function reminderText(agent: string, prompt: string): string {
   );
 }
 
+/** UNI-1044: what the reminder's gate said, ahead of the reminder (Juniper
+ * b2a0cbf0 1): the count and each finding, or that the gate failed and this is
+ * the plain reminder. Findings are the operator's own gate output, cleaned
+ * and capped by the router (no control or format characters), so the line
+ * stays one line. Nothing without a gate. */
+export function gateText(wake: Wake): string {
+  const g = wake.gate;
+  if (!g) return '';
+  if ('failed' in g) return `Reminder (gate failed: ${g.failed}). `;
+  const n = g.findings.length;
+  if (!n) return `Check-in gate for agent ${wake.agent}: it asked for a check-in but named no finding. `;
+  const list = g.findings.map((f, i) => `(${i + 1}) ${f}`).join(' ');
+  return `Check-in gate for agent ${wake.agent}: ${n} finding${n === 1 ? '' : 's'}: ${list} `;
+}
+
 /** Re-validates a wake received over IPC so a line is always built from
  * fixed vocabulary and UUIDs, whatever the peer sent. */
 export function sanitizeWake(raw: any, agent: string): Wake | null {
@@ -570,6 +586,17 @@ export function sanitizeWake(raw: any, agent: string): Wake | null {
     // A reminder carries the router's own config text and no events.
     if (!validReminderPrompt(raw.reminder) || events.length) return null;
     wake.reminder = raw.reminder;
+    // The gate's part, only as the router builds it: clean findings, or a
+    // failure class from the fixed list. Anything else drops the wake.
+    const g = raw.gate;
+    if (g !== undefined) {
+      if (!g || typeof g !== 'object') return null;
+      if (Array.isArray(g.findings) && g.failed === undefined) {
+        if (g.findings.length > MAX_GATE_FINDINGS || !g.findings.every(validFinding)) return null;
+        wake.gate = { findings: [...g.findings] };
+      } else if (g.findings === undefined && (GATE_FAILURES as readonly unknown[]).includes(g.failed)) wake.gate = { failed: g.failed };
+      else return null;
+    }
   }
   return wake;
 }

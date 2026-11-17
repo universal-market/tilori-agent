@@ -68,6 +68,48 @@ function wholeIn(name: string, value: unknown, min: number, max: number, fallbac
 const worldWritable = (mode: number) => (mode & 0o002) !== 0;
 
 /**
+ * Validates an operator-configured command (argv, no shell) for `label`
+ * (`wake_filter`, `reminder.gate`): an absolute path to an executable file,
+ * resolved by realpath, that neither it nor any directory above it is
+ * world-writable. Returns argv with the resolved program. Throws on anything
+ * doubtful (Bastion 10ebe17a 4; c3f5cd8f 1).
+ */
+export function commandArgv(
+  label: string,
+  command: unknown,
+  stat: (path: string) => { isFile(): boolean; mode: number } = statSync,
+  realpath: (path: string) => string = (p) => realpathSync.native(p),
+): string[] {
+  if (
+    !Array.isArray(command) ||
+    command.length < 1 ||
+    command.length > 32 ||
+    !command.every((a) => typeof a === 'string' && a.length > 0 && a.length <= 1024 && !a.includes('\0'))
+  )
+    throw new Error(`${label}.command must be a list of 1 to 32 non-empty strings (argv, no shell).`);
+  const program = command[0] as string;
+  if (!isAbsolute(program)) throw new Error(`${label}.command[0] must be an absolute path.`);
+  let resolved: string;
+  try {
+    resolved = realpath(program);
+  } catch {
+    throw new Error(`${label}.command[0] does not exist.`);
+  }
+  const file = stat(resolved);
+  if (!file.isFile()) throw new Error(`${label}.command[0] must be a file.`);
+  if ((file.mode & 0o111) === 0) throw new Error(`${label}.command[0] is not executable.`);
+  if (worldWritable(file.mode)) throw new Error(`${label}.command[0] is world-writable.`);
+  // Every directory up to the root: a writable one lets anyone swap the file.
+  for (let dir = dirname(resolved); ; dir = dirname(dir)) {
+    const d = stat(dir);
+    // The sticky bit (/tmp) still lets anyone add a file, so it doesn't help.
+    if (worldWritable(d.mode)) throw new Error(`${label}.command[0] is in a world-writable directory (${dir}).`);
+    if (dir === dirname(dir)) break;
+  }
+  return [resolved, ...(command.slice(1) as string[])];
+}
+
+/**
  * Validates `wake_filter` from config.json; undefined when unset. Throws on
  * anything doubtful, so a typo never runs the wrong program and never
  * silently turns the filter off. `stat` is a test seam.
@@ -82,35 +124,9 @@ export function wakeFilterSettings(
   const s = value as Record<string, unknown>;
   for (const key of Object.keys(s))
     if (!['command', 'timeout_seconds', 'digest_minutes'].includes(key)) throw new Error(`wake_filter.${key} is not a setting.`);
-  const command = s.command;
-  if (
-    !Array.isArray(command) ||
-    command.length < 1 ||
-    command.length > 32 ||
-    !command.every((a) => typeof a === 'string' && a.length > 0 && a.length <= 1024 && !a.includes('\0'))
-  )
-    throw new Error('wake_filter.command must be a list of 1 to 32 non-empty strings (argv, no shell).');
-  const program = command[0] as string;
-  if (!isAbsolute(program)) throw new Error('wake_filter.command[0] must be an absolute path.');
-  let resolved: string;
-  try {
-    resolved = realpath(program);
-  } catch {
-    throw new Error('wake_filter.command[0] does not exist.');
-  }
-  const file = stat(resolved);
-  if (!file.isFile()) throw new Error('wake_filter.command[0] must be a file.');
-  if ((file.mode & 0o111) === 0) throw new Error('wake_filter.command[0] is not executable.');
-  if (worldWritable(file.mode)) throw new Error('wake_filter.command[0] is world-writable.');
-  // Every directory up to the root: a writable one lets anyone swap the file.
-  for (let dir = dirname(resolved); ; dir = dirname(dir)) {
-    const d = stat(dir);
-    // The sticky bit (/tmp) still lets anyone add a file, so it doesn't help.
-    if (worldWritable(d.mode)) throw new Error(`wake_filter.command[0] is in a world-writable directory (${dir}).`);
-    if (dir === dirname(dir)) break;
-  }
+  const argv = commandArgv('wake_filter', s.command, stat, realpath);
   return {
-    argv: [resolved, ...(command.slice(1) as string[])],
+    argv,
     timeoutMs: wholeIn('timeout_seconds', s.timeout_seconds, 1, MAX_FILTER_TIMEOUT_SECONDS, DEFAULT_FILTER_TIMEOUT_SECONDS) * 1000,
     digestMs: wholeIn('digest_minutes', s.digest_minutes, MIN_DIGEST_MINUTES, MAX_DIGEST_MINUTES, DEFAULT_DIGEST_MINUTES) * 60_000,
   };
@@ -278,19 +294,28 @@ export function filterEnv(source: NodeJS.ProcessEnv = process.env): Record<strin
   return env;
 }
 
+/** Why a bounded run gave no output: a class only, never the program's text. */
+export type RunFailure = 'spawn' | 'timeout' | 'exit' | 'output' | 'stopped';
+
 /**
- * Runs the filter once on a batch. Resolves with decisions, or with a failure
- * class; never rejects. On timeout, oversized output or a stop, the filter's
- * whole process group is killed (Bastion 10ebe17a 2).
+ * Runs an operator-configured program once: `stdin` in, stdout back. It gets
+ * the minimal environment and the fixed cwd, in its own process group, which
+ * is killed whole when the run ends for any reason (Bastion 10ebe17a 2).
+ * Resolves with stdout on exit 0 within `maxBytes`, else a failure class;
+ * never rejects. Shared by the wake filter and the reminder gate.
  */
-export function runFilter(filter: WakeFilter, input: FilterInput, signal?: AbortSignal): Promise<FilterResult> {
-  if (input.events.length > MAX_FILTER_EVENTS) return Promise.resolve({ ok: false, why: 'too_large' });
+export function runBounded(
+  argv: string[],
+  timeoutMs: number,
+  stdin: string,
+  signal?: AbortSignal,
+  maxBytes = MAX_FILTER_OUTPUT,
+): Promise<{ ok: true; stdout: string } | { ok: false; why: RunFailure }> {
   if (signal?.aborted) return Promise.resolve({ ok: false, why: 'stopped' });
-  const keys = new Set(input.events.map((e) => e.key));
   return new Promise((resolve) => {
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn(filter.argv[0], filter.argv.slice(1), {
+      child = spawn(argv[0], argv.slice(1), {
         stdio: ['pipe', 'pipe', 'ignore'],
         env: filterEnv(),
         cwd: FILTER_CWD,
@@ -311,12 +336,12 @@ export function runFilter(filter: WakeFilter, input: FilterInput, signal?: Abort
         // already gone
       }
     };
-    const finish = (r: FilterResult) => {
+    const finish = (r: { ok: true; stdout: string } | { ok: false; why: RunFailure }) => {
       if (done) return;
       done = true;
       clearTimeout(timer);
       signal?.removeEventListener('abort', onStop);
-      // Always kill the group, also after a clean exit: a child the filter
+      // Always kill the group, also after a clean exit: a child the program
       // forked may outlive it with stdout closed (Bastion 10ebe17a 2). The
       // group id can't be reused while any member lives; once none does, the
       // kill finds no group (Pax f7590420 4: reuse in that gap is
@@ -324,22 +349,21 @@ export function runFilter(filter: WakeFilter, input: FilterInput, signal?: Abort
       killGroup();
       resolve(r);
     };
-    const timer = setTimeout(() => finish({ ok: false, why: 'timeout' }), filter.timeoutMs);
+    const timer = setTimeout(() => finish({ ok: false, why: 'timeout' }), timeoutMs);
     const onStop = () => finish({ ok: false, why: 'stopped' });
     signal?.addEventListener('abort', onStop, { once: true });
     child.on('error', () => finish({ ok: false, why: 'spawn' }));
     child.stdout!.setEncoding('utf8');
     child.stdout!.on('data', (chunk: string) => {
       bytes += Buffer.byteLength(chunk);
-      if (bytes > MAX_FILTER_OUTPUT) return finish({ ok: false, why: 'output' });
+      if (bytes > maxBytes) return finish({ ok: false, why: 'output' });
       out += chunk;
     });
     let exitCode: number | null | undefined;
     const settle = () => {
       if (exitCode === undefined) return;
       if (exitCode !== 0) return finish({ ok: false, why: 'exit' });
-      const decisions = parseDecisions(out, keys);
-      finish(decisions ? { ok: true, decisions } : { ok: false, why: 'output' });
+      finish({ ok: true, stdout: out });
     };
     let ended = false;
     child.stdout!.on('end', () => {
@@ -349,12 +373,26 @@ export function runFilter(filter: WakeFilter, input: FilterInput, signal?: Abort
     child.on('exit', (code) => {
       exitCode = code;
       if (code !== 0 || ended) return settle();
-      // Normally stdout ends with the filter. A child it forked may hold
-      // stdout open: then parse what arrived after a short grace, and the
+      // Normally stdout ends with the program. A child it forked may hold
+      // stdout open: then use what arrived after a short grace, and the
       // group kill in finish() ends that child.
       setTimeout(settle, 1000);
     });
     child.stdin!.on('error', () => {});
-    child.stdin!.end(JSON.stringify(input) + '\n');
+    child.stdin!.end(stdin);
   });
+}
+
+/**
+ * Runs the filter once on a batch. Resolves with decisions, or with a failure
+ * class; never rejects. On timeout, oversized output or a stop, the filter's
+ * whole process group is killed (Bastion 10ebe17a 2).
+ */
+export async function runFilter(filter: WakeFilter, input: FilterInput, signal?: AbortSignal): Promise<FilterResult> {
+  if (input.events.length > MAX_FILTER_EVENTS) return { ok: false, why: 'too_large' };
+  const keys = new Set(input.events.map((e) => e.key));
+  const r = await runBounded(filter.argv, filter.timeoutMs, JSON.stringify(input) + '\n', signal);
+  if (!r.ok) return r;
+  const decisions = parseDecisions(r.stdout, keys);
+  return decisions ? { ok: true, decisions } : { ok: false, why: 'output' };
 }
