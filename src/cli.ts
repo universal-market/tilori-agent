@@ -5,6 +5,7 @@ import { existsSync, readdirSync, statSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { activityDir, promptSignal, readPushSignal, stallMinutes, statusLine, watchSignal } from './activity.ts';
 import { TiloriAgentClient, ToolRefused } from './client.ts';
+import { checkOut, writeAtomically } from './evidence.ts';
 import {
   buildMcpUrl,
   configPath,
@@ -21,6 +22,7 @@ import {
   loadConfig,
   resolveAgent,
   keyUrl,
+  marketKeyUrl,
   pushEnabled,
   sameEndpoint,
   buildMarketUrl,
@@ -192,6 +194,15 @@ Usage:
       exactly as Tilori sent them (absent if it didn't), and body. Read-only. Exits 0 on success, 2 when Tilori refuses
       (not found, hidden from this agent, no read scope), 1 on bad input, a
       transport error or no answer within 10 s.
+  tilori-agent market-evidence <execution-uuid> --out <path> [--agent <handle>]
+      Saves one Market execution as evidence for merge-check (UNI-1028):
+      get_execution with the contract block and completed Task outputs,
+      read as the agent from market_url in config.json, written to <path>
+      as Market sent it. Find the execution id with get_transaction. <path>
+      must be absolute, outside any git work tree, and not a symlink; the
+      file is replaced in one step (mode 0644). Read-only on Market. Exits
+      0 when written, 2 when Market refuses (its error code is printed), 1
+      on bad input, a refused --out, a transport error or no answer in 20 s.
   tilori-agent search-posts <commit-sha> [--json] [--agent <handle>]
       Lists the posts Tilori's search matches for a full 40-character
       commit SHA, at any depth, newest first, and prints one JSON object:
@@ -250,9 +261,10 @@ export function parseArgs(argv: string[]): Args {
     'home',
     'url-origin',
     'name',
+    'out',
   ]);
   let rest: string[] = [];
-  const takes: Record<string, number> = { 'get-post': 1, 'search-posts': 1, upload: 2, 'file-info': 1, setup: 1 };
+  const takes: Record<string, number> = { 'get-post': 1, 'search-posts': 1, 'market-evidence': 1, upload: 2, 'file-info': 1, setup: 1 };
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
     // `claude` passes everything after `--` to Claude Code unread.
@@ -292,6 +304,7 @@ export function parseArgs(argv: string[]): Args {
 
 const POST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const GET_POST_TIMEOUT_MS = 10_000;
+const MARKET_EVIDENCE_TIMEOUT_MS = 20_000;
 /** search-posts takes only a full commit SHA, so it can't become a general
  * search: merge-check finds the verdict posts for a head with it. */
 const COMMIT_SHA = /^[0-9a-f]{40}$/;
@@ -479,7 +492,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     if (argv[0] === 'stop-check') return 0;
     // get-post keeps 2 for "Tilori refused"; bad input is 1. For upload
     // and file-info, 2 means refused locally with nothing sent.
-    return argv[0] === 'get-post' || argv[0] === 'search-posts' ? 1 : 2;
+    return argv[0] === 'get-post' || argv[0] === 'search-posts' || argv[0] === 'market-evidence' ? 1 : 2;
   }
   if (args.cmd === 'stop-check' && !args.flags.has('help')) return runStopCheck(args);
   const controller = new AbortController();
@@ -684,6 +697,55 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         } finally {
           await client.close();
         }
+      }
+      case 'market-evidence': {
+        // UNI-1028 step 3, under Bastion's build conditions (8dd99af1): one
+        // read (get_execution), only to market_url from config.json, and the
+        // response body is the only thing written. Errors name the HTTP
+        // status or Market's error code, never the server's text.
+        const id = args.positionals[0] ?? '';
+        if (!POST_ID.test(id)) throw new Error('market-evidence needs a full execution UUID.');
+        if (args.flags.has('url') || args.flags.has('market-url'))
+          throw new Error('market-evidence takes no URL: it reads market_url from config.json.');
+        const out = str(args, 'out');
+        if (!out) throw new Error('market-evidence needs --out <path>.');
+        // Checked before the key is read or anything is sent.
+        const target = checkOut(out);
+        const config = loadConfig();
+        const agent = requireAgent(config, args);
+        const market = marketKeyUrl(config);
+        if (!market) throw new Error('No "market_url" in config.json; run tilori-agent init with --market-url.');
+        const client = new TiloriAgentClient({ url: market, apiKey: readKey(agent) });
+        const timeout = AbortSignal.timeout(MARKET_EVIDENCE_TIMEOUT_MS);
+        const abort = AbortSignal.any([signal, timeout]);
+        let record: any;
+        try {
+          record = await Promise.race([
+            client.getExecutionEvidence(id, { signal: abort, timeout: MARKET_EVIDENCE_TIMEOUT_MS }),
+            new Promise<never>((_, reject) =>
+              abort.addEventListener('abort', () => reject(new Error('market-evidence: no answer in time.')), { once: true }),
+            ),
+          ]);
+        } catch (cause) {
+          if (cause instanceof ToolRefused) {
+            log(`market-evidence: Market refused the read (${cause.code ?? 'no error code'}).`);
+            return 2;
+          }
+          if (abort.aborted) throw new Error('market-evidence: no answer in time.');
+          const status = (cause as { status?: unknown }).status;
+          throw new Error(
+            typeof status === 'number' ? `market-evidence: Market answered HTTP ${status}.` : 'market-evidence: could not read from Market.',
+          );
+        } finally {
+          await client.close();
+        }
+        if (!record || typeof record !== 'object' || record.id !== id)
+          throw new Error('market-evidence: Market returned a different execution.');
+        if (!record.contract || typeof record.contract !== 'object')
+          throw new Error('market-evidence: Market sent no contract block (a server from before UNI-1028 step B?); nothing written.');
+        writeAtomically(target, JSON.stringify(record) + '\n');
+        process.stdout.write(`${target}\n`);
+        return 0;
       }
       case 'search-posts': {
         // Read-only: merge-check finds the verdict posts for a head with it
