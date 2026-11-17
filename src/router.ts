@@ -118,8 +118,8 @@ export interface RouterAgentConfig {
   /** Usernames or user ids whose posts the filter can never hold or drop
    * (config.json trusted_owners). */
   trustedOwners?: string[];
-  /** trust_server applies: every account is trusted, so only the account's
-   * own agents' posts can be held or dropped. */
+  /** trust_server applies: every account is trusted, so the filter can hold
+   * or drop nothing (every post wakes). */
   trustAll?: boolean;
 }
 
@@ -1655,10 +1655,26 @@ export class Router {
     if (posts.length > MAX_FLOOR_READS) for (const id of posts) mustWake.add(id);
     else for (const id of posts) if (!(await this.#mayDemote(st, id, signal))) mustWake.add(id);
     for (const [k] of demoted) if (mustWake.has(byKey.get(k)!.ref.entity_id)) demoted.delete(k);
+    // Held posts are saved before any batch is acknowledged. A post that
+    // can't be held (digest full, or the save failed) wakes instead, so a
+    // restart can never lose a post the server already counts as delivered
+    // (Bastion 63687a0d 1).
+    const now = Date.now();
+    const items: DigestItem[] = [];
+    for (const [k, dec] of demoted) {
+      if (dec.action !== 'digest') continue;
+      const { ref, parent } = byKey.get(k)!;
+      const item = digestItem(ref, dec.reason, parent, now);
+      if (item && st.filter.digest.length + items.length < MAX_DIGEST_ITEMS) items.push(item);
+      else demoted.delete(k);
+    }
+    if (items.length && !this.#hold(st, items, now)) {
+      for (const [k, dec] of demoted) if (dec.action === 'digest') demoted.delete(k);
+      items.length = 0;
+    }
     day.woke += events.length - demoted.size;
     if (!demoted.size) return fresh;
-    const now = Date.now();
-    let held = 0;
+    const held = items.length;
     let dropped = 0;
     const out: Held[] = [];
     for (const d of fresh) {
@@ -1670,12 +1686,10 @@ export class Router {
         const key = evKey.get(e);
         const dec = key ? demoted.get(key) : undefined;
         if (!dec) return true;
-        const { ref, parent } = byKey.get(key!)!;
-        if (dec.action === 'digest' && this.#hold(st, ref, dec.reason, parent, now)) held++;
-        else if (dec.action === 'drop') {
-          this.#noteDropped(st, ref, dec.reason);
+        if (dec.action === 'drop') {
+          this.#noteDropped(st, byKey.get(key!)!.ref, dec.reason);
           dropped++;
-        } else return true;
+        }
         return false;
       });
       if (!kept.length) {
@@ -1688,7 +1702,6 @@ export class Router {
       if (pending.get(d.subscription_id)?.delivery_id === d.delivery_id) pending.set(d.subscription_id, trimmed);
       out.push(trimmed);
     }
-    if (held) this.#saveDigest(st);
     this.#log(`[${handle}] wake filter: ${held} held for the digest, ${dropped} dropped, ${events.length - held - dropped} to wake`);
     return out;
   }
@@ -1711,16 +1724,19 @@ export class Router {
     }
   }
 
-  /** Puts a post on the digest. False when it can't be held (then it wakes). */
-  #hold(st: AgentState, ref: EventRef, reason: FilterReason, parent: unknown, now: number): boolean {
-    const item = digestItem(ref, reason, parent, now);
-    if (!item) return false;
+  /** Adds posts to the digest and saves it. False, with the digest as it
+   * was, when it can't be saved: the caller then wakes for them. Without a
+   * run directory (tests, or none could be made) the digest lives in memory. */
+  #hold(st: AgentState, items: DigestItem[], now: number): boolean {
     const F = st.filter;
-    if (F.digest.length >= MAX_DIGEST_ITEMS) return false;
-    F.digest.push(item);
+    const next = [...F.digest, ...items];
+    if (this.#signalDir !== undefined && !saveDigest(this.#signalDir, st.cfg.handle, next)) {
+      this.#log(`[${st.cfg.handle}] could not save the wake filter digest; waking for ${items.length} post(s) instead of holding them`);
+      return false;
+    }
+    F.digest = next;
     if (!F.digestDue) F.digestDue = now + st.cfg.wakeFilter!.digestMs;
-    const day = this.#filterDay(st);
-    day.held++;
+    this.#filterDay(st).held += items.length;
     return true;
   }
 
@@ -1740,7 +1756,7 @@ export class Router {
   #saveDigest(st: AgentState): void {
     if (this.#signalDir === undefined) return;
     if (!saveDigest(this.#signalDir, st.cfg.handle, st.filter.digest))
-      this.#log(`[${st.cfg.handle}] could not save the wake filter digest; a restart before it goes out would lose it`);
+      this.#log(`[${st.cfg.handle}] could not save the wake filter digest after a wake; a restart may deliver those posts again`);
   }
 
   /** Adds the held digest and the dropped count to a wake about to go out.

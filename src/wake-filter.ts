@@ -123,7 +123,7 @@ export function wakeFilterSettings(
 export const FILTERABLE_KINDS: ReadonlySet<string> = new Set(['post.created', 'post.edited']);
 /** Most get_post author checks per filter run; past it, every demoted post wakes. */
 export const MAX_FLOOR_READS = 20;
-/** Most posts held for one digest; past it, the digest is due at once. */
+/** Most posts held for one digest; past it, a post the filter would hold wakes instead. */
 export const MAX_DIGEST_ITEMS = 200;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -316,7 +316,11 @@ export function runFilter(filter: WakeFilter, input: FilterInput, signal?: Abort
       done = true;
       clearTimeout(timer);
       signal?.removeEventListener('abort', onStop);
-      // Always kill the group: a child the filter forked may outlive it.
+      // Always kill the group, also after a clean exit: a child the filter
+      // forked may outlive it with stdout closed (Bastion 10ebe17a 2). The
+      // group id can't be reused while any member lives; once none does, the
+      // kill finds no group (Pax f7590420 4: reuse in that gap is
+      // theoretical, and leaving a forked `claude -p` running is not).
       killGroup();
       resolve(r);
     };
