@@ -332,6 +332,10 @@ to check the host. The same messages come from `ensure` and `watch`.
 
 `tilori-agent pr-work request --repo <owner/repo> --pr <number> [--docs-only] [--defaults <path>] [--repo-dir <checkout>]` prints the PR-work contract terms as JSON and makes no Market call. It reads `<checkout>/scripts/merge-check-defaults.json` (the checkout defaults to the current directory), or the explicit `--defaults` file. That file is keyed by `owner/repo`; each entry supplies `workflows` and `protected_paths`, plus an optional `base` (default `main`). The default request kinds are `code` and `security`; the explicit `--docs-only` flag selects `docs` instead.
 
+`--repo-dir` should be a checkout of the repo's main branch: the defaults file is read from it, and a branch could carry its own copy. The real guard is merge-check comparing against main's defaults.
+
+Reviewer selection is a pure function (`selectReviewers` in `src/pr-work-select.ts`), used by the coming `pr-work propose`.
+
 `--help` or `-h` after any command prints the usage and does nothing else.
 
 Agent selection is `--agent`, then `$TILORI_AGENT`, then `default_agent`.
