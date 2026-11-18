@@ -45,6 +45,9 @@ const KNOWN = new Set<string>(REVIEW_KINDS);
 
 const isKnownKind = (kind: string): kind is ReviewKind => KNOWN.has(kind);
 
+const hasIdentity = (value: Agent | undefined): value is Agent =>
+  !!value && typeof value.agent === 'string' && !!value.agent && typeof value.owner === 'string' && !!value.owner;
+
 /** Selects one reviewer per kind, in `kinds` order. Deterministic, never
  * mutates `input`, and makes no I/O. */
 export function selectReviewers(input: SelectInput): SelectResult {
@@ -58,9 +61,21 @@ export function selectReviewers(input: SelectInput): SelectResult {
   for (const kind of kinds) {
     if (!isKnownKind(kind)) return { ok: false, rule: 'not_listed', kind: String(kind), detail: `unknown kind "${String(kind)}"` };
 
+    const actors: [string, Agent | undefined][] = [
+      ['implementer', input.implementer],
+      ['client', input.client],
+      ['opener', input.opener],
+    ];
+    for (const [role, actor] of actors)
+      if ((role !== 'opener' || actor !== undefined) && !hasIdentity(actor))
+        return { ok: false, rule: 'not_listed', kind, detail: `${kind}: ${role} has an empty agent or owner` };
+
     const candidates = lists[kind];
     if (!Array.isArray(candidates) || candidates.length === 0)
       return { ok: false, rule: 'no_list', kind, detail: `no reviewer list for ${kind}` };
+    for (const candidate of candidates)
+      if (!hasIdentity(candidate))
+        return { ok: false, rule: 'not_listed', kind, detail: `${kind}: candidate has an empty agent or owner` };
 
     let pick: Agent | undefined;
     const handles: Record<(typeof RULE_ORDER)[number], string[]> = {
@@ -70,8 +85,11 @@ export function selectReviewers(input: SelectInput): SelectResult {
       same_owner: [],
     };
 
+    // Selection is greedy in `kinds` order: an earlier kind can take the only
+    // candidate a later kind needs. `pr-work listing` reports that refusal; the
+    // caller reorders the lists.
     for (const candidate of candidates) {
-      if (!candidate || candidate.agent === input.implementer.agent) {
+      if (candidate.agent === input.implementer.agent) {
         handles.implementer.push(candidate?.handle ?? '');
         continue;
       }

@@ -72,6 +72,37 @@ test('one agent cannot fill two kinds; the second kind picks the next candidate'
   }
 });
 
+test('refuses with implementer and a useful detail when only the implementer is listed', () => {
+  const r = selectReviewers(input({ kinds: ['code'], lists: { code: [implementer] } }));
+  expect(r).toEqual({
+    ok: false,
+    rule: 'implementer',
+    kind: 'code',
+    detail: 'code: implementer: impl-h; client: -; other_reviewer: -; same_owner: -',
+  });
+});
+
+test('refuses with client and a useful detail when only the client is listed', () => {
+  const r = selectReviewers(input({ kinds: ['code'], lists: { code: [client] } }));
+  expect(r).toEqual({
+    ok: false,
+    rule: 'client',
+    kind: 'code',
+    detail: 'code: implementer: -; client: client-h; other_reviewer: -; same_owner: -',
+  });
+});
+
+test('refuses with other_reviewer when an earlier kind took the only candidate', () => {
+  const shared = agent('shared', 'shared-h');
+  const r = selectReviewers(input({ lists: { code: [shared], security: [shared] } }));
+  expect(r).toEqual({
+    ok: false,
+    rule: 'other_reviewer',
+    kind: 'security',
+    detail: 'security: implementer: -; client: -; other_reviewer: shared-h; same_owner: -',
+  });
+});
+
 test('refuses with same_owner when every candidate shares the implementer owner', () => {
   const r = selectReviewers(
     input({
@@ -79,13 +110,12 @@ test('refuses with same_owner when every candidate shares the implementer owner'
       lists: { code: [agent('a', 'alpha-h', 'acct-impl'), agent('b', 'beta-h', 'acct-impl')] },
     }),
   );
-  expect(r.ok).toBe(false);
-  if (!r.ok) {
-    expect(r.rule).toBe('same_owner');
-    expect(r.kind).toBe('code');
-    expect(r.detail).toContain('alpha-h');
-    expect(r.detail).toContain('beta-h');
-  }
+  expect(r).toEqual({
+    ok: false,
+    rule: 'same_owner',
+    kind: 'code',
+    detail: 'code: implementer: -; client: -; other_reviewer: -; same_owner: alpha-h, beta-h',
+  });
 });
 
 test('the refusal names the rule that excluded the most candidates', () => {
@@ -103,6 +133,41 @@ test('the refusal names the rule that excluded the most candidates', () => {
   );
   expect(r.ok).toBe(false);
   if (!r.ok) expect(r.rule).toBe('same_owner');
+});
+
+test('equal exclusion counts name implementer first', () => {
+  const shared = agent('shared', 'shared-h');
+  const sameOwner = agent('owned', 'owned-h', 'acct-impl');
+  const r = selectReviewers(
+    input({ lists: { code: [shared], security: [implementer, client, shared, sameOwner] } }),
+  );
+  expect(r).toEqual({
+    ok: false,
+    rule: 'implementer',
+    kind: 'security',
+    detail: 'security: implementer: impl-h; client: client-h; other_reviewer: shared-h; same_owner: owned-h',
+  });
+});
+
+test('empty agent ids or owners fail closed for every actor and candidate', () => {
+  for (const field of ['agent', 'owner'] as const) {
+    const invalid = (base: Agent): Agent => ({ ...base, [field]: '' });
+    const cases: { role: string; over: Partial<Parameters<typeof selectReviewers>[0]> }[] = [
+      { role: 'implementer', over: { implementer: invalid(implementer) } },
+      { role: 'client', over: { client: invalid(client) } },
+      { role: 'opener', over: { opener: invalid(agent('opener', 'opener-h')) } },
+      { role: 'candidate', over: { lists: { code: [agent('valid', 'valid-h'), invalid(agent('bad', 'bad-h'))] } } },
+    ];
+    for (const { role, over } of cases) {
+      const r = selectReviewers(input({ kinds: ['code'], lists: { code: [agent('c1', 'code-one')] }, ...over }));
+      expect(r).toEqual({
+        ok: false,
+        rule: 'not_listed',
+        kind: 'code',
+        detail: `code: ${role} has an empty agent or owner`,
+      });
+    }
+  }
 });
 
 test('missing or empty list refuses with no_list', () => {
