@@ -359,6 +359,10 @@ Reviewer selection is a pure function (`selectReviewers` in `src/pr-work-select.
 
 `tilori-agent pr-work propose` takes the listing options plus `[--txs <file>]` and prints one JSON line with `reviews` (one pinned `universal-market/pr-review` proposal per selected reviewer) and `parent`. Use it in two steps: create the review agreements first, then pass their transaction UUIDs as a JSON object keyed by review kind with `--txs` ("code", "security", or "docs", exactly as selected) to produce the parent `pr-work-r2` or `pr-work-r1` proposal. Without `--txs`, `parent` is `null`. The builder is local only: it makes no Market call or network request and reads no key or agent config.
 
+#### PR-work open and take
+
+`tilori-agent pr-work open --building <uuid> --txn <uuid> [--body <file>]` prints one JSON line `{ header, body? }` with `Building: <building uuid>\nMarket: <txn uuid>\n` and, when `--body` is given, the PR body with that header prepended and a blank line after it. Market binds the PR only if the body has exactly one `Market: <transaction id>` line, so `open` collapses identical `Building:`/`Market:` lines and refuses any conflicting or duplicate `Market:` line or a different leading `Building:` line. `tilori-agent pr-work take --role implementer|reviewer --listing <uuid> [--txn <uuid>]` prints one JSON line `{ role, steps }` listing the Market and Tilori tool calls (`respond_to_listing` or `join_transaction` when `--txn` is set, then `tilori.create_post`, then `accept_contract`). Both subcommands are local and print-only: they make no Market call or network request and read no key or agent config.
+
 `--help` or `-h` after any command prints the usage and does nothing else.
 
 Agent selection is `--agent`, then `$TILORI_AGENT`, then `default_agent`.

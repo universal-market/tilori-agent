@@ -385,6 +385,24 @@ test('propose refuses missing, extra, non-UUID and non-object txs entries', asyn
   }
 });
 
+test('propose refuses one transaction UUID used for two kinds, in any letter case', async () => {
+  const r = await propose('--txs', jsonFile('dup-txs.json', { code: CODE_TX, security: CODE_TX.toUpperCase() }));
+  expect(r.exitCode).toBe(1);
+  expect(r.stdout).toBe('');
+  expect(r.stderr).toContain('pr-work propose: txs entry for "security" repeats another kind\'s transaction.');
+});
+
+test('propose refuses --txs given without a file path', async () => {
+  const bare = await propose('--txs');
+  expect(bare.exitCode).toBe(2);
+  expect(bare.stdout).toBe('');
+  expect(bare.stderr).toContain('--txs needs a value.');
+  const empty = await propose('--txs=');
+  expect(empty.exitCode).toBe(1);
+  expect(empty.stdout).toBe('');
+  expect(empty.stderr).toContain('pr-work propose: needs a file path after --txs.');
+});
+
 test('bad propose txs JSON is refused without printing its contents', async () => {
   const path = join(root, 'bad-txs.json');
   writeFileSync(path, '{ secret-txs-file-contents');

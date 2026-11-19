@@ -6,6 +6,7 @@ import { isAbsolute, join } from 'node:path';
 import { activityDir, promptSignal, readPushSignal, stallMinutes, statusLine, watchSignal } from './activity.ts';
 import { TiloriAgentClient, ToolRefused } from './client.ts';
 import { checkOut, writeAtomically } from './evidence.ts';
+import { buildPrWorkOpen, buildPrWorkTake } from './pr-work-open.ts';
 import { buildPrWorkListing, buildPrWorkProposal, parseAgents } from './pr-work.ts';
 import {
   buildMcpUrl,
@@ -205,6 +206,14 @@ Usage:
       selected reviewer and a parent proposal, or null until --txs supplies the
       review transaction UUIDs by kind. Uses the same local files and reviewer
       selection as listing. Makes no Market call and reads no key or agent config.
+  tilori-agent pr-work open --building <uuid> --txn <uuid> [--body <file>]
+      Prints one JSON line { header, body? } with the Building: and Market:
+      header lines for a PR body, optionally prepended to --body <file>.
+      Makes no Market call and reads no key or agent config.
+  tilori-agent pr-work take --role implementer|reviewer --listing <uuid> [--txn <uuid>]
+      Prints one JSON line { role, steps } naming the Market and Tilori tool
+      calls for taking pr-work. Makes no Market call and reads no key or
+      agent config.
   tilori-agent market-evidence <execution-uuid> --out <path> [--agent <handle>]
       Saves one Market execution as evidence for merge-check (UNI-1028):
       get_execution with the contract block and completed Task outputs,
@@ -280,6 +289,11 @@ export function parseArgs(argv: string[]): Args {
     'agents',
     'acceptance',
     'txs',
+    'building',
+    'txn',
+    'body',
+    'role',
+    'listing',
   ]);
   let rest: string[] = [];
   const takes: Record<string, number> = { 'get-post': 1, 'search-posts': 1, 'market-evidence': 1, 'pr-work': 1, upload: 2, 'file-info': 1, setup: 1 };
@@ -320,7 +334,7 @@ export function parseArgs(argv: string[]): Args {
   // --out names a file to write; only market-evidence writes one, so any
   // other command refuses it rather than ignoring it (Wren on #140).
   if (flags.has('out') && argv[0] !== 'market-evidence') throw new Error('--out is only for market-evidence.');
-  for (const name of ['defaults', 'repo-dir', 'repo', 'pr', 'docs-only', 'agents', 'acceptance', 'txs'])
+  for (const name of ['defaults', 'repo-dir', 'repo', 'pr', 'docs-only', 'agents', 'acceptance', 'txs', 'building', 'txn', 'body', 'role', 'listing'])
     if (flags.has(name) && argv[0] !== 'pr-work') throw new Error(`--${name} is only for pr-work.`);
   return { cmd: argv[0] ?? 'help', flags, positionals, rest };
 }
@@ -723,9 +737,31 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       }
       case 'pr-work': {
         const subcommand = args.positionals[0];
+        if (subcommand === 'open') {
+          const allowed = new Set(['building', 'txn', 'body']);
+          for (const name of args.flags.keys())
+            if (!allowed.has(name)) throw new Error(`pr-work open: does not take --${name}.`);
+          const building = str(args, 'building');
+          const txn = str(args, 'txn');
+          if (!building) throw new Error('pr-work open: needs --building <uuid>.');
+          if (!txn) throw new Error('pr-work open: needs --txn <uuid>.');
+          process.stdout.write(JSON.stringify(buildPrWorkOpen({ building, txn, bodyPath: str(args, 'body') })) + '\n');
+          return 0;
+        }
+        if (subcommand === 'take') {
+          const allowed = new Set(['role', 'listing', 'txn']);
+          for (const name of args.flags.keys())
+            if (!allowed.has(name)) throw new Error(`pr-work take: does not take --${name}.`);
+          const role = str(args, 'role');
+          const listing = str(args, 'listing');
+          if (!role) throw new Error('pr-work take: needs --role implementer|reviewer.');
+          if (!listing) throw new Error('pr-work take: needs --listing <uuid>.');
+          process.stdout.write(JSON.stringify(buildPrWorkTake({ role, listing, txn: str(args, 'txn') })) + '\n');
+          return 0;
+        }
         if (subcommand !== 'listing' && subcommand !== 'propose')
           throw new Error(
-            'pr-work needs the listing or propose subcommand: tilori-agent pr-work listing|propose --repo <owner/repo> --pr <number> --agents <file>.',
+            'pr-work needs the listing or propose subcommand (or open, take): tilori-agent pr-work listing|propose|open|take ...',
           );
         const fail = (message: string) => new Error(`pr-work ${subcommand}${subcommand === 'propose' ? ':' : ''} ${message}`);
         const allowed = new Set(['repo', 'pr', 'agents', 'docs-only', 'acceptance', 'defaults', 'repo-dir']);
@@ -764,6 +800,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
           return 0;
         }
         const txsPath = str(args, 'txs');
+        if (args.flags.has('txs') && !txsPath) throw fail('needs a file path after --txs.');
         const txs = txsPath ? (readJson(txsPath, 'txs') as Record<string, string>) : undefined;
         process.stdout.write(JSON.stringify(buildPrWorkProposal({ ...options, txs })) + '\n');
         return 0;
