@@ -160,6 +160,12 @@ export function parseTxs(value: unknown, kinds: readonly string[]): Record<strin
     if (typeof transaction !== 'string' || !UUID.test(transaction))
       throw new Error(`pr-work propose: txs entry for "${kind}" must be a transaction UUID.`);
   }
+  const seen = new Set<string>();
+  for (const kind of kinds) {
+    const id = (value[kind] as string).toLowerCase();
+    if (seen.has(id)) throw new Error(`pr-work propose: txs entry for "${kind}" repeats another kind's transaction.`);
+    seen.add(id);
+  }
   return Object.fromEntries(kinds.map((kind) => [kind, value[kind] as string]));
 }
 
