@@ -6,7 +6,7 @@ import { isAbsolute, join } from 'node:path';
 import { activityDir, promptSignal, readPushSignal, stallMinutes, statusLine, watchSignal } from './activity.ts';
 import { TiloriAgentClient, ToolRefused } from './client.ts';
 import { checkOut, writeAtomically } from './evidence.ts';
-import { buildPrWorkListing, parseAgents } from './pr-work.ts';
+import { buildPrWorkListing, buildPrWorkProposal, parseAgents } from './pr-work.ts';
 import {
   buildMcpUrl,
   configPath,
@@ -200,6 +200,11 @@ Usage:
       reviewers. Reads the repository's merge-check defaults and the JSON agents
       file locally. Default review kinds are code and security; --docs-only
       selects docs. Makes no Market call and reads no key or agent config.
+  tilori-agent pr-work propose --repo <owner/repo> --pr <number> --agents <file> [--txs <file>] [--docs-only] [--acceptance <text>] [--defaults <path>] [--repo-dir <checkout>]
+      Prints one JSON line with a universal-market/pr-review proposal for each
+      selected reviewer and a parent proposal, or null until --txs supplies the
+      review transaction UUIDs by kind. Uses the same local files and reviewer
+      selection as listing. Makes no Market call and reads no key or agent config.
   tilori-agent market-evidence <execution-uuid> --out <path> [--agent <handle>]
       Saves one Market execution as evidence for merge-check (UNI-1028):
       get_execution with the contract block and completed Task outputs,
@@ -274,6 +279,7 @@ export function parseArgs(argv: string[]): Args {
     'pr',
     'agents',
     'acceptance',
+    'txs',
   ]);
   let rest: string[] = [];
   const takes: Record<string, number> = { 'get-post': 1, 'search-posts': 1, 'market-evidence': 1, 'pr-work': 1, upload: 2, 'file-info': 1, setup: 1 };
@@ -314,7 +320,7 @@ export function parseArgs(argv: string[]): Args {
   // --out names a file to write; only market-evidence writes one, so any
   // other command refuses it rather than ignoring it (Wren on #140).
   if (flags.has('out') && argv[0] !== 'market-evidence') throw new Error('--out is only for market-evidence.');
-  for (const name of ['defaults', 'repo-dir', 'repo', 'pr', 'docs-only', 'agents', 'acceptance'])
+  for (const name of ['defaults', 'repo-dir', 'repo', 'pr', 'docs-only', 'agents', 'acceptance', 'txs'])
     if (flags.has(name) && argv[0] !== 'pr-work') throw new Error(`--${name} is only for pr-work.`);
   return { cmd: argv[0] ?? 'help', flags, positionals, rest };
 }
@@ -716,39 +722,50 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         }
       }
       case 'pr-work': {
-        if (args.positionals[0] !== 'listing')
-          throw new Error('pr-work needs the listing subcommand: tilori-agent pr-work listing --repo <owner/repo> --pr <number> --agents <file>.');
+        const subcommand = args.positionals[0];
+        if (subcommand !== 'listing' && subcommand !== 'propose')
+          throw new Error(
+            'pr-work needs the listing or propose subcommand: tilori-agent pr-work listing|propose --repo <owner/repo> --pr <number> --agents <file>.',
+          );
+        const fail = (message: string) => new Error(`pr-work ${subcommand}${subcommand === 'propose' ? ':' : ''} ${message}`);
         const allowed = new Set(['repo', 'pr', 'agents', 'docs-only', 'acceptance', 'defaults', 'repo-dir']);
-        for (const name of args.flags.keys())
-          if (!allowed.has(name)) throw new Error(`pr-work listing does not take --${name}.`);
+        if (subcommand === 'propose') allowed.add('txs');
+        for (const name of args.flags.keys()) if (!allowed.has(name)) throw fail(`does not take --${name}.`);
         const repo = str(args, 'repo');
         const pr = str(args, 'pr');
         const agentsPath = str(args, 'agents');
-        if (!repo) throw new Error('pr-work listing needs --repo <owner/repo>.');
-        if (!pr) throw new Error('pr-work listing needs --pr <number>.');
-        if (!agentsPath) throw new Error('pr-work listing needs --agents <file>.');
-        let agentsText: string;
-        try {
-          agentsText = readFileSync(agentsPath, 'utf8');
-        } catch {
-          throw new Error(`pr-work listing: could not read agents file ${agentsPath}.`);
-        }
-        let agentsValue: unknown;
-        try {
-          agentsValue = JSON.parse(agentsText);
-        } catch {
-          throw new Error(`pr-work listing: agents file is not valid JSON: ${agentsPath}.`);
-        }
-        const result = buildPrWorkListing({
+        if (!repo) throw fail('needs --repo <owner/repo>.');
+        if (!pr) throw fail('needs --pr <number>.');
+        if (!agentsPath) throw fail('needs --agents <file>.');
+        const readJson = (path: string, name: string): unknown => {
+          let text: string;
+          try {
+            text = readFileSync(path, 'utf8');
+          } catch {
+            throw new Error(`pr-work ${subcommand}: could not read ${name} file ${path}.`);
+          }
+          try {
+            return JSON.parse(text);
+          } catch {
+            throw new Error(`pr-work ${subcommand}: ${name} file is not valid JSON: ${path}.`);
+          }
+        };
+        const options = {
           repo,
           pr,
           docsOnly: args.flags.has('docs-only'),
           defaultsPath: str(args, 'defaults'),
           repoDir: str(args, 'repo-dir'),
-          agents: parseAgents(agentsValue),
+          agents: parseAgents(readJson(agentsPath, 'agents')),
           acceptance: str(args, 'acceptance'),
-        });
-        process.stdout.write(JSON.stringify(result) + '\n');
+        };
+        if (subcommand === 'listing') {
+          process.stdout.write(JSON.stringify(buildPrWorkListing(options)) + '\n');
+          return 0;
+        }
+        const txsPath = str(args, 'txs');
+        const txs = txsPath ? (readJson(txsPath, 'txs') as Record<string, string>) : undefined;
+        process.stdout.write(JSON.stringify(buildPrWorkProposal({ ...options, txs })) + '\n');
         return 0;
       }
       case 'market-evidence': {

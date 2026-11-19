@@ -355,6 +355,10 @@ The caller adds `idempotency_key` and passes `listing` to Market's `create_listi
 
 Reviewer selection is a pure function (`selectReviewers` in `src/pr-work-select.ts`), used by `pr-work listing`.
 
+#### PR-work proposals
+
+`tilori-agent pr-work propose` takes the listing options plus `[--txs <file>]` and prints one JSON line with `reviews` (one pinned `universal-market/pr-review` proposal per selected reviewer) and `parent`. Use it in two steps: create the review agreements first, then pass their transaction UUIDs as a JSON object keyed by review kind with `--txs` ("code", "security", or "docs", exactly as selected) to produce the parent `pr-work-r2` or `pr-work-r1` proposal. Without `--txs`, `parent` is `null`. The builder is local only: it makes no Market call or network request and reads no key or agent config.
+
 `--help` or `-h` after any command prints the usage and does nothing else.
 
 Agent selection is `--agent`, then `$TILORI_AGENT`, then `default_agent`.

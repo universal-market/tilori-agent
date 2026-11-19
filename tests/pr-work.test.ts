@@ -56,6 +56,9 @@ const run = async (...args: string[]) => {
 const listing = (...extra: string[]) =>
   run('listing', '--repo', REPO, '--pr', '123', '--agents', agentsPath, '--repo-dir', checkout, ...extra);
 
+const propose = (...extra: string[]) =>
+  run('propose', '--repo', REPO, '--pr', '123', '--agents', agentsPath, '--repo-dir', checkout, ...extra);
+
 const expectedDefault = {
   listing: {
     kind: 'request',
@@ -81,6 +84,33 @@ const expectedDefault = {
     { kind: 'code', agent: 'code-agent', handle: 'code-h' },
     { kind: 'security', agent: 'security-agent', handle: 'security-h' },
   ],
+};
+
+const CODE_TX = '11111111-1111-4111-8111-111111111111';
+const SECURITY_TX = '22222222-2222-4222-8222-222222222222';
+const DOCS_TX = '33333333-3333-4333-8333-333333333333';
+
+const reviewProposal = (kind: string, agentId: string, handle: string) => ({
+  kind,
+  reviewer: { agent: agentId, handle },
+  proposal: {
+    contract_template_id: 'universal-market/pr-review',
+    contract_template_version: '1.0.0',
+    contract_inputs: {
+      client: { principal: 'um:agent:client-agent' },
+      implementer: { principal: 'um:agent:impl-agent' },
+      reviewer: { principal: `um:agent:${agentId}` },
+      repo: REPO,
+      kind,
+      acceptance: DEFAULT_ACCEPTANCE,
+      publish_terms: true,
+    },
+  },
+});
+
+const expectedDefaultProposal = {
+  reviews: [reviewProposal('code', 'code-agent', 'code-h'), reviewProposal('security', 'security-agent', 'security-h')],
+  parent: null,
 };
 
 test('default kinds produce the exact r2 listing payload and reviewers on one JSON line', async () => {
@@ -205,7 +235,7 @@ test('missing --agents is refused and request is no longer a subcommand', async 
   const removed = await run('request', '--repo', REPO, '--pr', '123', '--agents', agentsPath, '--repo-dir', checkout);
   expect(removed.exitCode).toBe(1);
   expect(removed.stdout).toBe('');
-  expect(removed.stderr).toContain('pr-work needs the listing subcommand');
+  expect(removed.stderr).toContain('pr-work needs the listing or propose subcommand');
 });
 
 test('unknown extra keys in the agents file are tolerated without entering the output', async () => {
@@ -271,6 +301,109 @@ test('unknown defaults keys are tolerated and an explicit defaults path and base
   });
 });
 
+test('propose emits both default review proposals and no parent or review_tx inputs without --txs', async () => {
+  const r = await propose();
+  expect(r.exitCode).toBe(0);
+  expect(r.stderr).toBe('');
+  expect(r.stdout).toBe(JSON.stringify(expectedDefaultProposal) + '\n');
+  expect(JSON.parse(r.stdout)).toEqual(expectedDefaultProposal);
+  expect(r.stdout).not.toContain('review_tx');
+});
+
+test('propose with --txs emits the exact parent proposal in kinds order', async () => {
+  const path = jsonFile('review-txs.json', { security: SECURITY_TX, code: CODE_TX });
+  const r = await propose('--txs', path);
+  expect(r.exitCode).toBe(0);
+  expect(r.stderr).toBe('');
+  expect(JSON.parse(r.stdout)).toEqual({
+    ...expectedDefaultProposal,
+    parent: {
+      contract_template_id: 'universal-market/pr-work-r2',
+      contract_template_version: '2.0.0',
+      contract_inputs: {
+        ...expectedDefault.listing.contract_inputs,
+        implementer: { principal: 'um:agent:impl-agent' },
+        review_tx_1: { transaction: CODE_TX },
+        review_tx_2: { transaction: SECURITY_TX },
+      },
+    },
+  });
+});
+
+test('docs-only propose emits one review and the r1 parent', async () => {
+  const path = jsonFile('docs-tx.json', { docs: DOCS_TX });
+  const r = await propose('--docs-only', '--txs', path);
+  expect(r.exitCode).toBe(0);
+  expect(r.stderr).toBe('');
+  expect(JSON.parse(r.stdout)).toEqual({
+    reviews: [reviewProposal('docs', 'docs-agent', 'docs-h')],
+    parent: {
+      contract_template_id: 'universal-market/pr-work-r1',
+      contract_template_version: '2.0.0',
+      contract_inputs: {
+        client: { principal: 'um:agent:client-agent' },
+        repo: REPO,
+        acceptance: DEFAULT_ACCEPTANCE,
+        base: 'main',
+        kind_1: 'docs',
+        required_ci: ['CI', 'Security'],
+        confirm_paths: ['.github/workflows/**', 'src/**', 'docs/**'],
+        objections: 'block',
+        publish_terms: true,
+        review_owner: 'client',
+        implementer: { principal: 'um:agent:impl-agent' },
+        review_tx_1: { transaction: DOCS_TX },
+      },
+    },
+  });
+});
+
+test('propose refuses missing, extra, non-UUID and non-object txs entries', async () => {
+  const cases = [
+    {
+      value: { code: CODE_TX },
+      message: 'pr-work propose: txs is missing the "security" transaction.',
+    },
+    {
+      value: { code: CODE_TX, security: SECURITY_TX, docs: DOCS_TX },
+      message: 'pr-work propose: txs has an unexpected "docs" entry.',
+    },
+    {
+      value: { code: CODE_TX, security: 'not-a-uuid' },
+      message: 'pr-work propose: txs entry for "security" must be a transaction UUID.',
+    },
+    {
+      value: [CODE_TX, SECURITY_TX],
+      message: 'pr-work propose: txs must be a JSON object.',
+    },
+  ];
+  for (const { value, message } of cases) {
+    const r = await propose('--txs', jsonFile('bad-txs.json', value));
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toBe('');
+    expect(r.stderr).toContain(message);
+  }
+});
+
+test('bad propose txs JSON is refused without printing its contents', async () => {
+  const path = join(root, 'bad-txs.json');
+  writeFileSync(path, '{ secret-txs-file-contents');
+  const r = await propose('--txs', path);
+  expect(r.exitCode).toBe(1);
+  expect(r.stdout).toBe('');
+  expect(r.stderr).toContain(`pr-work propose: txs file is not valid JSON: ${path}.`);
+  expect(r.stderr).not.toContain('secret-txs-file-contents');
+});
+
+test('a reviewer exclusion propagates through propose', async () => {
+  const excluded = structuredClone(agents);
+  excluded.lists.security = [excluded.implementer];
+  const r = await propose('--agents', jsonFile('excluded-propose-agents.json', excluded));
+  expect(r.exitCode).toBe(1);
+  expect(r.stdout).toBe('');
+  expect(r.stderr).toContain('pr-work listing: no reviewer for security: implementer: security: implementer: impl-h');
+});
+
 test('a reviewer exclusion becomes a listing refusal', async () => {
   const excluded = structuredClone(agents);
   excluded.lists.security = [excluded.implementer];
@@ -312,6 +445,9 @@ test('pr-work flags are refused on other commands', () => {
       '--repo-dir=checkout',
     ]),
   ).not.toThrow();
-  for (const flag of ['defaults', 'repo-dir', 'repo', 'pr', 'docs-only', 'agents', 'acceptance'])
+  expect(() =>
+    parseArgs(['pr-work', 'propose', '--repo=acme/widget', '--pr=1', '--agents=agents.json', '--txs=txs.json']),
+  ).not.toThrow();
+  for (const flag of ['defaults', 'repo-dir', 'repo', 'pr', 'docs-only', 'agents', 'acceptance', 'txs'])
     expect(() => parseArgs(['status', `--${flag}=value`])).toThrow(`--${flag} is only for pr-work.`);
 });
