@@ -5,6 +5,7 @@ import { selectReviewers, type Agent, type ReviewKind } from './pr-work-select.t
 const WORKFLOWS_GLOB = '.github/workflows/**';
 const REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const DEFAULT_ACCEPTANCE = 'All required CI passes at the reviewed head and every linked review approves it.';
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export interface PrWorkAgents {
   client: Agent;
@@ -21,6 +22,10 @@ export interface PrWorkListingOptions {
   repoDir?: string;
   agents: PrWorkAgents;
   acceptance?: string;
+}
+
+export interface PrWorkProposalOptions extends PrWorkListingOptions {
+  txs?: Record<string, string>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -139,5 +144,63 @@ export function buildPrWorkListing(options: PrWorkListingOptions) {
       },
     },
     reviewers: selected.picks.map((pick) => ({ kind: pick.kind, agent: pick.agent.agent, handle: pick.agent.handle })),
+  };
+}
+
+/** Validates exactly one transaction UUID per selected review kind. */
+export function parseTxs(value: unknown, kinds: readonly string[]): Record<string, string> {
+  if (!isRecord(value)) throw new Error('pr-work propose: txs must be a JSON object.');
+  const expected = new Set(kinds);
+  for (const kind of kinds)
+    if (!Object.hasOwn(value, kind)) throw new Error(`pr-work propose: txs is missing the "${kind}" transaction.`);
+  for (const kind of Object.keys(value))
+    if (!expected.has(kind)) throw new Error(`pr-work propose: txs has an unexpected "${kind}" entry.`);
+  for (const kind of kinds) {
+    const transaction = value[kind];
+    if (typeof transaction !== 'string' || !UUID.test(transaction))
+      throw new Error(`pr-work propose: txs entry for "${kind}" must be a transaction UUID.`);
+  }
+  return Object.fromEntries(kinds.map((kind) => [kind, value[kind] as string]));
+}
+
+/** Builds review agreement proposals and, once their transactions exist, the
+ * parent pr-work proposal locally. Runtime fields are deliberately left out. */
+export function buildPrWorkProposal(options: PrWorkProposalOptions) {
+  const { listing, reviewers } = buildPrWorkListing(options);
+  const { client, implementer } = options.agents;
+  const principal = (agent: string) => ({ principal: `um:agent:${agent}` });
+  const reviews = reviewers.map(({ kind, agent, handle }) => ({
+    kind,
+    reviewer: { agent, handle },
+    proposal: {
+      contract_template_id: 'universal-market/pr-review',
+      contract_template_version: '1.0.0',
+      contract_inputs: {
+        client: principal(client.agent),
+        implementer: principal(implementer.agent),
+        reviewer: principal(agent),
+        repo: listing.contract_inputs.repo,
+        kind,
+        acceptance: listing.contract_inputs.acceptance,
+        publish_terms: true,
+      },
+    },
+  }));
+  if (options.txs === undefined) return { reviews, parent: null };
+
+  const kinds = reviewers.map((reviewer) => reviewer.kind);
+  const txs = parseTxs(options.txs, kinds);
+  const reviewTransactions = Object.fromEntries(kinds.map((kind, index) => [`review_tx_${index + 1}`, { transaction: txs[kind] }]));
+  return {
+    reviews,
+    parent: {
+      contract_template_id: listing.contract_template_id,
+      contract_template_version: '2.0.0',
+      contract_inputs: {
+        ...listing.contract_inputs,
+        implementer: principal(implementer.agent),
+        ...reviewTransactions,
+      },
+    },
   };
 }
