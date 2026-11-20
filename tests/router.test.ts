@@ -187,6 +187,21 @@ describe('router', () => {
     await done;
   });
 
+  test('a DM is named in the log (kind and id only) while held and when delivered (UNI-1106)', async () => {
+    const { fake, router, ac, done, logs } = setup({ posts: true });
+    await until(() => fake.subs.length === 3);
+    const msg = dm();
+    fake.push('direct_messages', [msg]);
+    await until(() => logs.some((l) => l.includes('no injector registered') && l.includes('[dm dm.message ')));
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => inj.wakes.length === 1);
+    await until(() => logs.some((l) => l.includes('delivered wake to') && l.includes('[dm dm.message ')));
+    expect(logs.join('\n')).not.toContain('body');
+    ac.abort();
+    await done;
+  });
+
   test('mentions and DMs wake past the cap on their own allowance; broad traffic stays held', async () => {
     let t = 1_000_000;
     const { fake, router, ac, done } = setup({ wakesPerHour: 1, posts: true, now: () => t });

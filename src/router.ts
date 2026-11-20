@@ -400,6 +400,14 @@ const newFilterDay = (): FilterDay => ({ day: new Date().toISOString().slice(0, 
 const DIRECT_SCOPES = new Set(['inbox', 'mentions', 'direct_messages']);
 const isDirectKind = (kind: string) => kind === 'mention' || kind.startsWith('dm.');
 
+/** UNI-1106: DM events in a set of batches as " [dm <kind> <entity id>, ...]", ids only, so a held or delivered DM shows in the log. */
+function dmNote(ds: { events: { kind: string; entity_id: string }[] }[]): string {
+  const dms = ds.flatMap((d) => d.events).filter((e) => e.kind.startsWith('dm.'));
+  if (!dms.length) return '';
+  const shown = dms.slice(0, 5).map((e) => `${e.kind} ${e.entity_id}`).join(', ');
+  return ` [dm ${shown}${dms.length > 5 ? `, +${dms.length - 5} more` : ''}]`;
+}
+
 function directLimiter(perHour: number | undefined, now: () => number): WakeLimiter | null {
   const n = perHour ?? DEFAULT_DIRECT_WAKES_PER_HOUR;
   if (n === 0) return null;
@@ -1994,7 +2002,7 @@ export class Router {
       }
       const injector = st.injectors.at(-1);
       if (!injector) {
-        notice(`holding ${count} event(s): no injector registered for this agent yet`);
+        notice(`holding ${count} event(s): no injector registered for this agent yet${dmNote(fresh)}`);
         return this.#retryMs * 5;
       }
       // Over the cap, direct batches (inbox, mentions, DMs, Market) still
@@ -2014,7 +2022,7 @@ export class Router {
         if (directWait > 0) {
           st.stats.delayed = count;
           notice(
-            `wake cap reached (${st.limiter.perHour}/hour); delaying ${count} event(s) for ${Math.ceil(Math.min(capWait, directWait) / 1000)} s`,
+            `wake cap reached (${st.limiter.perHour}/hour); delaying ${count} event(s) for ${Math.ceil(Math.min(capWait, directWait) / 1000)} s${dmNote(fresh)}`,
           );
           return Math.min(capWait, directWait, 60_000);
         }
@@ -2056,18 +2064,20 @@ export class Router {
       const result = await settle(injector.deliver(wake));
       if (result === 'gone') {
         this.#drop(st, injector);
-        notice(`injector ${injector.kind} gone; ${st.injectors.length} left; holding ${count} event(s)`);
+        notice(`injector ${injector.kind} gone; ${st.injectors.length} left; holding ${count} event(s)${dmNote(send)}`);
         return st.injectors.length ? 1 : this.#retryMs;
       }
       if (result !== 'accepted') {
         st.busy++;
         const backoff = Math.min(60_000, this.#retryMs * 2 ** (st.busy - 1));
         st.retryAt = Date.now() + backoff;
-        notice(`injector ${injector.kind} busy (x${st.busy}); holding ${count} event(s), retry in ${backoff} ms`);
+        notice(`injector ${injector.kind} busy (x${st.busy}); holding ${count} event(s), retry in ${backoff} ms${dmNote(send)}`);
         return backoff;
       }
       st.busy = 0;
       st.retryAt = 0;
+      const delivered = dmNote(send);
+      if (delivered) this.#log(`[${handle}] delivered wake to ${injector.kind}${delivered}`);
       if (send.some((d) => d.lane === 'tilori' && !st.directSubs.has(d.subscription_id))) st.plainWokeAt = Date.now();
       this.#signal(handle, 'woke');
       limiter.record();
