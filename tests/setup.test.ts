@@ -49,6 +49,8 @@ const state = {
   status: 'pending-then-claimed' as StatusMode,
   pendingPolls: 2,
   claimedHandle: 'wren',
+  /** The origin the fake's claim link is on (default: its own). */
+  claimBase: undefined as string | undefined,
   registers: 0,
   statusCalls: 0,
   /** Bearer values the status route saw. */
@@ -86,7 +88,7 @@ beforeAll(() => {
             return json(201, {});
         }
         const body = (await req.json()) as { handle: string; display_name: string };
-        const claimBase = state.register === 'claim-elsewhere' ? 'https://evil.example' : origin;
+        const claimBase = state.register === 'claim-elsewhere' ? 'https://evil.example' : (state.claimBase ?? origin);
         return json(201, {
           id: 'reg-1',
           expires_at: new Date(Date.now() + 24 * 3600_000).toISOString(),
@@ -164,6 +166,7 @@ beforeEach(() => {
     status: 'pending-then-claimed',
     pendingPolls: 2,
     claimedHandle: 'wren',
+    claimBase: undefined,
     registers: 0,
     statusCalls: 0,
     statusAuth: [],
@@ -335,6 +338,47 @@ describe('setup: the command', () => {
     expect(b.err).toContain('status URL is not on the Tilori origin');
     expect(existsSync(pendingPath('wren'))).toBe(false);
     noSecret(a.out, a.err, b.out, b.err);
+  });
+
+  describe('--claim-origin', () => {
+    const CLAIM = 'https://claim.example';
+
+    test('a link on the claim origin is accepted and shown', async () => {
+      state.claimBase = CLAIM;
+      const r = await cli('setup', 'wren', '--no-browser', '--url-origin', origin, '--claim-origin', CLAIM);
+      expect(r.code).toBe(0);
+      expect(r.out).toContain(`${CLAIM}/claim?registration=reg-1#claim=${TOKEN}`);
+      expect(existsSync(pendingPath('wren'))).toBe(true);
+    });
+
+    test('a link on another origin is refused, even the url-origin one or a suffix match', async () => {
+      for (const base of [origin, 'https://evil.example', 'https://claim.example.evil.example', 'https://sub.claim.example']) {
+        state.claimBase = base;
+        const r = await cli('setup', 'wren', '--no-browser', '--url-origin', origin, '--claim-origin', CLAIM);
+        expect([base, r.code]).toEqual([base, 1]);
+        expect(r.err).toContain('claim link is not on the --claim-origin origin');
+        expect(r.out).not.toContain('evil.example');
+        expect(existsSync(pendingPath('wren'))).toBe(false);
+      }
+    });
+
+    test('without the flag the link must still be on the url-origin origin', async () => {
+      state.claimBase = CLAIM;
+      const r = await cli('setup', 'wren', '--no-browser', '--url-origin', origin);
+      expect(r.code).toBe(1);
+      expect(r.err).toContain('claim link is not on the Tilori origin');
+      expect(existsSync(pendingPath('wren'))).toBe(false);
+    });
+
+    test('an http, pathed or malformed claim origin exits 2 before anything is sent', async () => {
+      const before = state.registers;
+      for (const bad of ['http://claim.example', 'http://127.0.0.1:1', 'https://claim.example/path', 'https://claim.example/?x=1', 'https://claim.example#f', 'https://u:p@claim.example', 'claim.example', '']) {
+        const r = await cli('setup', 'wren', '--no-browser', '--url-origin', origin, '--claim-origin', bad);
+        expect([bad, r.code]).toEqual([bad, 2]);
+        expect(r.err).toContain('--claim-origin');
+      }
+      expect(state.registers).toBe(before);
+    });
   });
 
   test('handles with shell metacharacters, spaces or the wrong shape exit 2 without being echoed (must-have 4)', async () => {
