@@ -2076,7 +2076,9 @@ export class Router {
         this.#slowDeliverMs,
       );
       slow.unref?.();
-      const result = await settle(injector.deliver(wake)).finally(() => clearTimeout(slow));
+      // `new Promise` turns a synchronous throw from deliver into a busy result,
+      // so the timer below is always cleared.
+      const result = await settle(new Promise<DeliverResult>((r) => r(injector.deliver(wake)))).finally(() => clearTimeout(slow));
       if (result === 'gone') {
         this.#drop(st, injector);
         notice(`injector ${injector.kind} gone; ${st.injectors.length} left; holding ${count} event(s)${dmNote(send)}`);
