@@ -217,6 +217,17 @@ test('missing or empty agent identity fields fail closed in the CLI and parseAge
   }
 });
 
+test('github_user_id is optional, kept when valid, and refused when not a positive whole number', () => {
+  const withBot = structuredClone(agents) as typeof agents & { implementer: { github_user_id?: unknown } };
+  withBot.implementer.github_user_id = 10;
+  expect(parseAgents(withBot).implementer.github_user_id).toBe(10);
+  expect(parseAgents(agents).implementer.github_user_id).toBeUndefined();
+  for (const bad of [0, -1, 1.5, '10', null, Number.NaN]) {
+    withBot.implementer.github_user_id = bad;
+    expect(() => parseAgents(withBot)).toThrow('github_user_id must be a positive whole number');
+  }
+});
+
 test('client and implementer are required and lists must contain arrays', () => {
   const withoutClient = structuredClone(agents) as Partial<typeof agents>;
   delete withoutClient.client;

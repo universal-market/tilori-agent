@@ -2,7 +2,12 @@ import './setup.ts';
 import { expect, test } from 'bun:test';
 import { selectReviewers, type Agent } from '../src/pr-work-select.ts';
 
-const agent = (agent: string, handle = agent, owner = `acct-${agent}`): Agent => ({ agent, handle, owner });
+const agent = (agent: string, handle = agent, owner = `acct-${agent}`, github_user_id?: number): Agent => ({
+  agent,
+  handle,
+  owner,
+  ...(github_user_id === undefined ? {} : { github_user_id }),
+});
 
 const implementer = agent('impl', 'impl-h', 'acct-impl');
 const client = agent('client', 'client-h', 'acct-client');
@@ -50,12 +55,55 @@ test('skips the client', () => {
   expect(handles(r)).toEqual(['code-one']);
 });
 
-test('skips candidates that share the implementer owner', () => {
-  const sameOwner = agent('x', 'same-owner-h', 'acct-impl');
+test('a candidate that shares the implementer owner is accepted', () => {
+  const sameOwner = agent('x', 'same-owner-h', 'acct-impl', 11);
   const r = selectReviewers(
-    input({ kinds: ['code'], lists: { code: [sameOwner, agent('c1', 'code-one', 'acct-other')] } }),
+    input({ kinds: ['code'], implementer: { ...implementer, github_user_id: 10 }, lists: { code: [sameOwner] } }),
   );
-  expect(handles(r)).toEqual(['code-one']);
+  expect(handles(r)).toEqual(['same-owner-h']);
+});
+
+test('a same-owner implementer, client or opener is still never picked', () => {
+  const sameOwner = (a: Agent): Agent => ({ ...a, owner: 'acct-impl' });
+  const r = selectReviewers(
+    input({
+      kinds: ['code'],
+      opener: agent('opener', 'opener-h', 'acct-impl'),
+      client: sameOwner(client),
+      lists: {
+        code: [implementer, sameOwner(client), agent('opener', 'opener-h2', 'acct-impl'), agent('ok', 'ok-h', 'acct-impl')],
+      },
+    }),
+  );
+  expect(handles(r)).toEqual(['ok-h']);
+});
+
+test('a candidate on the same GitHub bot as the implementer or opener is skipped', () => {
+  const r = selectReviewers(
+    input({
+      kinds: ['code'],
+      implementer: { ...implementer, github_user_id: 10 },
+      opener: agent('opener', 'opener-h', 'acct-opener', 12),
+      lists: { code: [agent('a', 'bot-impl', 'acct-impl', 10), agent('b', 'bot-open', 'acct-b', 12), agent('c', 'fine', 'acct-impl', 13)] },
+    }),
+  );
+  expect(handles(r)).toEqual(['fine']);
+});
+
+test('two reviewers on the same GitHub bot cannot both be picked', () => {
+  const r = selectReviewers(
+    input({
+      lists: { code: [agent('a', 'code-a', 'acct-a', 20)], security: [agent('b', 'sec-b', 'acct-b', 20), agent('c', 'sec-c', 'acct-c', 21)] },
+    }),
+  );
+  expect(handles(r)).toEqual(['code-a', 'sec-c']);
+});
+
+test('a candidate with no known bot id is not excluded by the bot rule', () => {
+  const r = selectReviewers(
+    input({ kinds: ['code'], implementer: { ...implementer, github_user_id: 10 }, lists: { code: [agent('a', 'a-h', 'acct-impl')] } }),
+  );
+  expect(handles(r)).toEqual(['a-h']);
 });
 
 test('one agent cannot fill two kinds; the second kind picks the next candidate', () => {
@@ -78,7 +126,7 @@ test('refuses with implementer and a useful detail when only the implementer is 
     ok: false,
     rule: 'implementer',
     kind: 'code',
-    detail: 'code: implementer: impl-h; client: -; other_reviewer: -; same_owner: -',
+    detail: 'code: implementer: impl-h; client: -; other_reviewer: -; same_bot: -',
   });
 });
 
@@ -88,7 +136,7 @@ test('refuses with client and a useful detail when only the client is listed', (
     ok: false,
     rule: 'client',
     kind: 'code',
-    detail: 'code: implementer: -; client: client-h; other_reviewer: -; same_owner: -',
+    detail: 'code: implementer: -; client: client-h; other_reviewer: -; same_bot: -',
   });
 });
 
@@ -99,22 +147,23 @@ test('refuses with other_reviewer when an earlier kind took the only candidate',
     ok: false,
     rule: 'other_reviewer',
     kind: 'security',
-    detail: 'security: implementer: -; client: -; other_reviewer: shared-h; same_owner: -',
+    detail: 'security: implementer: -; client: -; other_reviewer: shared-h; same_bot: -',
   });
 });
 
-test('refuses with same_owner when every candidate shares the implementer owner', () => {
+test('refuses with same_bot when every candidate shares the implementer bot', () => {
   const r = selectReviewers(
     input({
       kinds: ['code'],
-      lists: { code: [agent('a', 'alpha-h', 'acct-impl'), agent('b', 'beta-h', 'acct-impl')] },
+      implementer: { ...implementer, github_user_id: 10 },
+      lists: { code: [agent('a', 'alpha-h', 'acct-impl', 10), agent('b', 'beta-h', 'acct-b', 10)] },
     }),
   );
   expect(r).toEqual({
     ok: false,
-    rule: 'same_owner',
+    rule: 'same_bot',
     kind: 'code',
-    detail: 'code: implementer: -; client: -; other_reviewer: -; same_owner: alpha-h, beta-h',
+    detail: 'code: implementer: -; client: -; other_reviewer: -; same_bot: alpha-h, beta-h',
   });
 });
 
@@ -125,27 +174,31 @@ test('the refusal names the rule that excluded the most candidates', () => {
       lists: {
         code: [
           client,
-          agent('b', 'beta-h', 'acct-impl'),
-          agent('c', 'gamma-h', 'acct-impl'),
+          agent('b', 'beta-h', 'acct-b', 10),
+          agent('c', 'gamma-h', 'acct-c', 10),
         ],
       },
+      implementer: { ...implementer, github_user_id: 10 },
     }),
   );
   expect(r.ok).toBe(false);
-  if (!r.ok) expect(r.rule).toBe('same_owner');
+  if (!r.ok) expect(r.rule).toBe('same_bot');
 });
 
 test('equal exclusion counts name implementer first', () => {
   const shared = agent('shared', 'shared-h');
-  const sameOwner = agent('owned', 'owned-h', 'acct-impl');
+  const sameBot = agent('owned', 'owned-h', 'acct-owned', 10);
   const r = selectReviewers(
-    input({ lists: { code: [shared], security: [implementer, client, shared, sameOwner] } }),
+    input({
+      implementer: { ...implementer, github_user_id: 10 },
+      lists: { code: [shared], security: [implementer, client, shared, sameBot] },
+    }),
   );
   expect(r).toEqual({
     ok: false,
     rule: 'implementer',
     kind: 'security',
-    detail: 'security: implementer: impl-h; client: client-h; other_reviewer: shared-h; same_owner: owned-h',
+    detail: 'security: implementer: impl-h; client: client-h; other_reviewer: shared-h; same_bot: owned-h',
   });
 });
 

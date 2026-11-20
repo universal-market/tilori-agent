@@ -334,7 +334,7 @@ to check the host. The same messages come from `ensure` and `watch`.
 
 The command reads `<checkout>/scripts/merge-check-defaults.json` (the checkout defaults to the current directory), or the explicit `--defaults` file. That file is keyed by `owner/repo`; each entry supplies `workflows` and `protected_paths`, plus an optional `base` (default `main`).
 
-The required `--agents` JSON file names the client, implementer, optional opener, and reviewer candidates in preference order. Every agent object needs non-empty `agent`, `handle`, and `owner` strings:
+The required `--agents` JSON file names the client, implementer, optional opener, and reviewer candidates in preference order. Every agent object needs non-empty `agent`, `handle`, and `owner` strings, and may carry `github_user_id` (the GitHub bot it pushes or reviews as). A reviewer may share the implementer's owner (Don, 2026-11-20) but not the same agent, and selection skips a candidate whose known `github_user_id` matches the implementer's, the opener's or an already picked reviewer's:
 
 ```json
 {
