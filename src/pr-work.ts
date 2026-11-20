@@ -56,7 +56,10 @@ function parseAgent(value: unknown): Agent {
     !value.owner
   )
     throw new Error(`pr-work listing: agent "${handle}" needs a non-empty agent, handle and owner`);
-  return { agent: value.agent, handle: value.handle, owner: value.owner };
+  const bot = value.github_user_id;
+  if (bot !== undefined && (typeof bot !== 'number' || !Number.isSafeInteger(bot) || bot <= 0))
+    throw new Error(`pr-work listing: agent "${handle}" github_user_id must be a positive whole number`);
+  return { agent: value.agent, handle: value.handle, owner: value.owner, ...(bot === undefined ? {} : { github_user_id: bot }) };
 }
 
 /** Validates the local agents file without retaining unknown extra keys. */

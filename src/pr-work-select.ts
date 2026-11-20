@@ -2,8 +2,11 @@
  *
  * Spec: merge-check section 3a point 5. Each reviewer is on our list for its
  * kind, is not the implementer, the opener, the client or another reviewer of
- * this run, and has a different owner from the implementer. Agents are
- * compared by their `agent` id, never by handle. */
+ * this run, and is not on the same GitHub bot as the implementer, the opener
+ * or another reviewer. The same owner is allowed (Don, 2026-11-20). Agents are
+ * compared by their `agent` id, never by handle. The bot id is optional here
+ * (the agents file may not list it): selection only skips a known match, and
+ * merge-check, which refuses a missing id, is the gate. */
 
 export interface Agent {
   /** Market agent id. */
@@ -11,6 +14,8 @@ export interface Agent {
   handle: string;
   /** Market account id. */
   owner: string;
+  /** GitHub user id of the bot this agent reviews or pushes as, when known. */
+  github_user_id?: number;
 }
 
 export type ReviewKind = 'code' | 'security' | 'docs';
@@ -31,7 +36,7 @@ export interface SelectPick {
   agent: Agent;
 }
 
-export type SelectRule = 'no_list' | 'not_listed' | 'implementer' | 'client' | 'other_reviewer' | 'same_owner';
+export type SelectRule = 'no_list' | 'not_listed' | 'implementer' | 'client' | 'other_reviewer' | 'same_bot';
 
 export type SelectResult =
   | { ok: true; picks: SelectPick[] }
@@ -39,7 +44,7 @@ export type SelectResult =
 
 /** Tie-break order for naming the most-excluding rule. `implementer` covers
  * the opener too (the spec excludes them the same way). */
-const RULE_ORDER = ['implementer', 'client', 'other_reviewer', 'same_owner'] as const;
+const RULE_ORDER = ['implementer', 'client', 'other_reviewer', 'same_bot'] as const;
 
 const KNOWN = new Set<string>(REVIEW_KINDS);
 
@@ -82,7 +87,7 @@ export function selectReviewers(input: SelectInput): SelectResult {
       implementer: [],
       client: [],
       other_reviewer: [],
-      same_owner: [],
+      same_bot: [],
     };
 
     // Selection is greedy in `kinds` order: an earlier kind can take the only
@@ -105,8 +110,14 @@ export function selectReviewers(input: SelectInput): SelectResult {
         handles.other_reviewer.push(candidate.handle);
         continue;
       }
-      if (candidate.owner === input.implementer.owner) {
-        handles.same_owner.push(candidate.handle);
+      const bot = candidate.github_user_id;
+      if (
+        bot !== undefined &&
+        (bot === input.implementer.github_user_id ||
+          (input.opener && bot === input.opener.github_user_id) ||
+          picks.some((p) => p.agent.github_user_id === bot))
+      ) {
+        handles.same_bot.push(candidate.handle);
         continue;
       }
       pick = candidate;
