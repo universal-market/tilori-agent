@@ -127,6 +127,26 @@ export function setupOrigin(raw: string | undefined): URL {
   return new URL(url.origin);
 }
 
+/** `--claim-origin`: the one origin the claim link may be on when it is not
+ * the registration's own (Internal serves the claim page on its web origin,
+ * the registration goes to its Convex origin). A bare https origin, nothing
+ * else: no http (not even loopback), no path, query, fragment or credentials.
+ * The claim link is later compared with it exactly. */
+export function setupClaimOrigin(raw: string): URL {
+  const text = raw.trim();
+  let url: URL;
+  try {
+    url = new URL(text);
+  } catch {
+    throw new SetupInputError('--claim-origin must be an https origin such as https://internal.tilori.ai.');
+  }
+  if (url.protocol !== 'https:') throw new SetupInputError('--claim-origin must use https.');
+  if (url.username || url.password || url.search || url.hash || text.endsWith('?') || text.endsWith('#') || (url.pathname !== '/' && url.pathname !== '')) {
+    throw new SetupInputError('--claim-origin must be a bare origin: no path, query, fragment or credentials.');
+  }
+  return new URL(url.origin);
+}
+
 /** Whether a URL the server sent may be used: https, or http to a loopback
  * host when the registration itself went to one (Bastion's must-have 5; the
  * loopback exception exists for the tests). Credentials in a URL are refused. */
@@ -314,6 +334,8 @@ export function transportFailure(cause: unknown, what: string, host: string, tim
 
 export interface RegisterOptions extends HttpOptions {
   origin: URL;
+  /** Where the claim link must be, when not on `origin` (`--claim-origin`). */
+  claimOrigin?: URL;
   handle: string;
   displayName: string;
   now?: () => number;
@@ -350,8 +372,15 @@ export async function register(o: RegisterOptions): Promise<{ pending: PendingRe
     throw unusable('no claim link');
   }
   // The link is shown to the user and opened in a browser: it must be on
-  // the origin the registration went to, over https (or http loopback).
-  if (claim.origin !== o.origin.origin || !allowedUrl(claim, o.origin)) throw unusable('the claim link is not on the Tilori origin');
+  // the origin the user named with --claim-origin, exactly, or else on the
+  // origin the registration went to, over https (or http loopback).
+  if (o.claimOrigin) {
+    if (claim.origin !== o.claimOrigin.origin || claim.protocol !== 'https:' || claim.username || claim.password) {
+      throw unusable('the claim link is not on the --claim-origin origin');
+    }
+  } else if (claim.origin !== o.origin.origin || !allowedUrl(claim, o.origin)) {
+    throw unusable('the claim link is not on the Tilori origin');
+  }
   let status: URL;
   try {
     status = new URL(typeof j?.status_url === 'string' ? j.status_url : STATUS_PATH, o.origin);
@@ -478,6 +507,8 @@ export interface SetupOptions extends HttpOptions {
   handle?: string;
   name?: string;
   origin?: string;
+  /** `--claim-origin`: an https origin the claim link must be on. */
+  claimOrigin?: string;
   noBrowser?: boolean;
   /** The account name a handle is derived from (default: the OS user). */
   user?: string;
@@ -506,6 +537,7 @@ export function openBrowser(url: string, log: (m: string) => void, platform: Nod
  * failure. Prints the handle, the claim link and fixed lines; never the key. */
 export async function runSetup(o: SetupOptions): Promise<number> {
   const origin = setupOrigin(o.origin);
+  const claimOrigin = o.claimOrigin === undefined ? undefined : setupClaimOrigin(o.claimOrigin);
   const config = loadConfig();
   let handle: string;
   let derived = false;
@@ -529,7 +561,7 @@ export async function runSetup(o: SetupOptions): Promise<number> {
   const displayName = o.name === undefined ? handle : setupDisplayName(o.name);
   // Shown before registering: the claim page can't rename a surprise (Juniper).
   if (derived) o.out(LINES.creating(handle));
-  const { pending, claimUrl } = await register({ ...o, origin, handle, displayName });
+  const { pending, claimUrl } = await register({ ...o, origin, claimOrigin, handle, displayName });
   writePending(pending);
   o.out(LINES.link(handle));
   // Its own line, never wrapped, so it stays clickable (Juniper).

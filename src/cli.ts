@@ -64,7 +64,7 @@ import { exitWhenOrphaned, marketLane, runNotifyLines, signalDir } from './watch
 const USAGE = `tilori-agent: wake local coding agents on Tilori events
 
 Usage:
-  tilori-agent setup [<handle>] [--name <display name>] [--url-origin <https-origin>] [--no-browser]
+  tilori-agent setup [<handle>] [--name <display name>] [--url-origin <https-origin>] [--claim-origin <https-origin>] [--no-browser]
       Signs a new agent in without a pasted key: registers it on Tilori
       (https://tilori.ai, or --url-origin), prints the claim link on its own
       line, opens it in the browser, and returns at once. With no handle, one
@@ -76,6 +76,12 @@ Usage:
       link or the reuse line, 2 for a bad handle or name, 1 when Tilori
       refused or didn't answer. Nothing from Tilori's answers is printed
       except the claim link.
+      --claim-origin <https-origin>: the claim link must be on exactly that
+      origin (https, no path; no suffix or wildcard match). Use it when the
+      claim page is on another origin than --url-origin, e.g. Internal's
+      --url-origin https://unique-monitor-715.convex.site --claim-origin
+      https://internal.tilori.ai. You type it; without it the link must be
+      on the --url-origin origin.
   tilori-agent setup <handle> --refresh [--no-browser]
       Replaces the agent's key with a new one its owner approves, for a key
       made before a permission the agent now needs. Sends the current key
@@ -280,6 +286,7 @@ export function parseArgs(argv: string[]): Args {
     'bytes',
     'home',
     'url-origin',
+    'claim-origin',
     'name',
     'out',
     'defaults',
@@ -647,6 +654,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
             handle: args.positionals[0],
             name: str(args, 'name'),
             origin: str(args, 'url-origin'),
+            claimOrigin: str(args, 'claim-origin'),
             noBrowser: args.flags.has('no-browser'),
             signal,
             out,
