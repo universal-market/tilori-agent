@@ -89,7 +89,21 @@ test('afterWakeWaitMs: 0 while a lane still has room, else the earlier return', 
   p.record('direct');
   tick(10);
   // a normal wake now would take the last of both
-  expect(p.afterWakeWaitMs('normal')).toBe(Math.min(p.waitMs('normal') || HOUR, p.waitMs('direct')));
+  expect(p.afterWakeWaitMs('normal')).toBe(HOUR - 10);
+  // a direct wake would take direct's only slot while normal still has one
+  expect(p.afterWakeWaitMs('direct')).toBe(0);
+});
+
+test('afterWakeWaitMs takes the earlier of the two lanes returning', () => {
+  const { p, tick } = make(1, 1);
+  p.record('direct');
+  tick(5000);
+  p.record('normal');
+  tick(10);
+  // both full: a normal wake restarts normal's window, so direct returns first
+  expect(p.afterWakeWaitMs('normal')).toBe(HOUR - 5010);
+  // a direct wake restarts direct's window, so normal returns first, at HOUR-10
+  expect(p.afterWakeWaitMs('direct')).toBe(HOUR - 10);
 });
 
 test('afterWakeWaitMs with direct off falls back to the normal lane', () => {

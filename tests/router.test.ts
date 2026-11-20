@@ -1,6 +1,6 @@
 import './setup.ts';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
@@ -38,6 +38,8 @@ function setup(
     broadPauseMs?: number;
     subscriptions?: SubscriptionSpec[];
     reminder?: { everyMs: number; prompt: string; onlyWhenIdle: boolean };
+    recordingsDir?: string;
+    recordDecisions?: boolean;
   } = {},
 ) {
   const fake = new FakeTilori();
@@ -55,8 +57,10 @@ function setup(
         pauseSeconds: opts.pauseSeconds,
         postWakeMinutes: opts.postWakeMinutes,
         reminder: opts.reminder,
+        recordDecisions: opts.recordDecisions,
       },
     ],
+    recordingsDir: opts.recordingsDir,
     logger: (m) => logs.push(m),
     waitMs: 10,
     retryMs: 10,
@@ -191,6 +195,49 @@ describe('router', () => {
     await until(() => fake.acks.length === 2);
     ac.abort();
     await done;
+  });
+
+  test('record_decisions: a wake and a cap hold are recorded as ids and kinds only (UNI-1097)', async () => {
+    const t = 1_000_000;
+    const dir = join(mkdtempSync(join(tmpdir(), 'tilori-rec-')), 'recordings');
+    const { fake, router, ac, done } = setup({ wakesPerHour: 1, posts: true, now: () => t, recordDecisions: true, recordingsDir: dir });
+    const inj = new Recorder();
+    router.register('wren', inj);
+    await until(() => fake.subs.length === 3);
+    const first = randomUUID();
+    fake.push('posts', [post(first)]);
+    await until(() => inj.wakes.length === 1);
+    fake.push('posts', [post(), post()]);
+    await until(() => existsSync(join(dir, 'wren.jsonl')) && readFileSync(join(dir, 'wren.jsonl'), 'utf8').includes('"hold"'));
+    ac.abort();
+    await done;
+    const lines = readFileSync(join(dir, 'wren.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    expect(lines.map((l) => l.decision)).toEqual(['wake', 'hold']);
+    expect(lines[0]).toMatchObject({ recipient: 'wren', lane: 'normal', events: [{ kind: 'post.created', entity_type: 'post', id: first }] });
+    expect(lines[1].events).toHaveLength(2);
+    expect(Object.keys(lines[0]).sort()).toEqual(['at', 'decision', 'events', 'lane', 'recipient']);
+    expect(statSync(join(dir, 'wren.jsonl')).mode & 0o777).toBe(0o600);
+  });
+
+  test('record_decisions off, or no recordings dir: nothing is written (UNI-1097)', async () => {
+    const dir = join(mkdtempSync(join(tmpdir(), 'tilori-rec-')), 'recordings');
+    const off = setup({ posts: true, recordingsDir: dir });
+    const a = new Recorder();
+    off.router.register('wren', a);
+    await until(() => off.fake.subs.length === 3);
+    off.fake.push('posts', [post()]);
+    await until(() => a.wakes.length === 1);
+    off.ac.abort();
+    await off.done;
+    const noDir = setup({ posts: true, recordDecisions: true });
+    const b = new Recorder();
+    noDir.router.register('wren', b);
+    await until(() => noDir.fake.subs.length === 3);
+    noDir.fake.push('posts', [post()]);
+    await until(() => b.wakes.length === 1);
+    noDir.ac.abort();
+    await noDir.done;
+    expect(existsSync(dir)).toBe(false);
   });
 
   test('a DM is named in the log (kind and id only) while held and when delivered (UNI-1106)', async () => {

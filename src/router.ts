@@ -42,6 +42,7 @@ import {
   type WakeFilter,
 } from './wake-filter.ts';
 import { GATE_QUIET_CEILING, runGate } from './reminder-gate.ts';
+import { DecisionRecorder } from './recorder.ts';
 
 /** How long a delivered post or conversation is remembered. Longer than the
  * wake cap can hold a batch (one hour), so a held copy of something that went
@@ -122,6 +123,9 @@ export interface RouterAgentConfig {
   /** trust_server applies: every account is trusted, so the filter can hold
    * or drop nothing (every post wakes). */
   trustAll?: boolean;
+  /** UNI-1097 slice 4: record this agent's wake decisions (recorder.ts).
+   * Applies only when the router also has `recordingsDir`. */
+  recordDecisions?: boolean;
 }
 
 /** This hour's wake counts for `tilori-agent config show`: counts only. */
@@ -176,6 +180,9 @@ export interface RouterOptions {
   /** The run directory for `status`'s files (attempting-, watching-, woke-),
    * or unset to write none (tests, or no private run directory). */
   signalDir?: string;
+  /** Where decision recordings go (`<tilori home>/recordings`), for agents
+   * with `recordDecisions`. Unset: nothing is recorded. */
+  recordingsDir?: string;
   now?: () => number;
   /** Test seam: how long polls must fail before the session is told
    * (default: the agent's stall_minutes; 0 there still turns it off). */
@@ -311,6 +318,8 @@ function newLane(name: LaneName, client: TiloriAgentClient, subscriptions: Subsc
 
 interface AgentState {
   cfg: RouterAgentConfig;
+  /** Opt-in decision recorder; null when off. Never throws. */
+  recorder: DecisionRecorder | null;
   /** The Tilori lane always; the Market lane when config.json has a
    * market_url. */
   lanes: { tilori: Lane; market: Lane | null };
@@ -500,6 +509,7 @@ export class Router {
   readonly #restSignalMs: number;
   readonly #now: () => number;
   readonly #signalDir: string | undefined;
+  readonly #recordingsDir: string | undefined;
   readonly #signalFailed = new Set<string>();
   readonly #pollFailMs: number | undefined;
   readonly #keyRetryMs: number;
@@ -522,6 +532,7 @@ export class Router {
     this.#restSignalMs = options.restSignalMs ?? REST_SIGNAL_MS;
     this.#now = options.now ?? Date.now;
     this.#signalDir = options.signalDir;
+    this.#recordingsDir = options.recordingsDir;
     this.#pollFailMs = options.pollFailMs;
     this.#keyRetryMs = options.keyRetryMs ?? 60_000;
     this.#marketOffMs = options.marketOffMs ?? MARKET_OFF_MS;
@@ -532,6 +543,13 @@ export class Router {
       if (cfg.market && cfg.market.client === cfg.client) throw new Error(`Agent ${cfg.handle}: the Market lane needs its own client.`);
       const st: AgentState = {
         cfg,
+        recorder:
+          cfg.recordDecisions && this.#recordingsDir !== undefined
+            ? new DecisionRecorder(this.#recordingsDir, cfg.handle, {
+                now: this.#now,
+                onError: (m) => this.#log(`[${cfg.handle}] ${m}`),
+              })
+            : null,
         lanes: {
           tilori: newLane('tilori', cfg.client, cfg.subscriptions),
           market: cfg.market ? newLane('market', cfg.market.client, [MARKET_SUBSCRIPTION]) : null,
@@ -979,6 +997,7 @@ export class Router {
           }
         } finally {
           // End the MCP sessions; a cancelled long poll leaves one open.
+          st.recorder?.close();
           await Promise.all(this.#laneList(st).map((lane) => lane.client.close()));
         }
       }),
@@ -1749,6 +1768,11 @@ export class Router {
       for (const [k, dec] of demoted) if (dec.action === 'digest') demoted.delete(k);
       items.length = 0;
     }
+    if (st.recorder)
+      for (const action of ['digest', 'drop'] as const) {
+        const refs = [...demoted].filter(([, d]) => d.action === action).map(([k]) => byKey.get(k)!.ref);
+        if (refs.length) st.recorder.record({ decision: action, lane: null, events: refs });
+      }
     day.woke += events.length - demoted.size;
     if (!demoted.size) return fresh;
     const held = items.length;
@@ -2039,6 +2063,11 @@ export class Router {
       const lane: WakeLane = 'lane' in decision ? decision.lane : 'normal';
       if (!('lane' in decision) || lane === 'direct') {
         const delayed = !('lane' in decision);
+        if ('waitMs' in decision) {
+          // Once per hold episode, not on every retry.
+          const fresher = fresh.filter((d) => !st.capHeld.has(d.delivery_id));
+          if (fresher.length) st.recorder?.record({ decision: 'hold', lane: null, events: toRefs(fresher) });
+        }
         for (const d of fresh) if (delayed || !direct.includes(d)) st.capHeld.add(d.delivery_id);
         if ('waitMs' in decision) {
           st.stats.delayed = count;
@@ -2108,6 +2137,7 @@ export class Router {
       if (send.some((d) => d.lane === 'tilori' && !st.directSubs.has(d.subscription_id))) st.plainWokeAt = Date.now();
       this.#signal(handle, 'woke');
       st.policy.record(lane);
+      st.recorder?.record({ decision: 'wake', lane, events: toRefs(send) });
       if (st.cfg.reminder?.onlyWhenIdle) st.reminderAt = Date.now() + st.cfg.reminder.everyMs;
       st.stats.wakes++;
       st.stats.events += wake.events.length + marketEvents.length;

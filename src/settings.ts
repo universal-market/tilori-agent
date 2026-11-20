@@ -17,6 +17,7 @@ import {
   loadConfig,
   reminderSettings,
   saveConfig,
+  recordDecisions,
   trustServerState,
   type AgentSettings,
   type TiloriConfig,
@@ -357,6 +358,15 @@ export function showText(agent: string, s: AgentSettings, usage: AgentUsage | nu
   }
   // UNI-1029: hand-edit only; shown with the program's resolved path
   // (Bastion 10ebe17a 4) and today's counts (Keel 8709d953, Juniper f843e173 3).
+  if (s.record_decisions !== undefined) {
+    let on: string;
+    try {
+      on = recordDecisions(s.record_decisions) ? 'on' : 'off';
+    } catch (cause) {
+      on = `invalid (${cause instanceof Error ? cause.message : String(cause)})`;
+    }
+    lines.push(`  record_decisions = ${on}    [hand edit, restart] ids, kinds, lane and time only, in recordings/`);
+  }
   if (s.wake_filter !== undefined) {
     let filter: string;
     try {

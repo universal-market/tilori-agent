@@ -117,6 +117,11 @@ export interface AgentSettings {
    * wake-filter.ts). Hand edit only, never settable from the CLI or a
    * session; needs a restart. Off unless set. */
   wake_filter?: WakeFilterSettings;
+  /** UNI-1097 slice 4: record each wake decision (ids, kinds, lane, time) to
+   * `<home>/recordings/<handle>.jsonl` for offline replay (recorder.ts). Hand
+   * edit only, never settable from the CLI or a session; needs a restart.
+   * Off unless true. */
+  record_decisions?: boolean;
 }
 
 /** Validates an agent's `push` setting; throws on a bad value, so a typo
@@ -237,6 +242,19 @@ export function wakeFilterConfig(
   if (!wakeFilter) return {};
   const p = coordinationPolicy(config, handle);
   return { wakeFilter, trustedOwners: p.trusted_owners, trustAll: p.trust_server };
+}
+
+/** `record_decisions`, checked: true or false, off when unset. A typo throws,
+ * so recording is never switched on or off by accident. */
+export function recordDecisions(value: unknown): boolean {
+  if (value === undefined) return false;
+  if (typeof value !== 'boolean') throw new Error('record_decisions must be true or false.');
+  return value;
+}
+
+/** The router's `recordDecisions` field for an agent; empty when off. */
+export function recorderConfig(config: TiloriConfig, handle: string): { recordDecisions?: true } {
+  return recordDecisions(config.agents?.[handle]?.record_decisions) ? { recordDecisions: true } : {};
 }
 
 /** Whether `trust_server` applies, and if it is set but doesn't, why. It
