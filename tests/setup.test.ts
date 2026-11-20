@@ -1,6 +1,6 @@
 import './setup.ts';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -628,8 +628,16 @@ describe('watch: polling the claim', () => {
   test('a claim on the same server sets the plugin options from config.json, on the one line (UNI-882)', async () => {
     await inDefaultHome(async (calls) => {
       await registered();
-      const { outcome, lines } = await poll('wren');
-      expect(outcome.result).toBe('claimed');
+      const { outcome, lines, logs } = await poll('wren');
+      // UNI-1112: this failed twice on CI with `no-file` and never locally.
+      // A `no-file` comes with the reason in the log (or none, if the pending
+      // file was gone), so say it and what the home held, not just the word.
+      if (outcome.result !== 'claimed') {
+        const held = (d: string) => (existsSync(d) ? readdirSync(d).join(',') : '(missing)');
+        throw new Error(
+          `claim poll gave ${outcome.result}; log: ${logs.join(' | ') || '(none)'}; home: ${held(process.env.TILORI_HOME!)}; pending: ${held(join(process.env.TILORI_HOME!, 'pending'))}`,
+        );
+      }
       expect(calls).toEqual([wantedValues(loadConfig())]);
       expect(calls[0].market_url).toBe(`${origin}/mcp/v1`);
       expect(lines).toHaveLength(1);
