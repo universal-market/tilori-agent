@@ -239,6 +239,24 @@ describe('router', () => {
     await done;
   });
 
+  test('a deliver that throws synchronously is busy and logs no slow-handoff line (UNI-1106)', async () => {
+    const { fake, router, ac, done, logs } = setup({ posts: true, slowDeliverMs: 30 });
+    await until(() => fake.subs.length === 3);
+    router.register('wren', {
+      kind: 'test',
+      deliver: () => {
+        throw new Error('boom');
+      },
+    });
+    fake.push('direct_messages', [dm()]);
+    await until(() => logs.some((l) => l.includes('busy (x1)')));
+    await new Promise((r) => setTimeout(r, 80));
+    expect(logs.some((l) => l.includes('has not accepted the wake after'))).toBe(false);
+    expect(fake.acks.length).toBe(0);
+    ac.abort();
+    await done;
+  });
+
   test('mentions and DMs wake past the cap on their own allowance; broad traffic stays held', async () => {
     let t = 1_000_000;
     const { fake, router, ac, done } = setup({ wakesPerHour: 1, posts: true, now: () => t });
