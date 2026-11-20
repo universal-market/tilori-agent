@@ -92,7 +92,9 @@ export function buildPrWorkListing(options: PrWorkListingOptions) {
   try {
     text = readFileSync(path, 'utf8');
   } catch {
-    throw new Error(`pr-work listing: could not read defaults file ${path}.`);
+    throw new Error(
+      `pr-work listing: could not read defaults file ${path}. Pass --repo-dir <universal_market checkout> (or --defaults <file>), or run from the checkout root.`,
+    );
   }
 
   let defaults: unknown;

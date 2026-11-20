@@ -270,6 +270,7 @@ test('a missing repo entry or defaults file is a clear refusal', async () => {
   expect(missingFile.exitCode).toBe(1);
   expect(missingFile.stdout).toBe('');
   expect(missingFile.stderr).toContain('could not read defaults file');
+  expect(missingFile.stderr).toContain('--repo-dir');
 });
 
 test('bad JSON defaults are refused', async () => {
