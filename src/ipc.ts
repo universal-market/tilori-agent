@@ -260,7 +260,13 @@ export function attachToRouter(
         sock.end();
       } else if (msg?.op === 'wake' && registered) {
         const wake = sanitizeWake(msg, handle);
-        if (!wake) return;
+        if (!wake) {
+          // Answer busy rather than leave the router waiting on this wake for
+          // ever: it holds the batch unacked, logs the busy retry and tries
+          // again. Without a usable wake_id there is nothing to answer.
+          if (typeof msg.wake_id === 'string' && msg.wake_id.length <= 64) send(sock, { op: 'busy', wake_id: msg.wake_id });
+          return;
+        }
         const result = await injector.deliver(wake);
         send(sock, { op: result === 'accepted' ? 'accepted' : 'busy', wake_id: wake.wake_id });
         if (result === 'gone') sock.end();

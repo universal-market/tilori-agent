@@ -148,6 +148,8 @@ export interface RouterOptions {
   /** Base retry delay while a batch is held (no injector, busy). Busy
    * retries back off exponentially from here up to 60 s. Default 2 s. */
   retryMs?: number;
+  /** Log once when one wake handoff has not been accepted after this long (default 30 s). Log only: nothing is released or retried. */
+  slowDeliverMs?: number;
   /** Re-check subscriptions this often (default 6 h); they expire after 30 days. */
   renewEveryMs?: number;
   /** Hold a new batch this long before waking, so the same post delivered
@@ -398,13 +400,19 @@ const newFilterDay = (): FilterDay => ({ day: new Date().toISOString().slice(0, 
 
 /** Scopes whose events are addressed to the agent itself. */
 const DIRECT_SCOPES = new Set(['inbox', 'mentions', 'direct_messages']);
+const DM_KINDS = new Set(['dm.request', 'dm.message', 'dm.accepted']);
 const isDirectKind = (kind: string) => kind === 'mention' || kind.startsWith('dm.');
 
 /** UNI-1106: DM events in a set of batches as " [dm <kind> <entity id>, ...]", ids only, so a held or delivered DM shows in the log. */
 function dmNote(ds: { events: { kind: string; entity_id: string }[] }[]): string {
   const dms = ds.flatMap((d) => d.events).filter((e) => e.kind.startsWith('dm.'));
   if (!dms.length) return '';
-  const shown = dms.slice(0, 5).map((e) => `${e.kind} ${e.entity_id}`).join(', ');
+  // Only known kinds and UUID ids reach the log, so a hostile server value
+  // cannot forge a log line with a newline or control character.
+  const shown = dms
+    .slice(0, 5)
+    .map((e) => `${DM_KINDS.has(e.kind) ? e.kind : 'dm.other'} ${isUuid(e.entity_id) ? e.entity_id : 'invalid-id'}`)
+    .join(', ');
   return ` [dm ${shown}${dms.length > 5 ? `, +${dms.length - 5} more` : ''}]`;
 }
 
@@ -492,6 +500,7 @@ export class Router {
   /** Agents now in the long-poll fallback. */
   readonly #pollers = new Set<string>();
   readonly #retryMs: number;
+  readonly #slowDeliverMs: number;
   readonly #renewEveryMs: number;
   readonly #coalesceMs: number;
   readonly #plainHoldMs: number;
@@ -513,6 +522,7 @@ export class Router {
     this.#fallbackMax = options.pushFallbackMax ?? PUSH_FALLBACK_MAX;
     this.#random = options.random ?? Math.random;
     this.#retryMs = options.retryMs ?? 2_000;
+    this.#slowDeliverMs = options.slowDeliverMs ?? 30_000;
     this.#renewEveryMs = options.renewEveryMs ?? 6 * 3600_000;
     this.#coalesceMs = options.coalesceMs ?? 3_000;
     this.#plainHoldMs = Math.max(this.#coalesceMs, options.plainHoldMs ?? 30_000);
@@ -2061,7 +2071,12 @@ export class Router {
       // no timeout, so a slow injector (an exec run, a busy session) is never
       // invoked again for the same batch, and a late `accepted` still counts.
       // A remote injector resolves `gone` when its connection drops.
-      const result = await settle(injector.deliver(wake));
+      const slow = setTimeout(
+        () => this.#log(`[${handle}] injector ${injector.kind} has not accepted the wake after ${Math.round(this.#slowDeliverMs / 1000)} s; ${count} event(s) stay unacked${dmNote(send)}`),
+        this.#slowDeliverMs,
+      );
+      slow.unref?.();
+      const result = await settle(injector.deliver(wake)).finally(() => clearTimeout(slow));
       if (result === 'gone') {
         this.#drop(st, injector);
         notice(`injector ${injector.kind} gone; ${st.injectors.length} left; holding ${count} event(s)${dmNote(send)}`);

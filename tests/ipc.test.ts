@@ -4,7 +4,7 @@ import { chmodSync, mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
-import { createConnection } from 'node:net';
+import { createConnection, createServer } from 'node:net';
 import { desiredSubscriptions } from '../src/config.ts';
 import { NotifyLinesInjector } from '../src/injectors/notify-lines.ts';
 import { attachToRouter, IPC_VERSION, routerAvailable, routerUsage, serveRouter } from '../src/ipc.ts';
@@ -42,6 +42,40 @@ describe('router socket', () => {
       expect(router.injectorCount('wren')).toBe(0);
     } finally {
       server.close();
+    }
+  });
+
+  test('a wake that fails validation is answered busy, not left unanswered (UNI-1106)', async () => {
+    const sock = join(dir, 'f.sock');
+    const replies: any[] = [];
+    const server = createServer((c) => {
+      let buf = '';
+      c.on('data', (d) => {
+        buf += d;
+        for (let i = buf.indexOf('\n'); i >= 0; i = buf.indexOf('\n')) {
+          const msg = JSON.parse(buf.slice(0, i));
+          buf = buf.slice(i + 1);
+          if (msg.op === 'register') {
+            c.write(`${JSON.stringify({ op: 'registered' })}\n`);
+            // A usable wake_id but a body that is not a wake: events is not an array.
+            c.write(`${JSON.stringify({ op: 'wake', wake_id: 'w-1', agent: 'wren', events: 'nope' })}\n`);
+          } else replies.push(msg);
+        }
+      });
+    });
+    await new Promise<void>((r) => server.listen(sock, r));
+    chmodSync(sock, 0o600);
+    const out = new PassThrough();
+    let lines = '';
+    out.on('data', (c) => (lines += c));
+    const attached = attachToRouter('wren', new NotifyLinesInjector(out), sock);
+    try {
+      await until(() => replies.length === 1);
+      expect(replies[0]).toEqual({ op: 'busy', wake_id: 'w-1' });
+      expect(lines).toBe('');
+    } finally {
+      server.close();
+      attached.catch(() => {});
     }
   });
 
