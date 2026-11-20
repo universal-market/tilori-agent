@@ -31,6 +31,7 @@ import {
   releasedEndpoint,
   saveConfig,
   type TiloriConfig,
+  recorderConfig,
   wakeFilterConfig,
 } from './config.ts';
 import { ExecInjector } from './injectors/exec.ts';
@@ -1089,10 +1090,12 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
               ...(pushEnabled(settings) ? { push: { endpoint: url, apiKey, rereadKey } } : {}),
               market: marketLane(config, agent, apiKey, rereadKey, log),
               ...wakeFilterConfig(config, agent),
+              ...recorderConfig(config, agent),
             },
           ],
           logger: log,
           signalDir: signalDir(log),
+          recordingsDir: join(tiloriHome(), 'recordings'),
           waitMs,
         });
         const t = str(args, 'exec-timeout-ms') ?? settings.exec_timeout_ms;
@@ -1116,6 +1119,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
             ...(pushEnabled(s) ? { push: { endpoint: url, apiKey, rereadKey } } : {}),
             market: marketLane(config, handle, apiKey, rereadKey, log),
             ...wakeFilterConfig(config, handle),
+            ...recorderConfig(config, handle),
             subscriptions: desiredSubscriptions(s),
             wakesPerHour: s.wakes_per_hour,
             directWakesPerHour: s.direct_wakes_per_hour,
@@ -1125,7 +1129,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
             stallMinutes: stallMinutes(s.stall_minutes),
           };
         });
-        const router = new Router({ agents, logger: log, signalDir: activityDir() });
+        const router = new Router({ agents, logger: log, signalDir: activityDir(), recordingsDir: join(tiloriHome(), 'recordings') });
         for (const handle of handles) {
           const s = config.agents?.[handle];
           if (s?.injector === 'exec' && s.exec) {
