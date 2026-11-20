@@ -12,7 +12,7 @@ import {
 } from './client.ts';
 import { DEFAULT_PAUSE_SECONDS, DEFAULT_DIRECT_WAKES_PER_HOUR, DEFAULT_WAKES_PER_HOUR, type Reminder, unfilteredPostsWarning } from './config.ts';
 import { PushStream, type PushOptions, type PushStatus } from './push.ts';
-import { WakeLimiter } from './ratelimit.ts';
+import { BuiltinPolicy, type Lane as WakeLane, type WakePolicy } from './policy.ts';
 import type { LiveSettings } from './settings.ts';
 import type {
   AgentDelivery,
@@ -314,13 +314,10 @@ interface AgentState {
   /** The Tilori lane always; the Market lane when config.json has a
    * market_url. */
   lanes: { tilori: Lane; market: Lane | null };
-  limiter: WakeLimiter;
-  /** A separate allowance for direct signals, so broad traffic that used up
-   * `limiter` never starves a mention or direct message. Null when turned off. */
-  directLimiter: WakeLimiter | null;
-  /** The direct limiter while turned off by a reload, kept so turning it back
-   * on doesn't hand out a fresh hour. */
-  directOff: WakeLimiter | null;
+  /** Decides whether a wake may go, which allowance it spends and when the
+   * next is possible: the normal cap, plus a separate direct one so broad
+   * traffic never starves a mention or direct message. */
+  policy: WakePolicy;
   /** Subscriptions whose batches are direct signals (inbox, mentions, DMs,
    * and the Market lane's inbox): every lane's `direct`. */
   directSubs: Set<string>;
@@ -414,13 +411,6 @@ function dmNote(ds: { events: { kind: string; entity_id: string }[] }[]): string
     .map((e) => `${DM_KINDS.has(e.kind) ? e.kind : 'dm.other'} ${isUuid(e.entity_id) ? e.entity_id : 'invalid-id'}`)
     .join(', ');
   return ` [dm ${shown}${dms.length > 5 ? `, +${dms.length - 5} more` : ''}]`;
-}
-
-function directLimiter(perHour: number | undefined, now: () => number): WakeLimiter | null {
-  const n = perHour ?? DEFAULT_DIRECT_WAKES_PER_HOUR;
-  if (n === 0) return null;
-  if (!Number.isInteger(n) || n < 0) throw new Error('direct_wakes_per_hour must be a non-negative integer.');
-  return new WakeLimiter(n, now);
 }
 
 /** A failure's reason in fixed words, for the session's poll line. */
@@ -546,9 +536,11 @@ export class Router {
           tilori: newLane('tilori', cfg.client, cfg.subscriptions),
           market: cfg.market ? newLane('market', cfg.market.client, [MARKET_SUBSCRIPTION]) : null,
         },
-        limiter: new WakeLimiter(cfg.wakesPerHour ?? DEFAULT_WAKES_PER_HOUR, this.#now),
-        directLimiter: directLimiter(cfg.directWakesPerHour, this.#now),
-        directOff: null,
+        policy: new BuiltinPolicy(
+          cfg.wakesPerHour ?? DEFAULT_WAKES_PER_HOUR,
+          cfg.directWakesPerHour ?? DEFAULT_DIRECT_WAKES_PER_HOUR,
+          this.#now,
+        ),
         directSubs: new Set(),
         capHeld: new Set(),
         recent: new Map(),
@@ -908,10 +900,10 @@ export class Router {
   usage(handle: string): AgentUsage | null {
     const st = this.#agents.get(handle);
     if (!st) return null;
-    const d = st.directLimiter;
+    const directUsed = st.policy.used('direct');
     return {
-      wakes: { used: st.limiter.used, limit: st.limiter.perHour },
-      direct: d ? { used: d.used, limit: d.perHour } : null,
+      wakes: { used: st.policy.used('normal')!, limit: st.policy.limit('normal') },
+      direct: directUsed === null ? null : { used: directUsed, limit: st.policy.limit('direct') },
       held: st.capHeld.size ? st.stats.delayed : 0,
       ...(st.cfg.wakeFilter ? { filter: { ...this.#filterDay(st), digest_held: st.filter.digest.length } } : {}),
     };
@@ -931,18 +923,10 @@ export class Router {
     const note = (key: string, from: number, to: number) => {
       if (from !== to) changed.push(`${key} ${from} -> ${to}`);
     };
-    note('wakes_per_hour', st.limiter.perHour, live.wakesPerHour);
-    st.limiter.resize(live.wakesPerHour);
-    note('direct_wakes_per_hour', st.directLimiter?.perHour ?? 0, live.directWakesPerHour);
-    if (live.directWakesPerHour === 0) {
-      st.directOff = st.directLimiter ?? st.directOff;
-      st.directLimiter = null;
-    } else {
-      // Off and on again keeps this hour's direct wakes: same limiter, resized.
-      st.directLimiter = st.directLimiter ?? st.directOff ?? new WakeLimiter(live.directWakesPerHour, this.#now);
-      st.directOff = null;
-      st.directLimiter.resize(live.directWakesPerHour);
-    }
+    note('wakes_per_hour', st.policy.limit('normal'), live.wakesPerHour);
+    st.policy.resize('normal', live.wakesPerHour);
+    note('direct_wakes_per_hour', st.policy.limit('direct'), live.directWakesPerHour);
+    st.policy.resize('direct', live.directWakesPerHour);
     note('pause_seconds', st.cfg.pauseSeconds ?? this.#broadPauseMs / 1000, live.pauseSeconds);
     note('post_wake_minutes', st.cfg.postWakeMinutes ?? 0, live.postWakeMinutes);
     note('stall_minutes', st.cfg.stallMinutes ?? 0, live.stallMinutes);
@@ -1526,8 +1510,8 @@ export class Router {
       this.#log(`[${handle}] reminder skipped: no injector registered`);
       return;
     }
-    if (st.limiter.waitMs() > 0) {
-      this.#log(`[${handle}] reminder skipped: wake cap reached (${st.limiter.perHour}/hour)`);
+    if (!st.policy.canRemind()) {
+      this.#log(`[${handle}] reminder skipped: wake cap reached (${st.policy.limit('normal')}/hour)`);
       return;
     }
     // UNI-1044: the gate decides whether this reminder is worth a wake. It
@@ -1574,7 +1558,7 @@ export class Router {
     if (gate) wake.gate = gate;
     if (st.backlog) wake.backlog = structuredClone(st.backlog);
     if (st.filter.dropped) wake.filter_dropped = structuredClone(st.filter.dropped);
-    this.#noteLastWake(st, wake, st.limiter);
+    this.#noteLastWake(st, wake, 'normal');
     await this.#noteProfile(st, wake, signal);
     const result = await settle(injector.deliver(wake));
     if (result === 'gone') {
@@ -1591,7 +1575,7 @@ export class Router {
     // b60b6fc1): a forced one that met a busy or gone session is forced again.
     st.gateQuiet = 0;
     this.#signal(handle, 'woke');
-    st.limiter.record();
+    st.policy.record('normal');
     st.stats.wakes++;
     st.stats.reminders++;
     if (wake.backlog) st.backlog = null;
@@ -1641,11 +1625,9 @@ export class Router {
   /** Mentions use the general allowance first and the direct one only after
    * it. If this wake (spending `limiter`) takes the last slot of both, say
    * when the next one is possible: until then even a mention waits silently. */
-  #noteLastWake(st: AgentState, wake: Wake, limiter: WakeLimiter): void {
-    const afterThis = (l: WakeLimiter | null) => (!l ? Infinity : l === limiter ? l.waitAfterNextMs() : l.waitMs());
-    const general = afterThis(st.limiter);
-    const direct = afterThis(st.directLimiter);
-    if (general > 0 && direct > 0) wake.wakes_resume_at = this.#now() + Math.min(general, direct);
+  #noteLastWake(st: AgentState, wake: Wake, lane: WakeLane): void {
+    const wait = st.policy.afterWakeWaitMs(lane);
+    if (wait > 0) wake.wakes_resume_at = this.#now() + wait;
   }
 
   /** Adds the account's posts left today to a wake when it is low, and the
@@ -1903,7 +1885,7 @@ export class Router {
     const { handle } = st.cfg;
     const injector = st.injectors.at(-1);
     if (!injector) return this.#retryMs * 5;
-    const cap = st.limiter.waitMs();
+    const cap = st.policy.waitMs('normal');
     if (cap > 0) return cap;
     const wake: Wake = { wake_id: randomUUID(), agent: handle, events: [], resync_required: false };
     const items = this.#attachFilter(st, wake);
@@ -1913,7 +1895,7 @@ export class Router {
       return 0;
     }
     if (st.backlog) wake.backlog = structuredClone(st.backlog);
-    this.#noteLastWake(st, wake, st.limiter);
+    this.#noteLastWake(st, wake, 'normal');
     await this.#noteProfile(st, wake, signal);
     const result = await settle(injector.deliver(wake));
     if (result === 'gone') {
@@ -1922,7 +1904,7 @@ export class Router {
     }
     if (result !== 'accepted') return Math.min(60_000, this.#retryMs * 4);
     this.#signal(handle, 'woke');
-    st.limiter.record();
+    st.policy.record('normal');
     st.stats.wakes++;
     st.stats.events += wake.events.length;
     if (wake.backlog) st.backlog = null;
@@ -2050,23 +2032,22 @@ export class Router {
       // per batch). A capped batch is held, never dropped: it stays
       // unacknowledged until a wake carries it.
       let send = fresh;
-      let limiter = st.limiter;
-      const capWait = st.limiter.waitMs();
-      if (capWait > 0) {
-        const direct = fresh.filter(
-          (d) => st.directSubs.has(d.subscription_id) || d.events.some((e) => isDirectKind(e.kind)),
-        );
-        const directWait = direct.length && st.directLimiter ? st.directLimiter.waitMs() : Infinity;
-        for (const d of fresh) if (directWait > 0 || !direct.includes(d)) st.capHeld.add(d.delivery_id);
-        if (directWait > 0) {
+      const direct = fresh.filter(
+        (d) => st.directSubs.has(d.subscription_id) || d.events.some((e) => isDirectKind(e.kind)),
+      );
+      const decision = st.policy.decide({ hasDirect: direct.length > 0 });
+      const lane: WakeLane = 'lane' in decision ? decision.lane : 'normal';
+      if (!('lane' in decision) || lane === 'direct') {
+        const delayed = !('lane' in decision);
+        for (const d of fresh) if (delayed || !direct.includes(d)) st.capHeld.add(d.delivery_id);
+        if ('waitMs' in decision) {
           st.stats.delayed = count;
           notice(
-            `wake cap reached (${st.limiter.perHour}/hour); delaying ${count} event(s) for ${Math.ceil(Math.min(capWait, directWait) / 1000)} s${dmNote(fresh)}`,
+            `wake cap reached (${st.policy.limit('normal')}/hour); delaying ${count} event(s) for ${Math.ceil(decision.waitMs / 1000)} s${dmNote(fresh)}`,
           );
-          return Math.min(capWait, directWait, 60_000);
+          return Math.min(decision.waitMs, 60_000);
         }
         send = direct;
-        limiter = st.directLimiter!;
       }
       // Tilori batches make the wake's events; Market batches its Market
       // part, kinds and ids only.
@@ -2094,7 +2075,7 @@ export class Router {
       const heldBack = events(send.filter((d) => st.capHeld.has(d.delivery_id)));
       if (heldBack) wake.held_back = heldBack;
       if (stillHeld) wake.still_held = stillHeld;
-      this.#noteLastWake(st, wake, limiter);
+      this.#noteLastWake(st, wake, lane);
       await this.#noteProfile(st, wake, signal);
       // Exactly one deliver is in flight per agent: this loop awaits it with
       // no timeout, so a slow injector (an exec run, a busy session) is never
@@ -2126,7 +2107,7 @@ export class Router {
       if (delivered) this.#log(`[${handle}] delivered wake to ${injector.kind}${delivered}`);
       if (send.some((d) => d.lane === 'tilori' && !st.directSubs.has(d.subscription_id))) st.plainWokeAt = Date.now();
       this.#signal(handle, 'woke');
-      limiter.record();
+      st.policy.record(lane);
       if (st.cfg.reminder?.onlyWhenIdle) st.reminderAt = Date.now() + st.cfg.reminder.everyMs;
       st.stats.wakes++;
       st.stats.events += wake.events.length + marketEvents.length;
@@ -2167,7 +2148,7 @@ export class Router {
       while (st.recent.size > MAX_RECENT) st.recent.delete(st.recent.keys().next().value!);
       this.#log(
         `[${handle}] woke ${injector.kind} with ${wake.events.length + marketEvents.length} event(s)` +
-          (limiter === st.directLimiter ? ` past the wake cap; ${stillHeld} still held` : ''),
+          (lane === 'direct' ? ` past the wake cap; ${stillHeld} still held` : ''),
       );
     }
 
