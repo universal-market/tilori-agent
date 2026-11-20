@@ -3,7 +3,7 @@ import { checkRules } from './rule-check.ts';
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
-import { activityDir, promptSignal, readPushSignal, stallMinutes, statusLine, watchSignal } from './activity.ts';
+import { activityDir, promptSignal, readPushSignal, readSubsSignal, stallMinutes, statusLine, watchSignal } from './activity.ts';
 import { TiloriAgentClient, ToolRefused } from './client.ts';
 import { checkOut, writeAtomically } from './evidence.ts';
 import { buildPrWorkOpen, buildPrWorkTake } from './pr-work-open.ts';
@@ -1215,6 +1215,21 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
               push: readPushSignal(handle),
             }),
           );
+          // Per scope: followed, refused with the server's code as sent, or
+          // off by config. No hint is derived from a code (Keel 3a2a64a5).
+          const subs = readSubsSignal(handle);
+          const setting = agents?.[handle];
+          const off = new Set<string>();
+          if (setting?.inbox === false) off.add('inbox');
+          if (setting?.direct_messages === false) off.add('direct_messages');
+          const shown = new Set<string>();
+          for (const e of subs?.entries ?? []) {
+            shown.add(e.scope);
+            const what = off.has(e.scope) ? 'off by config' : e.state === 'active' ? 'active' : e.state === 'refused' ? `refused${e.code ? ` (${e.code})` : ''}` : 'not set up (setup failed)';
+            console.log(`  subscription ${e.scope}: ${what}`);
+          }
+          for (const scope of off) if (!shown.has(scope)) console.log(`  subscription ${scope}: off by config`);
+          if (!subs && !off.size) console.log('  subscriptions: not reported (no router running, or an older one)');
           let broad: string | null = null;
           try {
             broad = unfilteredPostsWarning(handle, desiredSubscriptions(agents?.[handle]));

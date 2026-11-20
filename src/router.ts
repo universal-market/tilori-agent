@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { clock, promptSignal, touchSignal, writeCapsSignal, writePushSignal, type SignalKind } from './activity.ts';
+import { clock, promptSignal, touchSignal, writeCapsSignal, writePushSignal, writeSubsSignal, type SignalKind, type SubsEntry } from './activity.ts';
 import {
   ACCESS_GATE,
   KeyRejected,
@@ -688,6 +688,25 @@ export class Router {
     }
   }
 
+  /** Writes `subs-<agent>` for `status` (best effort): each desired scope as
+   * followed, refused (the server's code) or failed. */
+  #subsStatus(handle: string, wanted: string[], subs: AgentSubscription[], outcomes: Map<string, SubsEntry>) {
+    if (this.#signalDir === undefined) return;
+    const entries: SubsEntry[] = [];
+    for (const scope of new Set(wanted)) {
+      if (subs.some((s) => s.scope.type === scope)) entries.push({ scope, state: 'active' });
+      else entries.push(outcomes.get(scope) ?? { scope, state: 'failed' });
+    }
+    try {
+      writeSubsSignal(this.#signalDir, handle, entries);
+    } catch (cause) {
+      const key = `subs-${handle}`;
+      if (this.#signalFailed.has(key)) return;
+      this.#signalFailed.add(key);
+      this.#log(`[${handle}] could not update subs- in the run directory: ${errText(cause)}`);
+    }
+  }
+
   /** Writes `push-<agent>` for `status` (best effort). */
   #pushStatus(handle: string, s: PushStatus) {
     if (this.#signalDir === undefined) return;
@@ -1006,6 +1025,7 @@ export class Router {
     while (!signal.aborted) {
       let subs: AgentSubscription[];
       let skipped: Error | null = null;
+      const outcomes = new Map<string, SubsEntry>();
       const now = Date.now();
       for (const [key, at] of lane.resubscribed) if (now - at > this.#renewEveryMs) lane.resubscribed.delete(key);
       for (const [key, at] of lane.dropped) if (now - at > this.#renewEveryMs) lane.dropped.delete(key);
@@ -1020,9 +1040,18 @@ export class Router {
           renewIds: lane.renewIds,
           // The Market lane logs fixed words only (Bastion b9dd0cb9 4).
           log: tilori ? (m) => this.#log(`[${handle}] ${m}`) : () => {},
-          skipped: (cause) => (skipped = cause),
+          skipped: (cause, spec) => {
+            skipped = cause;
+            const code = cause instanceof ToolRefused ? cause.code : undefined;
+            outcomes.set(spec.scope.type, {
+              scope: spec.scope.type,
+              state: cause instanceof ToolRefused ? 'refused' : 'failed',
+              ...(code ? { code } : {}),
+            });
+          },
         });
         lane.renewIds.clear();
+        if (tilori) this.#subsStatus(handle, lane.subscriptions.map((s) => s.scope.type), subs, outcomes);
         failures = 0;
       } catch (cause) {
         if (signal.aborted) return;
