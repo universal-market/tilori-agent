@@ -27,6 +27,7 @@ function setup(
     coalesceMs?: number;
     plainHoldMs?: number;
     minuteMs?: number;
+    slowDeliverMs?: number;
     postWakeMinutes?: number;
     pauseSeconds?: number;
     directPauseMs?: number;
@@ -55,6 +56,7 @@ function setup(
     logger: (m) => logs.push(m),
     waitMs: 10,
     retryMs: 10,
+    slowDeliverMs: opts.slowDeliverMs,
     coalesceMs: opts.coalesceMs ?? 0,
     plainHoldMs: opts.plainHoldMs ?? 0,
     minuteMs: opts.minuteMs,
@@ -190,14 +192,49 @@ describe('router', () => {
   test('a DM is named in the log (kind and id only) while held and when delivered (UNI-1106)', async () => {
     const { fake, router, ac, done, logs } = setup({ posts: true });
     await until(() => fake.subs.length === 3);
+    const marker = 'SECRET-DM-BODY-MARKER';
     const msg = dm();
+    msg.data = { ...msg.data, body: marker, summary: marker, title: marker };
     fake.push('direct_messages', [msg]);
     await until(() => logs.some((l) => l.includes('no injector registered') && l.includes('[dm dm.message ')));
     const inj = new Recorder();
     router.register('wren', inj);
     await until(() => inj.wakes.length === 1);
-    await until(() => logs.some((l) => l.includes('delivered wake to') && l.includes('[dm dm.message ')));
-    expect(logs.join('\n')).not.toContain('body');
+    await until(() => logs.some((l) => l.includes('delivered wake to') && l.includes(`[dm dm.message ${msg.entity_id}]`)));
+    expect(logs.join('\n')).not.toContain(marker);
+    ac.abort();
+    await done;
+  });
+
+  test('a hostile DM kind or id cannot put text or a newline in the log (UNI-1106)', async () => {
+    const { fake, ac, done, logs } = setup({ posts: true });
+    await until(() => fake.subs.length === 3);
+    const msg = dm();
+    fake.push('direct_messages', [{ ...msg, kind: 'dm.evil\nforged line', entity_id: 'x\nforged id' }]);
+    await until(() => logs.some((l) => l.includes('no injector registered') && l.includes('[dm ')));
+    const held = logs.find((l) => l.includes('no injector registered'))!;
+    expect(held).toContain('[dm dm.other invalid-id]');
+    expect(logs.join('\n')).not.toContain('forged');
+    ac.abort();
+    await done;
+  });
+
+  test('a handoff that is slow to accept is logged once and nothing is released (UNI-1106)', async () => {
+    const { fake, router, ac, done, logs } = setup({ posts: true, slowDeliverMs: 30 });
+    await until(() => fake.subs.length === 3);
+    let release: (r: DeliverResult) => void = () => {};
+    router.register('wren', {
+      kind: 'test',
+      deliver: () => new Promise<DeliverResult>((r) => (release = r)),
+    });
+    fake.push('direct_messages', [dm()]);
+    await until(() => logs.some((l) => l.includes('has not accepted the wake after')));
+    const slow = logs.find((l) => l.includes('has not accepted the wake after'))!;
+    expect(slow).toContain('[dm dm.message ');
+    expect(fake.acks.length).toBe(0);
+    release('accepted');
+    await until(() => fake.acks.length === 1);
+    expect(logs.filter((l) => l.includes('has not accepted the wake after'))).toHaveLength(1);
     ac.abort();
     await done;
   });
