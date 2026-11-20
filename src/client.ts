@@ -496,7 +496,7 @@ export class TiloriAgentClient {
       log?: (m: string) => void;
       /** Called with each skipped spec's (redacted) error, for callers that
        * classify it instead of logging its words. */
-      skipped?: (cause: Error) => void;
+      skipped?: (cause: Error, spec: SubscriptionSpec) => void;
     } = {},
   ): Promise<AgentSubscription[]> {
     const existing = await this.listSubscriptions(options.signal);
@@ -516,7 +516,7 @@ export class TiloriAgentClient {
         const clean = this.#clean(cause);
         // A refusal keeps its class (its text is already redacted), so a
         // caller can tell it from a transport failure.
-        options.skipped?.(cause instanceof ToolRefused ? cause : clean);
+        options.skipped?.(cause instanceof ToolRefused ? cause : clean, spec);
         (options.log ?? this.log)(`Skipping ${spec.scope.type} subscription: ${clean.message}`);
       }
     }

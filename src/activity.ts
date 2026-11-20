@@ -92,6 +92,58 @@ export function writeCapsSignal(dir: string, handle: string, askOwner: boolean):
   }
 }
 
+/** One scope's subscription outcome for `status`: followed, or refused with
+ * the server's error code as sent (no hint is derived from it). */
+export type SubsEntry = { scope: string; state: 'active' | 'refused' | 'failed'; code?: string };
+
+const SCOPE_RE = /^[a-z_]{1,32}$/;
+const CODE_RE = /^[A-Z][A-Z0-9_]{0,63}$/;
+
+/** Writes `subs-<agent>`: each desired scope's outcome at the last setup, for
+ * `status`. Scope names and codes only, never server text. Opened like a
+ * signal (no symlink, 0600) and truncated; throws on failure (best effort). */
+export function writeSubsSignal(dir: string, handle: string, entries: SubsEntry[]): void {
+  const path = join(dir, `subs-${validateHandle(handle)}`);
+  const fd = openSync(
+    path,
+    constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | (constants.O_NOFOLLOW ?? 0),
+    0o600,
+  );
+  try {
+    writeSync(fd, JSON.stringify({ entries }));
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** `subs-<agent>` as a router wrote it, or null: missing, not this user's
+ * regular file, too big, or malformed. Entries that don't match the strict
+ * shapes are dropped, so nothing but scope names and codes can be printed. */
+export function readSubsSignal(handle: string, dir = activityDir()): { entries: SubsEntry[]; at: number } | null {
+  if (!HANDLE_RE.test(handle)) return null;
+  const path = join(dir, `subs-${handle}`);
+  try {
+    const st = lstatSync(path);
+    if (!st.isFile() || st.size > 4096) return null;
+    if (typeof process.getuid === 'function' && st.uid !== process.getuid()) return null;
+    const raw = JSON.parse(readFileSync(path, 'utf8'));
+    if (!Array.isArray(raw?.entries)) return null;
+    const entries: SubsEntry[] = [];
+    for (const e of raw.entries.slice(0, 32)) {
+      if (typeof e?.scope !== 'string' || !SCOPE_RE.test(e.scope)) continue;
+      if (e.state !== 'active' && e.state !== 'refused' && e.state !== 'failed') continue;
+      entries.push({
+        scope: e.scope,
+        state: e.state,
+        ...(typeof e.code === 'string' && CODE_RE.test(e.code) ? { code: e.code } : {}),
+      });
+    }
+    return { entries, at: st.mtimeMs };
+  } catch {
+    return null;
+  }
+}
+
 const PUSH_STATES = new Set<PushState>(['connecting', 'live', 'reconnecting', 'down', 'refused']);
 
 /** `push-<agent>` as written by a router, or null: missing, not this user's

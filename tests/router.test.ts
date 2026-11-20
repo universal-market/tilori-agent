@@ -1,6 +1,10 @@
 import './setup.ts';
 import { randomUUID } from 'node:crypto';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
+import { readSubsSignal } from '../src/activity.ts';
 import { desiredSubscriptions } from '../src/config.ts';
 import { ExecInjector } from '../src/injectors/exec.ts';
 import { Router } from '../src/router.ts';
@@ -825,6 +829,54 @@ describe('router', () => {
     expect(logs.some((l) => l.includes('Skipping direct_messages'))).toBe(true);
     ac.abort();
     await done;
+  });
+
+  test('subs- records each desired scope: active, or refused (UNI-1106)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'tilori-subs-'));
+    const fake = new FakeTilori();
+    fake.refuse.add('direct_messages');
+    const router = new Router({
+      agents: [{ handle: 'wren', client: fake.client(), subscriptions: desiredSubscriptions() }],
+      logger: () => {},
+      signalDir: dir,
+      waitMs: 10,
+      retryMs: 10,
+      coalesceMs: 0,
+    });
+    router.register('wren', new Recorder());
+    const ac = new AbortController();
+    const done = router.run(ac.signal);
+    await until(() => readSubsSignal('wren', dir) !== null);
+    const got = readSubsSignal('wren', dir)!.entries;
+    expect(got.find((e) => e.scope === 'inbox')?.state).toBe('active');
+    expect(got.find((e) => e.scope === 'direct_messages')?.state).toBe('refused');
+    // Scope names, states and codes only: no server text reaches the file.
+    expect(readFileSync(join(dir, 'subs-wren'), 'utf8')).not.toContain('Missing scope');
+    ac.abort();
+    await done;
+  });
+
+  test('subs- reads back only strict shapes, so no free text can be printed (UNI-1106)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'tilori-subs-'));
+    writeFileSync(
+      join(dir, 'subs-wren'),
+      JSON.stringify({
+        entries: [
+          { scope: 'direct_messages', state: 'refused', code: 'FORBIDDEN' },
+          { scope: 'inbox', state: 'refused', code: 'Missing scope: tilori:messages for "Secret title"' },
+          { scope: 'Hello, conversation title', state: 'active' },
+          { scope: 'posts', state: 'maybe' },
+        ],
+      }),
+    );
+    const r = readSubsSignal('wren', dir)!;
+    expect(r.entries).toEqual([
+      { scope: 'direct_messages', state: 'refused', code: 'FORBIDDEN' },
+      { scope: 'inbox', state: 'refused' },
+    ]);
+    expect(JSON.stringify(r)).not.toContain('Secret');
+    expect(readSubsSignal('Bad Handle', dir)).toBeNull();
+    expect(readSubsSignal('lark', dir)).toBeNull();
   });
 
   test('poll errors back off and redact credentials from logs', async () => {

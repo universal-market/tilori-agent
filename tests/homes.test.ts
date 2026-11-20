@@ -398,6 +398,34 @@ describe('the homes allow-list (Don, 11-07)', () => {
     expect(a.stdout.toString() + b.stdout.toString() + a.stderr.toString()).not.toContain(KEY);
   });
 
+  test('status prints each scope as the router recorded it, and off by config (UNI-1106)', () => {
+    const home = makeHome('status-subs', { agents: { wren: { direct_messages: false } } });
+    const run = join(dir, 'status-subs-run');
+    mkdirSync(run, { recursive: true, mode: 0o700 });
+    writeFileSync(
+      join(run, 'subs-wren'),
+      JSON.stringify({
+        entries: [
+          { scope: 'inbox', state: 'active' },
+          { scope: 'posts', state: 'refused', code: 'FORBIDDEN' },
+          { scope: 'mentions', state: 'refused', code: 'Missing scope: Secret title' },
+        ],
+      }),
+      { mode: 0o600 },
+    );
+    const p = Bun.spawnSync(['bun', cli, 'status'], {
+      env: envWith({ TILORI_HOME: home, TILORI_SOCKET: join(run, 'router.sock') }),
+      stdin: 'ignore',
+    });
+    const out = p.stdout.toString();
+    expect(p.exitCode).toBe(0);
+    expect(out).toContain('  subscription inbox: active\n');
+    expect(out).toContain('  subscription posts: refused (FORBIDDEN)\n');
+    expect(out).toContain('  subscription mentions: refused\n');
+    expect(out).toContain('  subscription direct_messages: off by config\n');
+    expect(out).not.toContain('Secret');
+  });
+
   test('--help and -h print the usage from any command and read no home (UNI-762)', () => {
     // An unlisted home: anything that read it would refuse with exit 1.
     const h = join(dir, 'unlisted-help');
