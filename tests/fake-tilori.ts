@@ -50,12 +50,23 @@ export class FakeTilori implements McpToolCaller {
   posts = new Map<string, unknown>();
   /** search_posts pages, served in order by cursor ("" is the first page). */
   searchPages = new Map<string, { items: unknown[]; next_cursor: string | null }>();
+  /** Optional per-root search_posts pages when root_post_id is passed. */
+  threadPages = new Map<string, Map<string, { items: unknown[]; next_cursor: string | null }>>();
   /** The arguments of each search_posts call. */
   searches: Record<string, unknown>[] = [];
+  /** The arguments of each create_post call. */
+  createdPosts: Record<string, unknown>[] = [];
+  /** Custom result or error for create_post; unset generates a UUID id. */
+  createPostResult: unknown = undefined;
+  createPostError: { code?: string; message: string } | null = null;
+  /** Optional error per tool name (with code), overriding normal handling. */
+  toolErrors = new Map<string, { code?: string; message: string }>();
   /** get_post waits until the caller aborts it. */
   postHangs = false;
   /** search_posts waits until the caller aborts it. */
   searchHangs = false;
+  /** create_post waits until the caller aborts it. */
+  createPostHangs = false;
 
   /** Subscriptions whose next batch is marked resync_required. */
   resyncNext = new Set<string>();
@@ -79,7 +90,13 @@ export class FakeTilori implements McpToolCaller {
     if (this.refuseKey)
       throw Object.assign(new Error('Streamable HTTP error: Error POSTing to endpoint: {"error":"invalid_token"}'), { code: 401 });
     const ok = (result: unknown) => ({ content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: { result } });
-    const err = (message: string) => ({ isError: true, content: [{ type: 'text', text: JSON.stringify({ message }) }] });
+    const err = (message: string, code?: string) => ({
+      isError: true,
+      ...(code ? { structuredContent: { error: { code, message } } } : {}),
+      content: [{ type: 'text', text: JSON.stringify(code ? { code, message } : { message }) }],
+    });
+    const forcedErr = this.toolErrors.get(name);
+    if (forcedErr) return err(forcedErr.message, forcedErr.code);
     switch (name) {
       case 'list_agent_subscriptions':
         return ok({ subscriptions: this.subs });
@@ -98,7 +115,9 @@ export class FakeTilori implements McpToolCaller {
             if (options?.signal?.aborted) return reject(new Error('aborted'));
             options?.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
           });
-        const page = this.searchPages.get(String(a.cursor ?? ''));
+        const rootId = typeof a.root_post_id === 'string' ? a.root_post_id : '';
+        const pages = (rootId && this.threadPages.get(rootId)) || this.searchPages;
+        const page = pages.get(String(a.cursor ?? ''));
         return page === undefined ? err('Invalid cursor') : ok(page);
       }
       case 'get_post': {
@@ -108,7 +127,18 @@ export class FakeTilori implements McpToolCaller {
             options?.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
           });
         const post = this.posts.get(String(a.post_id));
-        return post === undefined ? err('Post unavailable') : ok(post);
+        return post === undefined ? err('Post unavailable', 'NOT_FOUND') : ok(post);
+      }
+      case 'create_post': {
+        this.createdPosts.push(a);
+        if (this.createPostHangs)
+          await new Promise((_, reject) => {
+            if (options?.signal?.aborted) return reject(new Error('aborted'));
+            options?.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+          });
+        if (this.createPostError) return err(this.createPostError.message, this.createPostError.code);
+        if (this.createPostResult !== undefined) return ok(this.createPostResult);
+        return ok({ id: randomUUID() });
       }
       case 'subscribe_to_events': {
         const scope = normalizeScope(a.scope as any);

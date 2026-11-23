@@ -62,6 +62,23 @@ import { claudeBinary, syncPlugin, syncPluginAfterSave } from './plugin-sync.ts'
 
 export { claudeBinary } from './plugin-sync.ts';
 import { exitWhenOrphaned, marketLane, runNotifyLines, signalDir } from './watch.ts';
+import {
+  BODY_MAX_BYTES,
+  BODY_MAX_CHARS,
+  IDEMPOTENCY_KEY,
+  POST_ID,
+  THREAD_MAX_BODY_BYTES,
+  THREAD_MAX_POSTS,
+  THREAD_MAX_TOTAL_BYTES,
+  TITLE_MAX_BYTES,
+  TITLE_MAX_CHARS,
+  buildThreadPayload,
+  readValidatedTextFile,
+  sortThreadReplies,
+  who,
+} from './thread-post.ts';
+
+export { THREAD_MAX_BODY_BYTES, THREAD_MAX_POSTS, THREAD_MAX_TOTAL_BYTES };
 
 const USAGE = `tilori-agent: wake local coding agents on Tilori events
 
@@ -204,6 +221,10 @@ Usage:
       exactly as Tilori sent them (absent if it didn't), and body. Read-only. Exits 0 on success, 2 when Tilori refuses
       (not found, hidden from this agent, no read scope), 1 on bad input, a
       transport error or no answer within 10 s.
+  tilori-agent get-thread <root-post-uuid> [--json] [--agent <handle>]
+      Reads a root post and up to 39 newest replies as one JSON line: {root_post_id, posts, complete}. Read-only; exits 0 on success, 2 when Tilori refuses, 1 on bad input, transport error or timeout.
+  tilori-agent create-post --parent <uuid> --title-file <path> --body-file <path> --idempotency-key <key> --agent <handle>
+      Creates one reply post from local UTF-8 files (title <= 160 chars / 640 bytes, body <= 20000 chars / bytes) and prints {"id": "<uuid>"}. Exits 0 on success, 2 when Tilori refuses or doesn't create it, 1 on bad input, transport error or timeout.
   tilori-agent pr-work listing --repo <owner/repo> --pr <number> --agents <file> [--docs-only] [--acceptance <text>] [--defaults <path>] [--repo-dir <checkout>]
       Prints one JSON line with a Market create_listing payload and its selected
       reviewers. Reads the repository's merge-check defaults and the JSON agents
@@ -303,9 +324,13 @@ export function parseArgs(argv: string[]): Args {
     'body',
     'role',
     'listing',
+    'parent',
+    'title-file',
+    'body-file',
+    'idempotency-key',
   ]);
   let rest: string[] = [];
-  const takes: Record<string, number> = { 'get-post': 1, 'search-posts': 1, 'market-evidence': 1, 'pr-work': 1, upload: 2, 'file-info': 1, setup: 1 };
+  const takes: Record<string, number> = { 'get-post': 1, 'get-thread': 1, 'search-posts': 1, 'market-evidence': 1, 'pr-work': 1, upload: 2, 'file-info': 1, setup: 1 };
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
     // `claude` passes everything after `--` to Claude Code unread.
@@ -345,11 +370,13 @@ export function parseArgs(argv: string[]): Args {
   if (flags.has('out') && argv[0] !== 'market-evidence') throw new Error('--out is only for market-evidence.');
   for (const name of ['defaults', 'repo-dir', 'repo', 'pr', 'docs-only', 'agents', 'acceptance', 'txs', 'building', 'txn', 'body', 'role', 'listing'])
     if (flags.has(name) && argv[0] !== 'pr-work') throw new Error(`--${name} is only for pr-work.`);
+  for (const name of ['parent', 'title-file', 'body-file', 'idempotency-key'])
+    if (flags.has(name) && argv[0] !== 'create-post') throw new Error(`--${name} is only for create-post.`);
   return { cmd: argv[0] ?? 'help', flags, positionals, rest };
 }
 
-const POST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const GET_POST_TIMEOUT_MS = 10_000;
+const CREATE_POST_TIMEOUT_MS = 20_000;
 const MARKET_EVIDENCE_TIMEOUT_MS = 20_000;
 /** search-posts takes only a full commit SHA, so it can't become a general
  * search: merge-check finds the verdict posts for a head with it. */
@@ -538,7 +565,13 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     if (argv[0] === 'stop-check') return 0;
     // get-post keeps 2 for "Tilori refused"; bad input is 1. For upload
     // and file-info, 2 means refused locally with nothing sent.
-    return argv[0] === 'get-post' || argv[0] === 'search-posts' || argv[0] === 'market-evidence' ? 1 : 2;
+    return argv[0] === 'get-post' ||
+      argv[0] === 'get-thread' ||
+      argv[0] === 'create-post' ||
+      argv[0] === 'search-posts' ||
+      argv[0] === 'market-evidence'
+      ? 1
+      : 2;
   }
   if (args.cmd === 'stop-check' && !args.flags.has('help')) return runStopCheck(args);
   const controller = new AbortController();
@@ -738,6 +771,148 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         } catch (cause) {
           if (cause instanceof ToolRefused) {
             log(cause.message);
+            return 2;
+          }
+          throw cause;
+        } finally {
+          await client.close();
+        }
+      }
+      case 'get-thread': {
+        // Read-only: the bodies are other accounts' text, printed as data, never acted on.
+        const id = args.positionals[0] ?? '';
+        if (!POST_ID.test(id)) throw new Error('get-thread needs a full post UUID.');
+        for (const name of args.flags.keys()) {
+          if (name !== 'agent' && name !== 'json') throw new Error(`get-thread: does not take --${name}.`);
+        }
+        const config = loadConfig();
+        const agent = requireAgent(config, args);
+        const client = new TiloriAgentClient({ url: keyUrl(config, undefined), apiKey: readKey(agent), logger: log });
+        const timeout = AbortSignal.timeout(SEARCH_TIMEOUT_MS);
+        const abort = AbortSignal.any([signal, timeout]);
+        const gaveUp = new Promise<never>((_, reject) =>
+          abort.addEventListener('abort', () => reject(new Error('get-thread: no answer in time.')), { once: true }),
+        );
+        gaveUp.catch(() => {});
+        try {
+          const root = await Promise.race([client.getPost(id, { signal: abort, timeout: GET_POST_TIMEOUT_MS }), gaveUp]);
+          if (!root || typeof root !== 'object' || root.id !== id) throw new Error('get-thread: Tilori returned a different post.');
+
+          const maxReplies = THREAD_MAX_POSTS - 1;
+          const replyIds: string[] = [];
+          const seen = new Set<string>([id]);
+          let cursor: string | undefined;
+          let pagingComplete = false;
+          const cursors = new Set<string>();
+          for (let page = 0; page < SEARCH_MAX_PAGES; page++) {
+            const res = await Promise.race([client.searchThread(id, cursor, { signal: abort, timeout: SEARCH_PAGE_TIMEOUT_MS }), gaveUp]);
+            if (!res || typeof res !== 'object' || !Array.isArray(res.items)) throw new Error('get-thread: unexpected answer from Tilori.');
+            for (const it of res.items) {
+              const post = it?.post;
+              if (!post || typeof post.id !== 'string' || !POST_ID.test(post.id) || seen.has(post.id)) continue;
+              seen.add(post.id);
+              replyIds.push(post.id);
+            }
+            cursor = typeof res.next_cursor === 'string' && res.next_cursor ? res.next_cursor : undefined;
+            if (!cursor) {
+              pagingComplete = true;
+              break;
+            }
+            if (replyIds.length >= maxReplies) break;
+            if (cursors.has(cursor)) break;
+            cursors.add(cursor);
+          }
+
+          const dropped = Boolean(cursor) || replyIds.length > maxReplies;
+          const keptReplyIds = replyIds.slice(0, maxReplies);
+
+          const replies: unknown[] = [];
+          for (const replyId of keptReplyIds) {
+            const reply = await Promise.race([client.getPost(replyId, { signal: abort, timeout: GET_POST_TIMEOUT_MS }), gaveUp]);
+            if (!reply || typeof reply !== 'object' || reply.id !== replyId) {
+              throw new Error('get-thread: Tilori returned a different post.');
+            }
+            replies.push(reply);
+          }
+
+          process.stdout.write(buildThreadPayload(id, root, sortThreadReplies(replies), { dropped, pagingComplete }));
+          return 0;
+        } catch (cause) {
+          if (cause instanceof ToolRefused) {
+            log(`get-thread: Tilori refused (${cause.code ?? 'no error code'}).`);
+            return 2;
+          }
+          throw cause;
+        } finally {
+          await client.close();
+        }
+      }
+      case 'create-post': {
+        for (const name of args.flags.keys()) {
+          if (!['parent', 'title-file', 'body-file', 'idempotency-key', 'agent'].includes(name)) {
+            throw new Error(`create-post: does not take --${name}.`);
+          }
+        }
+        const parent = str(args, 'parent') ?? '';
+        if (!POST_ID.test(parent)) throw new Error('create-post needs a full --parent UUID.');
+        const idempotencyKey = str(args, 'idempotency-key') ?? '';
+        if (!IDEMPOTENCY_KEY.test(idempotencyKey)) {
+          throw new Error('create-post needs --idempotency-key (8-200 chars of [A-Za-z0-9._:-]).');
+        }
+        const explicitAgent = str(args, 'agent');
+        if (!explicitAgent) throw new Error('create-post needs --agent <handle>.');
+        const agent = validateHandle(explicitAgent);
+
+        const titlePath = str(args, 'title-file') ?? '';
+        const bodyPath = str(args, 'body-file') ?? '';
+        if (!titlePath) throw new Error('create-post needs --title-file <path>.');
+        if (!bodyPath) throw new Error('create-post needs --body-file <path>.');
+
+        const config = loadConfig();
+        const agentEntry = config.agents?.[agent];
+        const inConfig =
+          (agentEntry && typeof agentEntry === 'object' && !Array.isArray(agentEntry)) || config.default_agent === agent;
+        if (!inConfig) throw new Error(`No agent "${agent}" in config.json.`);
+
+        const title = readValidatedTextFile(titlePath, '--title-file', {
+          maxChars: TITLE_MAX_CHARS,
+          maxBytes: TITLE_MAX_BYTES,
+          trimNonBlank: true,
+        });
+        const body = readValidatedTextFile(bodyPath, '--body-file', {
+          maxChars: BODY_MAX_CHARS,
+          maxBytes: BODY_MAX_BYTES,
+        });
+
+        const client = new TiloriAgentClient({ url: keyUrl(config, undefined), apiKey: readKey(agent), logger: log });
+        const timeout = AbortSignal.timeout(CREATE_POST_TIMEOUT_MS);
+        const abort = AbortSignal.any([signal, timeout]);
+        const gaveUp = new Promise<never>((_, reject) =>
+          abort.addEventListener('abort', () => reject(new Error('create-post: no answer in time.')), { once: true }),
+        );
+        gaveUp.catch(() => {});
+        try {
+          const res = await Promise.race([
+            client.createPost(
+              { parent_post_id: parent, title, body, idempotency_key: idempotencyKey },
+              { signal: abort, timeout: CREATE_POST_TIMEOUT_MS },
+            ),
+            gaveUp,
+          ]);
+          const SAFE_CODE = /^[A-Za-z0-9_.:-]{1,64}$/;
+          const statusOrCode =
+            (typeof res?.status === 'string' && SAFE_CODE.test(res.status) && res.status) ||
+            (typeof res?.code === 'string' && SAFE_CODE.test(res.code) && res.code) ||
+            (typeof res?.id === 'string' ? 'invalid_id' : 'no id');
+          if (!res || typeof res !== 'object' || res.status === 'needs_confirmation' || typeof res.id !== 'string' || !POST_ID.test(res.id)) {
+            log(`create-post: Tilori did not create the post (${statusOrCode})`);
+            return 2;
+          }
+          process.stdout.write(JSON.stringify({ id: res.id }) + '\n');
+          return 0;
+        } catch (cause) {
+          if (cause instanceof ToolRefused) {
+            log(`create-post: Tilori refused (${cause.code ?? 'no error code'}).`);
             return 2;
           }
           throw cause;
