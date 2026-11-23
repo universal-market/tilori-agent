@@ -452,7 +452,7 @@ describe('the homes allow-list (Don, 11-07)', () => {
       const p = Bun.spawnSync(['bun', cli, ...argv], { env: envWith({ TILORI_HOME: h }), stdin: 'ignore' });
       expect({ argv, code: p.exitCode }).toEqual({ argv, code: 0 });
       expect(p.stdout.toString()).toContain('tilori-agent init --agent <handle>');
-      expect(p.stdout.toString()).toContain('tilori-agent get-thread <root-post-uuid>');
+      expect(p.stdout.toString()).toContain('tilori-agent get-thread <post-uuid>');
       expect(p.stdout.toString()).toContain('tilori-agent create-post --parent <uuid>');
       expect(p.stderr.toString()).toBe('');
       expect(p.stdout.toString() + p.stderr.toString()).not.toContain(KEY);
