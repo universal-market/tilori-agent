@@ -599,6 +599,36 @@ describe('get-thread', () => {
       ],
       complete: false,
     });
+
+    // Unconditional final fits() fallback when even the skeleton does not fit maxTotalBytes.
+    const ultraTight = buildThreadPayload(
+      oversizedRootId,
+      { id: oversizedRootId, title: 'title', body: 'body', author: {} },
+      [],
+      { ancestors: [{ id: ancestorRootId, title: 'a', body: 'b', author: {} }], dropped: false, pagingComplete: true, maxTotalBytes: 150 },
+    );
+    expect(ultraTight.endsWith('\n')).toBe(true);
+    expect(JSON.parse(ultraTight)).toEqual({
+      post_id: oversizedRootId,
+      thread_root_id: null,
+      ancestors: [],
+      posts: [],
+      complete: false,
+    });
+
+    const ultraTightBadId = buildThreadPayload(
+      'not-a-uuid',
+      { id: 'not-a-uuid', title: 'title', body: 'body', author: {} },
+      [],
+      { dropped: false, pagingComplete: true, maxTotalBytes: 150 },
+    );
+    expect(JSON.parse(ultraTightBadId)).toEqual({
+      post_id: null,
+      thread_root_id: null,
+      ancestors: [],
+      posts: [],
+      complete: false,
+    });
   });
 
   test('ancestors: 3-deep chain, community parent, refused parent, cycle guard, and 7+ ancestor cap', async () => {
@@ -708,8 +738,78 @@ describe('get-thread', () => {
     expect(deepOut.ancestors.map((p: any) => p.id)).toEqual(ancIds.slice(2));
     expect(deepOut.thread_root_id).toBe(ancIds[2]);
     expect(deepOut.posts).toHaveLength(THREAD_MAX_POSTS);
-    // 1 focus + 6 ancestors + 39 replies = 46 get_post calls (never fetches ancIds[0] or ancIds[1]).
-    expect(fake.calls.filter((c) => c === 'get_post')).toHaveLength(THREAD_MAX_POSTS + THREAD_MAX_ANCESTORS);
+    // 1 focus + 6 ancestors + 1 probe on 7th ancestor (ancIds[1]) + 39 replies = 47 get_post calls (never fetches ancIds[0]).
+    expect(fake.calls.filter((c) => c === 'get_post')).toHaveLength(THREAD_MAX_POSTS + THREAD_MAX_ANCESTORS + 1);
+
+    // Exactly 6 post ancestors under a community -> 6 ancestors kept, complete=true.
+    resetFake();
+    const commTop = uuid(780);
+    fake.posts.set(commTop, { id: commTop, kind: 'community', title: 'General', body: 'comm', author: {} });
+    const commAnc = Array.from({ length: 6 }, (_, i) => uuid(781 + i));
+    for (let i = 0; i < commAnc.length; i++) {
+      fake.posts.set(commAnc[i], {
+        id: commAnc[i],
+        parent_post_id: i === 0 ? commTop : commAnc[i - 1],
+        kind: 'post',
+        title: `ca${i}`,
+        body: `ca${i}`,
+        author: {},
+      });
+    }
+    const commFocus = uuid(787);
+    fake.posts.set(commFocus, { id: commFocus, parent_post_id: commAnc[5], title: 'cf', body: 'cf', author: {} });
+    fake.threadPages.set(commFocus, new Map([['', { items: [], next_cursor: null }]]));
+    const commAncRes = await runCli(['get-thread', commFocus, '--json', '--agent', 'wren']);
+    expect(commAncRes.exitCode).toBe(0);
+    const commAncOut = JSON.parse(commAncRes.stdout);
+    expect(commAncOut.complete).toBe(true);
+    expect(commAncOut.ancestors.map((p: any) => p.id)).toEqual(commAnc);
+    expect(commAncOut.thread_root_id).toBe(commAnc[0]);
+
+    // 7 post ancestors -> 6 kept, complete=false.
+    resetFake();
+    const sevenAnc = Array.from({ length: 7 }, (_, i) => uuid(760 + i));
+    for (let i = 0; i < sevenAnc.length; i++) {
+      fake.posts.set(sevenAnc[i], {
+        id: sevenAnc[i],
+        parent_post_id: i === 0 ? null : sevenAnc[i - 1],
+        title: `s${i}`,
+        body: `s${i}`,
+        author: {},
+      });
+    }
+    const sevenFocus = uuid(768);
+    fake.posts.set(sevenFocus, { id: sevenFocus, parent_post_id: sevenAnc[6], title: 'sf', body: 'sf', author: {} });
+    fake.threadPages.set(sevenFocus, new Map([['', { items: [], next_cursor: null }]]));
+    const sevenRes = await runCli(['get-thread', sevenFocus, '--json', '--agent', 'wren']);
+    expect(sevenRes.exitCode).toBe(0);
+    const sevenOut = JSON.parse(sevenRes.stdout);
+    expect(sevenOut.complete).toBe(false);
+    expect(sevenOut.ancestors.map((p: any) => p.id)).toEqual(sevenAnc.slice(1));
+    expect(sevenOut.thread_root_id).toBe(sevenAnc[1]);
+
+    // 6 post ancestors whose 7th parent is refused (NOT_FOUND) -> 6 kept, complete=false.
+    resetFake();
+    const missingSeventh = uuid(770);
+    const sixBeforeMissing = Array.from({ length: 6 }, (_, i) => uuid(771 + i));
+    for (let i = 0; i < sixBeforeMissing.length; i++) {
+      fake.posts.set(sixBeforeMissing[i], {
+        id: sixBeforeMissing[i],
+        parent_post_id: i === 0 ? missingSeventh : sixBeforeMissing[i - 1],
+        title: `m${i}`,
+        body: `m${i}`,
+        author: {},
+      });
+    }
+    const missingSeventhFocus = uuid(778);
+    fake.posts.set(missingSeventhFocus, { id: missingSeventhFocus, parent_post_id: sixBeforeMissing[5], title: 'mf', body: 'mf', author: {} });
+    fake.threadPages.set(missingSeventhFocus, new Map([['', { items: [], next_cursor: null }]]));
+    const missingSeventhRes = await runCli(['get-thread', missingSeventhFocus, '--json', '--agent', 'wren']);
+    expect(missingSeventhRes.exitCode).toBe(0);
+    const missingSeventhOut = JSON.parse(missingSeventhRes.stdout);
+    expect(missingSeventhOut.complete).toBe(false);
+    expect(missingSeventhOut.ancestors.map((p: any) => p.id)).toEqual(sixBeforeMissing);
+    expect(missingSeventhOut.thread_root_id).toBe(sixBeforeMissing[0]);
 
     // Exactly 6 ancestors with root having parent_post_id=null -> complete=true.
     resetFake();
@@ -732,6 +832,45 @@ describe('get-thread', () => {
     expect(exactAncOut.complete).toBe(true);
     expect(exactAncOut.ancestors.map((p: any) => p.id)).toEqual(exactAnc);
     expect(exactAncOut.thread_root_id).toBe(exactAnc[0]);
+
+    // Self-parent (focus.parent_post_id === focus.id) stops with no ancestors and does not loop.
+    resetFake();
+    const selfId = uuid(797);
+    fake.posts.set(selfId, { id: selfId, parent_post_id: selfId, title: 'self', body: 'self', author: {} });
+    fake.threadPages.set(selfId, new Map([['', { items: [], next_cursor: null }]]));
+    const selfRes = await runCli(['get-thread', selfId, '--json', '--agent', 'wren']);
+    expect(selfRes.exitCode).toBe(0);
+    const selfOut = JSON.parse(selfRes.stdout);
+    expect(selfOut.post_id).toBe(selfId);
+    expect(selfOut.thread_root_id).toBe(selfId);
+    expect(selfOut.ancestors).toEqual([]);
+    expect(selfOut.posts).toHaveLength(1);
+    expect(selfOut.complete).toBe(true);
+    expect(fake.calls.filter((c) => c === 'get_post')).toHaveLength(1);
+
+    // Wrong-id answer with kind: "community" exits 1 (unexpected answer), not a clean stop.
+    resetFake();
+    const wrongCommParent = uuid(796);
+    const wrongCommFocus = uuid(795);
+    fake.posts.set(wrongCommParent, { id: uuid(794), kind: 'community', title: 'Other', body: 'Other', author: {} });
+    fake.posts.set(wrongCommFocus, { id: wrongCommFocus, parent_post_id: wrongCommParent, title: 'f', body: 'f', author: {} });
+    fake.threadPages.set(wrongCommFocus, new Map([['', { items: [], next_cursor: null }]]));
+    const wrongCommRes = await runCli(['get-thread', wrongCommFocus, '--json', '--agent', 'wren']);
+    expect(wrongCommRes.exitCode).toBe(1);
+    expect(wrongCommRes.stdout).toBe('');
+    expect(wrongCommRes.stderr).toContain('Tilori returned a different post.');
+
+    // Unknown kind ("banana") exits 1 (unexpected answer).
+    resetFake();
+    const bananaParent = uuid(793);
+    const bananaFocus = uuid(792);
+    fake.posts.set(bananaParent, { id: bananaParent, kind: 'banana', title: 'B', body: 'B', author: {} });
+    fake.posts.set(bananaFocus, { id: bananaFocus, parent_post_id: bananaParent, title: 'f', body: 'f', author: {} });
+    fake.threadPages.set(bananaFocus, new Map([['', { items: [], next_cursor: null }]]));
+    const bananaRes = await runCli(['get-thread', bananaFocus, '--json', '--agent', 'wren']);
+    expect(bananaRes.exitCode).toBe(1);
+    expect(bananaRes.stdout).toBe('');
+    expect(bananaRes.stderr).toContain('unexpected answer from Tilori.');
   });
 
   test('byte-cap drop order: oldest replies first, then root-most ancestors keeping immediate parent last', () => {
@@ -898,6 +1037,7 @@ describe('get-thread', () => {
       expect(Buffer.byteLength(payload, 'utf8')).toBeLessThanOrEqual(cap);
       const parsed = JSON.parse(payload);
       expect(parsed.post_id).toBe(validId);
+      expect(parsed.complete).toBe(false);
       for (const p of [...parsed.ancestors, ...parsed.posts]) {
         expect(p.parent_post_id).toBeNull();
         expect(p.created_at).toBeNull();

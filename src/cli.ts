@@ -223,7 +223,7 @@ Usage:
       (not found, hidden from this agent, no read scope), 1 on bad input, a
       transport error or no answer within 10 s.
   tilori-agent get-thread <post-uuid> [--json] --agent <handle>
-      Reads a focus post, up to 6 ancestors (root-most first), and up to 39 newest replies as one JSON line: {post_id, thread_root_id, ancestors, posts, complete}. --agent is required. Read-only; exits 0 on success, 2 when Tilori refuses, 1 on bad input, transport error or timeout.
+      Reads a focus post, up to 6 ancestors (root-most first), and up to 39 newest replies under the focus post (not siblings or other branches of the ancestors) as one JSON line: {post_id, thread_root_id, ancestors, posts, complete}. posts holds the focus post and its newest replies; thread_root_id is the root-most ancestor fetched (the true thread root only when complete is true). --agent is required. Read-only; exits 0 on success, 2 when Tilori refuses, 1 on bad input, transport error or timeout.
   tilori-agent create-post --parent <uuid> --title-file <path> --body-file <path> --idempotency-key <key> --agent <handle>
       Creates one reply post from local UTF-8 files (title <= 160 chars / 640 bytes, body <= 20000 chars / bytes, both non-blank) and prints {"id": "<uuid>"}. Exits 0 on success, 2 when Tilori refuses or doesn't create it, 1 on bad input, transport error or timeout.
   tilori-agent pr-work listing --repo <owner/repo> --pr <number> --agents <file> [--docs-only] [--acceptance <text>] [--defaults <path>] [--repo-dir <checkout>]
@@ -829,10 +829,6 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
           let nextParentId = typeof focus.parent_post_id === 'string' && POST_ID.test(focus.parent_post_id) ? focus.parent_post_id : null;
           let ancestorTruncated = false;
           while (nextParentId && !ancestorSeen.has(nextParentId)) {
-            if (ancestorsFromChild.length >= THREAD_MAX_ANCESTORS) {
-              ancestorTruncated = true;
-              break;
-            }
             ancestorSeen.add(nextParentId);
             let parent: any;
             try {
@@ -847,15 +843,26 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
             if (!parent || typeof parent !== 'object') {
               throw new UnexpectedTiloriAnswer('get-thread: unexpected answer from Tilori.');
             }
-            if (parent.kind !== undefined && parent.kind !== null && parent.kind !== 'post') break;
             if (parent.id !== nextParentId) {
               throw new UnexpectedTiloriAnswer('get-thread: Tilori returned a different post.');
+            }
+            if (parent.kind === 'community') break;
+            if (parent.kind !== undefined && parent.kind !== null && parent.kind !== 'post') {
+              throw new UnexpectedTiloriAnswer('get-thread: unexpected answer from Tilori.');
+            }
+            if (ancestorsFromChild.length >= THREAD_MAX_ANCESTORS) {
+              ancestorTruncated = true;
+              break;
             }
             ancestorsFromChild.push(parent);
             nextParentId = typeof parent.parent_post_id === 'string' && POST_ID.test(parent.parent_post_id) ? parent.parent_post_id : null;
           }
           const ancestors = ancestorsFromChild.reverse();
 
+          // Search under the focus post `id` so `posts` holds the focus post and the newest replies
+          // under the focus post (not siblings or other branches of the ancestors).
+          // `thread_root_id` (computed in buildThreadPayload) is the root-most ancestor fetched,
+          // which is the true thread root only when `complete` is true.
           const maxReplies = THREAD_MAX_POSTS - 1;
           const replyIds: string[] = [];
           const seen = new Set<string>([id, ...ancestors.map((a) => a.id as string)]);

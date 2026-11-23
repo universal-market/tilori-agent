@@ -217,6 +217,17 @@ export function buildThreadPayload(
       body_truncated: true,
     };
   }
+  if (!fits()) {
+    return (
+      JSON.stringify({
+        post_id: capUuid(postId),
+        thread_root_id: null,
+        ancestors: [],
+        posts: [],
+        complete: false,
+      }) + '\n'
+    );
+  }
   return serialize(false);
 }
 
