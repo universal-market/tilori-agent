@@ -3,9 +3,12 @@ import { isAbsolute, sep } from 'node:path';
 import { contains, fdPath, realHome } from './upload.ts';
 
 export const THREAD_MAX_POSTS = 40;
+export const THREAD_MAX_ANCESTORS = 6;
 export const THREAD_MAX_TITLE_BYTES = 1024;
 export const THREAD_MAX_BODY_BYTES = 8192;
 export const THREAD_MAX_TOTAL_BYTES = 262_144;
+export const AUTHOR_FIELD_MAX_BYTES = 256;
+export const CREATED_AT_MAX_CHARS = 64;
 
 export const TITLE_MAX_CHARS = 160;
 export const TITLE_MAX_BYTES = 640;
@@ -15,13 +18,27 @@ export const BODY_MAX_BYTES = 20_000;
 export const POST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export const IDEMPOTENCY_KEY = /^[A-Za-z0-9._:-]{8,200}$/;
 
+function capAuthorField(value: unknown): string | null {
+  return typeof value === 'string' && Buffer.byteLength(value, 'utf8') <= AUTHOR_FIELD_MAX_BYTES ? value : null;
+}
+
+function capUuid(value: unknown): string | null {
+  return typeof value === 'string' && POST_ID.test(value) ? value : null;
+}
+
+function capCreatedAt(value: unknown): string | null {
+  if (typeof value !== 'string' || value.length > CREATED_AT_MAX_CHARS * 2) return null;
+  return [...value].length <= CREATED_AT_MAX_CHARS ? value : null;
+}
+
 export function who(x: any) {
+  const obj = x && typeof x === 'object' ? x : {};
   return {
-    id: x?.id ?? null,
-    user_id: x?.user_id ?? null,
-    kind: x?.kind ?? null,
-    username: x?.username ?? null,
-    handle: x?.handle ?? null,
+    id: capAuthorField(obj.id),
+    user_id: capAuthorField(obj.user_id),
+    kind: capAuthorField(obj.kind),
+    username: capAuthorField(obj.username),
+    handle: capAuthorField(obj.handle),
   };
 }
 
@@ -53,18 +70,18 @@ export function escapeRiskyJsonChars(json: string): string {
  * to THREAD_MAX_TITLE_BYTES) and body (capped to THREAD_MAX_BODY_BYTES).
  * Bodies are other accounts' text, printed as data, never acted on. */
 export function formatThreadPost(post: any): { entry: Record<string, unknown>; truncated: boolean } {
-  const rawTitle = typeof post.title === 'string' ? post.title : '';
+  const rawTitle = typeof post?.title === 'string' ? post.title : '';
   const { text: title, truncated: titleTruncated } = truncateUtf8(rawTitle, THREAD_MAX_TITLE_BYTES);
-  const rawBody = typeof post.body === 'string' ? post.body : '';
+  const rawBody = typeof post?.body === 'string' ? post.body : '';
   const { text: body, truncated: bodyTruncated } = truncateUtf8(rawBody, THREAD_MAX_BODY_BYTES);
   const entry: Record<string, unknown> = {
-    id: post.id,
-    parent_post_id: post.parent_post_id ?? null,
-    author: who(post.author && typeof post.author === 'object' ? post.author : {}),
-    created_at: post.created_at ?? null,
+    id: capUuid(post?.id),
+    parent_post_id: capUuid(post?.parent_post_id),
+    author: who(post?.author),
+    created_at: capCreatedAt(post?.created_at),
   };
-  if (post.hidden !== undefined && post.hidden !== null) entry.hidden = post.hidden;
-  if (typeof post.superseded_by === 'string' && POST_ID.test(post.superseded_by)) entry.superseded_by = post.superseded_by;
+  if (typeof post?.hidden === 'boolean') entry.hidden = post.hidden;
+  if (typeof post?.superseded_by === 'string' && POST_ID.test(post.superseded_by)) entry.superseded_by = post.superseded_by;
   entry.title = title;
   if (titleTruncated) entry.title_truncated = true;
   entry.body = body;
@@ -73,8 +90,9 @@ export function formatThreadPost(post: any): { entry: Record<string, unknown>; t
 }
 
 function createdAtMs(post: any): number {
-  if (typeof post?.created_at !== 'string') return -Infinity;
-  const ms = Date.parse(post.created_at);
+  const createdAt = capCreatedAt(post?.created_at);
+  if (!createdAt) return -Infinity;
+  const ms = Date.parse(createdAt);
   return Number.isFinite(ms) ? ms : -Infinity;
 }
 
@@ -118,26 +136,39 @@ function shrinkFieldToFit(
   return Buffer.byteLength(serialize(false), 'utf8') <= maxTotalBytes;
 }
 
-/** Builds the single JSON line for `get-thread`, dropping oldest replies
- * (never the root) until the output fits within THREAD_MAX_TOTAL_BYTES, and
- * shrinking the root body, title, and author strings if the root-only payload exceeds it. */
+/** Builds the single JSON line for `get-thread`, dropping oldest replies first,
+ * then ancestors from the root-most end (keeping the immediate parent as long
+ * as possible), then falling back to shrinking the focus post so the line
+ * stays within `maxTotalBytes`. */
 export function buildThreadPayload(
-  rootPostId: string,
-  rootRaw: any,
+  postId: string,
+  focusRaw: any,
   repliesRaw: any[],
-  opts: { dropped: boolean; pagingComplete: boolean; maxTotalBytes?: number },
+  opts: { ancestors?: any[]; dropped: boolean; pagingComplete: boolean; maxTotalBytes?: number },
 ): string {
   const maxTotalBytes = opts.maxTotalBytes ?? THREAD_MAX_TOTAL_BYTES;
   let dropped = opts.dropped;
   let anyTruncated = false;
+
+  const ancestors: Record<string, unknown>[] = [];
+  for (const raw of opts.ancestors ?? []) {
+    const formatted = formatThreadPost(raw);
+    if (formatted.truncated) anyTruncated = true;
+    ancestors.push(formatted.entry);
+  }
+
   const posts: Record<string, unknown>[] = [];
-  for (const raw of [rootRaw, ...repliesRaw]) {
+  for (const raw of [focusRaw, ...repliesRaw]) {
     const formatted = formatThreadPost(raw);
     if (formatted.truncated) anyTruncated = true;
     posts.push(formatted.entry);
   }
+
+  const threadRootId =
+    ancestors.length > 0 && typeof ancestors[0].id === 'string' ? (ancestors[0].id as string) : postId;
+
   const serialize = (complete: boolean) =>
-    escapeRiskyJsonChars(JSON.stringify({ root_post_id: rootPostId, posts, complete })) + '\n';
+    escapeRiskyJsonChars(JSON.stringify({ post_id: postId, thread_root_id: threadRootId, ancestors, posts, complete })) + '\n';
 
   while (posts.length > 1) {
     const line = serialize(opts.pagingComplete && !dropped && !anyTruncated);
@@ -146,22 +177,45 @@ export function buildThreadPayload(
     dropped = true;
   }
 
+  while (ancestors.length > 0) {
+    const line = serialize(opts.pagingComplete && !dropped && !anyTruncated);
+    if (Buffer.byteLength(line, 'utf8') <= maxTotalBytes) return line;
+    ancestors.shift();
+    dropped = true;
+  }
+
   const line = serialize(opts.pagingComplete && !dropped && !anyTruncated);
   if (Buffer.byteLength(line, 'utf8') <= maxTotalBytes) return line;
 
-  const rootEntry = posts[0];
-  if (!shrinkFieldToFit(rootEntry, 'body', 'body_truncated', serialize, maxTotalBytes)) {
-    if (!shrinkFieldToFit(rootEntry, 'title', 'title_truncated', serialize, maxTotalBytes)) {
-      const author = rootEntry.author as Record<string, unknown> | undefined;
-      if (author && typeof author === 'object') {
-        for (const key of Object.keys(author)) {
-          if (typeof author[key] === 'string') {
-            author[key] = null;
-            if (Buffer.byteLength(serialize(false), 'utf8') <= maxTotalBytes) break;
-          }
-        }
-      }
+  const focusEntry = posts[0];
+  const fits = () => Buffer.byteLength(serialize(false), 'utf8') <= maxTotalBytes;
+  if (shrinkFieldToFit(focusEntry, 'body', 'body_truncated', serialize, maxTotalBytes)) {
+    return serialize(false);
+  }
+  if (shrinkFieldToFit(focusEntry, 'title', 'title_truncated', serialize, maxTotalBytes)) {
+    return serialize(false);
+  }
+  const author = focusEntry.author as Record<string, unknown> | undefined;
+  if (author && typeof author === 'object') {
+    const stringKeys = Object.keys(author)
+      .filter((k) => typeof author[k] === 'string')
+      .sort((a, b) => Buffer.byteLength(author[b] as string, 'utf8') - Buffer.byteLength(author[a] as string, 'utf8'));
+    for (const key of stringKeys) {
+      author[key] = null;
+      if (fits()) return serialize(false);
     }
+  }
+  if (!fits()) {
+    const focusId = typeof focusEntry.id === 'string' ? focusEntry.id : capUuid(postId);
+    posts[0] = {
+      id: focusId,
+      parent_post_id: null,
+      author: who(null),
+      created_at: null,
+      title: '',
+      body: '',
+      body_truncated: true,
+    };
   }
   return serialize(false);
 }

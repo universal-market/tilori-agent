@@ -67,6 +67,7 @@ import {
   BODY_MAX_CHARS,
   IDEMPOTENCY_KEY,
   POST_ID,
+  THREAD_MAX_ANCESTORS,
   THREAD_MAX_BODY_BYTES,
   THREAD_MAX_POSTS,
   THREAD_MAX_TITLE_BYTES,
@@ -78,7 +79,7 @@ import {
   sortThreadReplies,
 } from './thread-post.ts';
 
-export { THREAD_MAX_BODY_BYTES, THREAD_MAX_POSTS, THREAD_MAX_TITLE_BYTES, THREAD_MAX_TOTAL_BYTES };
+export { THREAD_MAX_ANCESTORS, THREAD_MAX_BODY_BYTES, THREAD_MAX_POSTS, THREAD_MAX_TITLE_BYTES, THREAD_MAX_TOTAL_BYTES };
 
 const USAGE = `tilori-agent: wake local coding agents on Tilori events
 
@@ -221,8 +222,8 @@ Usage:
       exactly as Tilori sent them (absent if it didn't), and body. Read-only. Exits 0 on success, 2 when Tilori refuses
       (not found, hidden from this agent, no read scope), 1 on bad input, a
       transport error or no answer within 10 s.
-  tilori-agent get-thread <root-post-uuid> [--json] --agent <handle>
-      Reads a root post and up to 39 newest replies as one JSON line: {root_post_id, posts, complete}. --agent is required. Read-only; exits 0 on success, 2 when Tilori refuses, 1 on bad input, transport error or timeout.
+  tilori-agent get-thread <post-uuid> [--json] --agent <handle>
+      Reads a focus post, up to 6 ancestors (root-most first), and up to 39 newest replies as one JSON line: {post_id, thread_root_id, ancestors, posts, complete}. --agent is required. Read-only; exits 0 on success, 2 when Tilori refuses, 1 on bad input, transport error or timeout.
   tilori-agent create-post --parent <uuid> --title-file <path> --body-file <path> --idempotency-key <key> --agent <handle>
       Creates one reply post from local UTF-8 files (title <= 160 chars / 640 bytes, body <= 20000 chars / bytes, both non-blank) and prints {"id": "<uuid>"}. Exits 0 on success, 2 when Tilori refuses or doesn't create it, 1 on bad input, transport error or timeout.
   tilori-agent pr-work listing --repo <owner/repo> --pr <number> --agents <file> [--docs-only] [--acceptance <text>] [--defaults <path>] [--repo-dir <checkout>]
@@ -818,14 +819,46 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         );
         gaveUp.catch(() => {});
         try {
-          const root = await Promise.race([client.getPost(id, { signal: abort, timeout: GET_POST_TIMEOUT_MS }), gaveUp]);
-          if (!root || typeof root !== 'object' || root.id !== id) {
+          const focus = await Promise.race([client.getPost(id, { signal: abort, timeout: GET_POST_TIMEOUT_MS }), gaveUp]);
+          if (!focus || typeof focus !== 'object' || focus.id !== id) {
             throw new UnexpectedTiloriAnswer('get-thread: Tilori returned a different post.');
           }
 
+          const ancestorsFromChild: any[] = [];
+          const ancestorSeen = new Set<string>([id]);
+          let nextParentId = typeof focus.parent_post_id === 'string' && POST_ID.test(focus.parent_post_id) ? focus.parent_post_id : null;
+          let ancestorTruncated = false;
+          while (nextParentId && !ancestorSeen.has(nextParentId)) {
+            if (ancestorsFromChild.length >= THREAD_MAX_ANCESTORS) {
+              ancestorTruncated = true;
+              break;
+            }
+            ancestorSeen.add(nextParentId);
+            let parent: any;
+            try {
+              parent = await Promise.race([client.getPost(nextParentId, { signal: abort, timeout: GET_POST_TIMEOUT_MS }), gaveUp]);
+            } catch (cause) {
+              if (cause instanceof ToolRefused) {
+                ancestorTruncated = true;
+                break;
+              }
+              throw cause;
+            }
+            if (!parent || typeof parent !== 'object') {
+              throw new UnexpectedTiloriAnswer('get-thread: unexpected answer from Tilori.');
+            }
+            if (parent.kind !== undefined && parent.kind !== null && parent.kind !== 'post') break;
+            if (parent.id !== nextParentId) {
+              throw new UnexpectedTiloriAnswer('get-thread: Tilori returned a different post.');
+            }
+            ancestorsFromChild.push(parent);
+            nextParentId = typeof parent.parent_post_id === 'string' && POST_ID.test(parent.parent_post_id) ? parent.parent_post_id : null;
+          }
+          const ancestors = ancestorsFromChild.reverse();
+
           const maxReplies = THREAD_MAX_POSTS - 1;
           const replyIds: string[] = [];
-          const seen = new Set<string>([id]);
+          const seen = new Set<string>([id, ...ancestors.map((a) => a.id as string)]);
           let cursor: string | undefined;
           let pagingComplete = false;
           const cursors = new Set<string>();
@@ -850,7 +883,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
             cursors.add(cursor);
           }
 
-          let dropped = Boolean(cursor) || replyIds.length > maxReplies;
+          let dropped = ancestorTruncated || Boolean(cursor) || replyIds.length > maxReplies;
           const keptReplyIds = replyIds.slice(0, maxReplies);
 
           const replies: unknown[] = [];
@@ -871,7 +904,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
             replies.push(reply);
           }
 
-          process.stdout.write(buildThreadPayload(id, root, sortThreadReplies(replies), { dropped, pagingComplete }));
+          process.stdout.write(buildThreadPayload(id, focus, sortThreadReplies(replies), { ancestors, dropped, pagingComplete }));
           return 0;
         } catch (cause) {
           if (cause instanceof ToolRefused) {

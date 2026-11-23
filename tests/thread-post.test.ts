@@ -7,8 +7,8 @@ import { join } from 'node:path';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { THREAD_MAX_BODY_BYTES, THREAD_MAX_POSTS, THREAD_MAX_TITLE_BYTES, THREAD_MAX_TOTAL_BYTES } from '../src/cli.ts';
-import { buildThreadPayload } from '../src/thread-post.ts';
+import { THREAD_MAX_ANCESTORS, THREAD_MAX_BODY_BYTES, THREAD_MAX_POSTS, THREAD_MAX_TITLE_BYTES, THREAD_MAX_TOTAL_BYTES } from '../src/cli.ts';
+import { buildThreadPayload, formatThreadPost } from '../src/thread-post.ts';
 import { TiloriAgentClient } from '../src/client.ts';
 import { saveConfig } from '../src/config.ts';
 import { writeKey } from '../src/keys.ts';
@@ -151,7 +151,9 @@ describe('get-thread', () => {
     expect(r.stdout.split('\n').filter(Boolean)).toHaveLength(1);
     const out = JSON.parse(r.stdout);
     expect(out).toEqual({
-      root_post_id: rootId,
+      post_id: rootId,
+      thread_root_id: rootId,
+      ancestors: [],
       complete: true,
       posts: [
         {
@@ -483,7 +485,7 @@ describe('get-thread', () => {
     expect(Buffer.byteLength(out.posts[0].body, 'utf8')).toBe(THREAD_MAX_BODY_BYTES);
     for (const p of out.posts) expect(p.superseded_by).toBeUndefined();
 
-    // Even when root-only metadata + body exceeds THREAD_MAX_TOTAL_BYTES, root body is truncated further until it fits.
+    // Even when author.username is 258_000 bytes, who() caps it to null up front, while body/title obey per-field caps.
     resetFake();
     const oversizedRootId = uuid(415);
     fake.posts.set(oversizedRootId, {
@@ -498,11 +500,16 @@ describe('get-thread', () => {
     expect(r2.exitCode).toBe(0);
     expect(Buffer.byteLength(r2.stdout, 'utf8')).toBeLessThanOrEqual(THREAD_MAX_TOTAL_BYTES);
     const out2 = JSON.parse(r2.stdout);
+    expect(out2.post_id).toBe(oversizedRootId);
+    expect(out2.thread_root_id).toBe(oversizedRootId);
+    expect(out2.ancestors).toEqual([]);
     expect(out2.complete).toBe(false);
     expect(out2.posts[0].title_truncated).toBe(true);
     expect(Buffer.byteLength(out2.posts[0].title, 'utf8')).toBeLessThanOrEqual(THREAD_MAX_TITLE_BYTES);
     expect(out2.posts[0].body_truncated).toBe(true);
-    expect(out2.posts[0].body.length).toBeLessThan(THREAD_MAX_BODY_BYTES);
+    expect(Buffer.byteLength(out2.posts[0].body, 'utf8')).toBe(THREAD_MAX_BODY_BYTES);
+    expect(out2.posts[0].author.username).toBeNull();
+    expect(out2.posts[0].author.handle).toBe('wren');
 
     // Direct unit check with a tight maxTotalBytes.
     const compact = buildThreadPayload(
@@ -518,27 +525,33 @@ describe('get-thread', () => {
     expect(parsedCompact.posts[0].title_truncated).toBe(true);
     expect(parsedCompact.posts[0].body_truncated).toBe(true);
 
-    // Small maxTotalBytes with huge author username: cuts body, title, and author strings to fit, with complete: false.
+    // Tight maxTotalBytes with 240-byte author username: cuts body, title, and nulls largest author string (username) first so id/handle survive.
     const hugeAuthor = buildThreadPayload(
       oversizedRootId,
       {
         id: oversizedRootId,
         title: 'short title',
         body: 'short body',
-        author: { id: 'a1', user_id: 'u1', kind: 'agent', username: 'u'.repeat(2000), handle: 'wren' },
+        author: { id: 'a1', user_id: 'u1', kind: 'agent', username: 'u'.repeat(240), handle: 'wren' },
         created_at: '2026-11-20T00:00:00Z',
       },
       [],
-      { dropped: false, pagingComplete: true, maxTotalBytes: 600 },
+      { dropped: false, pagingComplete: true, maxTotalBytes: 500 },
     );
-    expect(Buffer.byteLength(hugeAuthor, 'utf8')).toBeLessThanOrEqual(600);
+    expect(Buffer.byteLength(hugeAuthor, 'utf8')).toBeLessThanOrEqual(500);
     const parsedHugeAuthor = JSON.parse(hugeAuthor);
     expect(parsedHugeAuthor.complete).toBe(false);
     expect(parsedHugeAuthor.posts[0].body_truncated).toBe(true);
     expect(parsedHugeAuthor.posts[0].title_truncated).toBe(true);
-    expect(parsedHugeAuthor.posts[0].author.username).toBeNull();
+    expect(parsedHugeAuthor.posts[0].author).toEqual({
+      id: 'a1',
+      user_id: 'u1',
+      kind: 'agent',
+      username: null,
+      handle: 'wren',
+    });
 
-    // Empty body already, but root-only payload still exceeds maxTotalBytes: complete must be false.
+    // Empty body already, but focus-only payload still exceeds maxTotalBytes: complete must be false.
     const emptyBodyOverCap = buildThreadPayload(
       oversizedRootId,
       { id: oversizedRootId, title: 'a'.repeat(500), body: '', author: {}, created_at: '2026-11-20T00:00:00Z' },
@@ -550,6 +563,350 @@ describe('get-thread', () => {
     expect(parsedEmptyBody.complete).toBe(false);
     expect(parsedEmptyBody.posts[0].title_truncated).toBe(true);
     expect(parsedEmptyBody.posts[0].body_truncated).toBeUndefined();
+
+    // Even after shrinking body, title, and nulling author strings, metadata still exceeds maxTotalBytes -> emits minimal skeleton.
+    const ancestorRootId = uuid(416);
+    const minimalFallback = buildThreadPayload(
+      oversizedRootId,
+      {
+        id: oversizedRootId,
+        parent_post_id: ancestorRootId,
+        author: { id: 'a1', user_id: 'u1', kind: 'agent', username: 'u', handle: 'wren' },
+        created_at: 'c'.repeat(64),
+        hidden: true,
+        superseded_by: uuid(417),
+        title: 'title',
+        body: 'body',
+      },
+      [],
+      { ancestors: [{ id: ancestorRootId, title: 'a', body: 'b', author: {} }], dropped: false, pagingComplete: true, maxTotalBytes: 380 },
+    );
+    expect(Buffer.byteLength(minimalFallback, 'utf8')).toBeLessThanOrEqual(380);
+    expect(JSON.parse(minimalFallback)).toEqual({
+      post_id: oversizedRootId,
+      thread_root_id: ancestorRootId,
+      ancestors: [],
+      posts: [
+        {
+          id: oversizedRootId,
+          parent_post_id: null,
+          author: { id: null, user_id: null, kind: null, username: null, handle: null },
+          created_at: null,
+          title: '',
+          body: '',
+          body_truncated: true,
+        },
+      ],
+      complete: false,
+    });
+  });
+
+  test('ancestors: 3-deep chain, community parent, refused parent, cycle guard, and 7+ ancestor cap', async () => {
+    // 1. 3-deep chain (a0 -> a1 -> a2 -> focus -> reply) returns ancestors root-most first, thread_root_id = a0.
+    resetFake();
+    const a0 = uuid(700);
+    const a1 = uuid(701);
+    const a2 = uuid(702);
+    const focusId = uuid(703);
+    const replyId = uuid(704);
+    fake.posts.set(a0, { id: a0, parent_post_id: null, title: 'root', body: 'root body', author: { handle: 'wren' }, created_at: '2026-11-20T00:00:00Z' });
+    fake.posts.set(a1, { id: a1, parent_post_id: a0, title: 'a1', body: 'a1 body', author: { handle: 'pax' }, created_at: '2026-11-20T00:01:00Z' });
+    fake.posts.set(a2, { id: a2, parent_post_id: a1, title: 'a2', body: 'a2 body', author: { handle: 'lark' }, created_at: '2026-11-20T00:02:00Z' });
+    fake.posts.set(focusId, { id: focusId, parent_post_id: a2, title: 'focus', body: 'focus body', author: { handle: 'wren' }, created_at: '2026-11-20T00:03:00Z' });
+    fake.posts.set(replyId, { id: replyId, parent_post_id: focusId, title: 'reply', body: 'reply body', author: { handle: 'pax' }, created_at: '2026-11-20T00:04:00Z' });
+    fake.threadPages.set(focusId, new Map([['', { items: [{ post: { id: replyId } }], next_cursor: null }]]));
+
+    const chain = await runCli(['get-thread', focusId, '--json', '--agent', 'wren']);
+    expect(chain.exitCode).toBe(0);
+    const chainOut = JSON.parse(chain.stdout);
+    expect(chainOut.post_id).toBe(focusId);
+    expect(chainOut.thread_root_id).toBe(a0);
+    expect(chainOut.complete).toBe(true);
+    expect(chainOut.ancestors.map((p: any) => p.id)).toEqual([a0, a1, a2]);
+    expect(chainOut.posts.map((p: any) => p.id)).toEqual([focusId, replyId]);
+
+    // 2. Community parent (kind: "community") stops the walk cleanly with complete=true.
+    resetFake();
+    const commId = uuid(710);
+    const topPost = uuid(711);
+    const childPost = uuid(712);
+    fake.posts.set(commId, { id: commId, kind: 'community', title: 'General', body: 'comm', author: {} });
+    fake.posts.set(topPost, { id: topPost, parent_post_id: commId, kind: 'post', title: 'top', body: 'top', author: {}, created_at: '2026-11-20T00:00:00Z' });
+    fake.posts.set(childPost, { id: childPost, parent_post_id: topPost, title: 'child', body: 'child', author: {}, created_at: '2026-11-20T00:01:00Z' });
+    fake.threadPages.set(childPost, new Map([['', { items: [], next_cursor: null }]]));
+
+    const commRes = await runCli(['get-thread', childPost, '--json', '--agent', 'wren']);
+    expect(commRes.exitCode).toBe(0);
+    const commOut = JSON.parse(commRes.stdout);
+    expect(commOut.post_id).toBe(childPost);
+    expect(commOut.thread_root_id).toBe(topPost);
+    expect(commOut.complete).toBe(true);
+    expect(commOut.ancestors.map((p: any) => p.id)).toEqual([topPost]);
+
+    // 3. Refused parent (NOT_FOUND / ToolRefused) stops quietly with complete=false.
+    resetFake();
+    const missingParent = uuid(720);
+    const midParent = uuid(721);
+    const focusRefused = uuid(722);
+    fake.posts.set(midParent, { id: midParent, parent_post_id: missingParent, title: 'mid', body: 'mid', author: {} });
+    fake.posts.set(focusRefused, { id: focusRefused, parent_post_id: midParent, title: 'f', body: 'f', author: {} });
+    fake.threadPages.set(focusRefused, new Map([['', { items: [], next_cursor: null }]]));
+
+    const refRes = await runCli(['get-thread', focusRefused, '--json', '--agent', 'wren']);
+    expect(refRes.exitCode).toBe(0);
+    const refOut = JSON.parse(refRes.stdout);
+    expect(refOut.post_id).toBe(focusRefused);
+    expect(refOut.thread_root_id).toBe(midParent);
+    expect(refOut.complete).toBe(false);
+    expect(refOut.ancestors.map((p: any) => p.id)).toEqual([midParent]);
+
+    // 4. Cycle guard stops without infinite calls.
+    resetFake();
+    const cycA = uuid(730);
+    const cycB = uuid(731);
+    const cycFocus = uuid(732);
+    fake.posts.set(cycA, { id: cycA, parent_post_id: cycB, title: 'A', body: 'A', author: {} });
+    fake.posts.set(cycB, { id: cycB, parent_post_id: cycA, title: 'B', body: 'B', author: {} });
+    fake.posts.set(cycFocus, { id: cycFocus, parent_post_id: cycB, title: 'F', body: 'F', author: {} });
+    fake.threadPages.set(cycFocus, new Map([['', { items: [], next_cursor: null }]]));
+
+    const cycRes = await runCli(['get-thread', cycFocus, '--json', '--agent', 'wren']);
+    expect(cycRes.exitCode).toBe(0);
+    const cycOut = JSON.parse(cycRes.stdout);
+    expect(cycOut.post_id).toBe(cycFocus);
+    expect(cycOut.thread_root_id).toBe(cycA);
+    expect(cycOut.ancestors.map((p: any) => p.id)).toEqual([cycA, cycB]);
+    expect(fake.calls.filter((c) => c === 'get_post')).toHaveLength(3);
+
+    // 5. 7+ ancestors keep 6 with complete=false, and THREAD_MAX_POSTS=40 counts focus + replies separately from the 6 ancestors.
+    resetFake();
+    const ancIds = Array.from({ length: 8 }, (_, i) => uuid(740 + i)); // ancIds[0] is oldest, ancIds[7] is immediate parent
+    for (let i = 0; i < ancIds.length; i++) {
+      fake.posts.set(ancIds[i], {
+        id: ancIds[i],
+        parent_post_id: i === 0 ? null : ancIds[i - 1],
+        title: `anc${i}`,
+        body: `anc${i}`,
+        author: {},
+      });
+    }
+    const deepFocus = uuid(750);
+    fake.posts.set(deepFocus, { id: deepFocus, parent_post_id: ancIds[7], title: 'deep', body: 'deep', author: {}, created_at: '2026-11-20T00:00:00Z' });
+    const repItems: unknown[] = [];
+    for (let i = 39; i >= 1; i--) {
+      const rid = uuid(750 + i);
+      repItems.push({ post: { id: rid } });
+      fake.posts.set(rid, { id: rid, parent_post_id: deepFocus, title: `r${i}`, body: `r${i}`, author: {}, created_at: `2026-11-20T00:${String(i).padStart(2, '0')}:00Z` });
+    }
+    fake.threadPages.set(deepFocus, new Map([['', { items: repItems, next_cursor: null }]]));
+
+    const deepRes = await runCli(['get-thread', deepFocus, '--json', '--agent', 'wren']);
+    expect(deepRes.exitCode).toBe(0);
+    const deepOut = JSON.parse(deepRes.stdout);
+    expect(deepOut.complete).toBe(false);
+    expect(deepOut.ancestors).toHaveLength(THREAD_MAX_ANCESTORS);
+    expect(deepOut.ancestors.map((p: any) => p.id)).toEqual(ancIds.slice(2));
+    expect(deepOut.thread_root_id).toBe(ancIds[2]);
+    expect(deepOut.posts).toHaveLength(THREAD_MAX_POSTS);
+    // 1 focus + 6 ancestors + 39 replies = 46 get_post calls (never fetches ancIds[0] or ancIds[1]).
+    expect(fake.calls.filter((c) => c === 'get_post')).toHaveLength(THREAD_MAX_POSTS + THREAD_MAX_ANCESTORS);
+
+    // Exactly 6 ancestors with root having parent_post_id=null -> complete=true.
+    resetFake();
+    const exactAnc = Array.from({ length: 6 }, (_, i) => uuid(790 + i));
+    for (let i = 0; i < exactAnc.length; i++) {
+      fake.posts.set(exactAnc[i], {
+        id: exactAnc[i],
+        parent_post_id: i === 0 ? null : exactAnc[i - 1],
+        title: `e${i}`,
+        body: `e${i}`,
+        author: {},
+      });
+    }
+    const exactFocus = uuid(799);
+    fake.posts.set(exactFocus, { id: exactFocus, parent_post_id: exactAnc[5], title: 'ef', body: 'ef', author: {} });
+    fake.threadPages.set(exactFocus, new Map([['', { items: [], next_cursor: null }]]));
+    const exactAncRes = await runCli(['get-thread', exactFocus, '--json', '--agent', 'wren']);
+    expect(exactAncRes.exitCode).toBe(0);
+    const exactAncOut = JSON.parse(exactAncRes.stdout);
+    expect(exactAncOut.complete).toBe(true);
+    expect(exactAncOut.ancestors.map((p: any) => p.id)).toEqual(exactAnc);
+    expect(exactAncOut.thread_root_id).toBe(exactAnc[0]);
+  });
+
+  test('byte-cap drop order: oldest replies first, then root-most ancestors keeping immediate parent last', () => {
+    const a0 = { id: uuid(800), parent_post_id: null, title: 'a0', body: 'A'.repeat(400), author: {} };
+    const a1 = { id: uuid(801), parent_post_id: uuid(800), title: 'a1', body: 'B'.repeat(400), author: {} };
+    const a2 = { id: uuid(802), parent_post_id: uuid(801), title: 'a2', body: 'C'.repeat(400), author: {} };
+    const focus = { id: uuid(803), parent_post_id: uuid(802), title: 'f', body: 'F'.repeat(400), author: {} };
+    const r1 = { id: uuid(804), parent_post_id: uuid(803), title: 'r1', body: '1'.repeat(400), author: {} };
+    const r2 = { id: uuid(805), parent_post_id: uuid(803), title: 'r2', body: '2'.repeat(400), author: {} };
+
+    const full = buildThreadPayload(focus.id, focus, [r1, r2], { ancestors: [a0, a1, a2], dropped: false, pagingComplete: true });
+    const fullBytes = Buffer.byteLength(full, 'utf8');
+
+    // Drop oldest reply r1 first while keeping r2 and all 3 ancestors.
+    const dropOneReply = JSON.parse(
+      buildThreadPayload(focus.id, focus, [r1, r2], { ancestors: [a0, a1, a2], dropped: false, pagingComplete: true, maxTotalBytes: fullBytes - 10 }),
+    );
+    expect(dropOneReply.complete).toBe(false);
+    expect(dropOneReply.posts.map((p: any) => p.id)).toEqual([focus.id, r2.id]);
+    expect(dropOneReply.ancestors.map((p: any) => p.id)).toEqual([a0.id, a1.id, a2.id]);
+    expect(dropOneReply.thread_root_id).toBe(a0.id);
+
+    // Drop both replies and root-most ancestor a0, keeping [a1, a2] and [focus].
+    const withoutRepliesAndA0 = Buffer.byteLength(
+      buildThreadPayload(focus.id, focus, [], { ancestors: [a1, a2], dropped: false, pagingComplete: true }),
+      'utf8',
+    );
+    const dropA0 = JSON.parse(
+      buildThreadPayload(focus.id, focus, [r1, r2], {
+        ancestors: [a0, a1, a2],
+        dropped: false,
+        pagingComplete: true,
+        maxTotalBytes: withoutRepliesAndA0 + 20,
+      }),
+    );
+    expect(dropA0.complete).toBe(false);
+    expect(dropA0.posts.map((p: any) => p.id)).toEqual([focus.id]);
+    expect(dropA0.ancestors.map((p: any) => p.id)).toEqual([a1.id, a2.id]);
+    expect(dropA0.thread_root_id).toBe(a0.id);
+
+    // Drop a1 too, keeping immediate parent a2 last.
+    const withImmediateParentOnly = Buffer.byteLength(
+      buildThreadPayload(focus.id, focus, [], { ancestors: [a2], dropped: false, pagingComplete: true }),
+      'utf8',
+    );
+    const keepImmediate = JSON.parse(
+      buildThreadPayload(focus.id, focus, [r1, r2], {
+        ancestors: [a0, a1, a2],
+        dropped: false,
+        pagingComplete: true,
+        maxTotalBytes: withImmediateParentOnly + 20,
+      }),
+    );
+    expect(keepImmediate.complete).toBe(false);
+    expect(keepImmediate.posts.map((p: any) => p.id)).toEqual([focus.id]);
+    expect(keepImmediate.ancestors.map((p: any) => p.id)).toEqual([a2.id]);
+    expect(keepImmediate.thread_root_id).toBe(a0.id);
+
+    // Over cap even with immediate parent: drops immediate parent too, keeping focus intact.
+    const focusOnlyBytes = Buffer.byteLength(
+      buildThreadPayload(focus.id, focus, [], { ancestors: [], dropped: false, pagingComplete: true }),
+      'utf8',
+    );
+    const dropImmediate = JSON.parse(
+      buildThreadPayload(focus.id, focus, [r1, r2], {
+        ancestors: [a0, a1, a2],
+        dropped: false,
+        pagingComplete: true,
+        maxTotalBytes: focusOnlyBytes + 20,
+      }),
+    );
+    expect(dropImmediate.complete).toBe(false);
+    expect(dropImmediate.ancestors).toEqual([]);
+    expect(dropImmediate.posts).toHaveLength(1);
+    expect(dropImmediate.posts[0].body).toBe(focus.body);
+    expect(dropImmediate.thread_root_id).toBe(a0.id);
+  });
+
+  test('metadata caps and garbage inputs never exceed maxTotalBytes', () => {
+    const validId = uuid(850);
+    const validParent = uuid(851);
+    const validSup = uuid(852);
+
+    // Exact boundary checks on formatThreadPost.
+    const boundary = formatThreadPost({
+      id: validId,
+      parent_post_id: validParent,
+      created_at: 'a'.repeat(64),
+      hidden: false,
+      superseded_by: validSup,
+      author: {
+        id: 'x'.repeat(256),
+        user_id: '中'.repeat(85), // 255 UTF-8 bytes
+        kind: 'x'.repeat(257), // 257 > 256 -> null
+        username: '中'.repeat(86), // 258 > 256 -> null
+        handle: 12345,
+      },
+      title: 'ok',
+      body: 'ok',
+    }).entry;
+    expect(boundary).toEqual({
+      id: validId,
+      parent_post_id: validParent,
+      author: {
+        id: 'x'.repeat(256),
+        user_id: '中'.repeat(85),
+        kind: null,
+        username: null,
+        handle: null,
+      },
+      created_at: 'a'.repeat(64),
+      hidden: false,
+      superseded_by: validSup,
+      title: 'ok',
+      body: 'ok',
+    });
+
+    const rejected = formatThreadPost({
+      id: validId.toUpperCase(),
+      parent_post_id: 'not-a-uuid',
+      created_at: 'a'.repeat(65),
+      hidden: 'true',
+      superseded_by: 'bad',
+      author: 'not-an-object',
+      title: 999,
+      body: { text: 'bad' },
+    }).entry;
+    expect(rejected).toEqual({
+      id: null,
+      parent_post_id: null,
+      author: { id: null, user_id: null, kind: null, username: null, handle: null },
+      created_at: null,
+      title: '',
+      body: '',
+    });
+    expect('hidden' in rejected).toBe(false);
+    expect('superseded_by' in rejected).toBe(false);
+
+    // Garbage payload assertion: huge created_at, object in author.username, 300 KB parent_post_id, number titles, huge body.
+    const garbagePost = (id: string) => ({
+      id,
+      parent_post_id: 'p'.repeat(300_000),
+      created_at: 't'.repeat(200_000),
+      hidden: { evil: 'h'.repeat(100_000) },
+      superseded_by: { id: validSup },
+      author: {
+        id: ['bad'],
+        user_id: 42,
+        kind: 'agent',
+        username: { nested: 'u'.repeat(100_000) },
+        handle: 'h'.repeat(10_000),
+      },
+      title: 123456,
+      body: 'b'.repeat(50_000),
+    });
+
+    for (const cap of [THREAD_MAX_TOTAL_BYTES, 2000, 400]) {
+      const payload = buildThreadPayload(
+        validId,
+        garbagePost(validId),
+        [garbagePost(uuid(853)), garbagePost(uuid(854))],
+        { ancestors: [garbagePost(uuid(855))], dropped: false, pagingComplete: true, maxTotalBytes: cap },
+      );
+      expect(Buffer.byteLength(payload, 'utf8')).toBeLessThanOrEqual(cap);
+      const parsed = JSON.parse(payload);
+      expect(parsed.post_id).toBe(validId);
+      for (const p of [...parsed.ancestors, ...parsed.posts]) {
+        expect(p.parent_post_id).toBeNull();
+        expect(p.created_at).toBeNull();
+        expect(p.hidden).toBeUndefined();
+        expect(p.superseded_by).toBeUndefined();
+        expect(p.author.username).toBeNull();
+        expect(p.author.handle).toBeNull();
+      }
+    }
   });
 
   test('escapes DEL, C1 controls, bidi controls, and U+2028/U+2029 in JSON stdout while round-tripping', async () => {
