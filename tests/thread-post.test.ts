@@ -706,6 +706,7 @@ describe('get-thread', () => {
     expect(cycOut.post_id).toBe(cycFocus);
     expect(cycOut.thread_root_id).toBe(cycA);
     expect(cycOut.ancestors.map((p: any) => p.id)).toEqual([cycA, cycB]);
+    expect(cycOut.complete).toBe(false);
     expect(fake.calls.filter((c) => c === 'get_post')).toHaveLength(3);
 
     // 5. 7+ ancestors keep 6 with complete=false, and THREAD_MAX_POSTS=40 counts focus + replies separately from the 6 ancestors.
@@ -833,21 +834,6 @@ describe('get-thread', () => {
     expect(exactAncOut.ancestors.map((p: any) => p.id)).toEqual(exactAnc);
     expect(exactAncOut.thread_root_id).toBe(exactAnc[0]);
 
-    // Self-parent (focus.parent_post_id === focus.id) stops with no ancestors and does not loop.
-    resetFake();
-    const selfId = uuid(797);
-    fake.posts.set(selfId, { id: selfId, parent_post_id: selfId, title: 'self', body: 'self', author: {} });
-    fake.threadPages.set(selfId, new Map([['', { items: [], next_cursor: null }]]));
-    const selfRes = await runCli(['get-thread', selfId, '--json', '--agent', 'wren']);
-    expect(selfRes.exitCode).toBe(0);
-    const selfOut = JSON.parse(selfRes.stdout);
-    expect(selfOut.post_id).toBe(selfId);
-    expect(selfOut.thread_root_id).toBe(selfId);
-    expect(selfOut.ancestors).toEqual([]);
-    expect(selfOut.posts).toHaveLength(1);
-    expect(selfOut.complete).toBe(true);
-    expect(fake.calls.filter((c) => c === 'get_post')).toHaveLength(1);
-
     // Wrong-id answer with kind: "community" exits 1 (unexpected answer), not a clean stop.
     resetFake();
     const wrongCommParent = uuid(796);
@@ -871,6 +857,61 @@ describe('get-thread', () => {
     expect(bananaRes.exitCode).toBe(1);
     expect(bananaRes.stdout).toBe('');
     expect(bananaRes.stderr).toContain('unexpected answer from Tilori.');
+  });
+
+  test('ancestors: self-parent cycle guard stops with no ancestors and complete=false', async () => {
+    resetFake();
+    const selfId = uuid(797);
+    fake.posts.set(selfId, { id: selfId, parent_post_id: selfId, title: 'self', body: 'self', author: {} });
+    fake.threadPages.set(selfId, new Map([['', { items: [], next_cursor: null }]]));
+    const selfRes = await runCli(['get-thread', selfId, '--json', '--agent', 'wren']);
+    expect(selfRes.exitCode).toBe(0);
+    const selfOut = JSON.parse(selfRes.stdout);
+    expect(selfOut.post_id).toBe(selfId);
+    expect(selfOut.thread_root_id).toBe(selfId);
+    expect(selfOut.ancestors).toEqual([]);
+    expect(selfOut.posts).toHaveLength(1);
+    expect(selfOut.complete).toBe(false);
+    expect(fake.calls.filter((c) => c === 'get_post')).toHaveLength(1);
+  });
+
+  test('ancestors: malformed parent_post_id on focus or ancestor sets complete=false', async () => {
+    for (const badParent of ['not-a-uuid', '', 123]) {
+      resetFake();
+      const badFocus = uuid(1790);
+      fake.posts.set(badFocus, { id: badFocus, parent_post_id: badParent, title: 'f', body: 'f', author: {} });
+      fake.threadPages.set(badFocus, new Map([['', { items: [], next_cursor: null }]]));
+      const badFocusRes = await runCli(['get-thread', badFocus, '--json', '--agent', 'wren']);
+      expect(badFocusRes.exitCode).toBe(0);
+      const badFocusOut = JSON.parse(badFocusRes.stdout);
+      expect(badFocusOut.ancestors).toEqual([]);
+      expect(badFocusOut.complete).toBe(false);
+
+      resetFake();
+      const badAnc = uuid(1791);
+      const badAncFocus = uuid(1792);
+      fake.posts.set(badAnc, { id: badAnc, parent_post_id: badParent, title: 'a', body: 'a', author: {} });
+      fake.posts.set(badAncFocus, { id: badAncFocus, parent_post_id: badAnc, title: 'f', body: 'f', author: {} });
+      fake.threadPages.set(badAncFocus, new Map([['', { items: [], next_cursor: null }]]));
+      const badAncRes = await runCli(['get-thread', badAncFocus, '--json', '--agent', 'wren']);
+      expect(badAncRes.exitCode).toBe(0);
+      const badAncOut = JSON.parse(badAncRes.stdout);
+      expect(badAncOut.ancestors.map((p: any) => p.id)).toEqual([badAnc]);
+      expect(badAncOut.complete).toBe(false);
+    }
+  });
+
+  test('get-thread rejects focus post with non-post kind', async () => {
+    for (const badKind of ['community', 'banana']) {
+      resetFake();
+      const badKindId = uuid(1795);
+      fake.posts.set(badKindId, { id: badKindId, kind: badKind, title: 'x', body: 'x', author: {} });
+      fake.threadPages.set(badKindId, new Map([['', { items: [], next_cursor: null }]]));
+      const badKindRes = await runCli(['get-thread', badKindId, '--json', '--agent', 'wren']);
+      expect(badKindRes.exitCode).toBe(1);
+      expect(badKindRes.stdout).toBe('');
+      expect(badKindRes.stderr).toContain('get-thread: unexpected answer from Tilori.');
+    }
   });
 
   test('byte-cap drop order: oldest replies first, then root-most ancestors keeping immediate parent last', () => {
@@ -1073,6 +1114,69 @@ describe('get-thread', () => {
     const out = JSON.parse(r.stdout);
     expect(out.posts[0].title).toBe('title\u202e');
     expect(out.posts[0].body).toBe(tricky);
+  });
+
+  test('nulled or dropped metadata sets complete=false while a normal thread stays complete=true', async () => {
+    // Normal thread -> complete=true.
+    resetFake();
+    const normAnc = uuid(430);
+    const normFocus = uuid(431);
+    const normReply = uuid(432);
+    fake.posts.set(normAnc, {
+      id: normAnc,
+      parent_post_id: null,
+      author: { id: 'a1', user_id: 'u1', kind: 'agent', username: 'alice', handle: 'alice' },
+      created_at: '2026-11-20T00:00:00Z',
+      title: 'anc',
+      body: 'anc',
+    });
+    fake.posts.set(normFocus, {
+      id: normFocus,
+      parent_post_id: normAnc,
+      author: { id: 'a2', user_id: 'u2', kind: 'agent', username: 'bob', handle: 'bob' },
+      created_at: '2026-11-20T00:01:00Z',
+      title: 'focus',
+      body: 'focus',
+    });
+    fake.posts.set(normReply, {
+      id: normReply,
+      parent_post_id: normFocus,
+      author: { id: 'a3', user_id: 'u3', kind: 'agent', username: 'carol', handle: 'carol' },
+      created_at: '2026-11-20T00:02:00Z',
+      hidden: false,
+      title: 'reply',
+      body: 'reply',
+    });
+    fake.threadPages.set(normFocus, new Map([['', { items: [{ post: { id: normReply } }], next_cursor: null }]]));
+    const normRes = await runCli(['get-thread', normFocus, '--json', '--agent', 'wren']);
+    expect(normRes.exitCode).toBe(0);
+    expect(JSON.parse(normRes.stdout).complete).toBe(true);
+
+    // Ancestor with 300-byte author handle -> complete=false.
+    fake.posts.set(normAnc, { ...fake.posts.get(normAnc)!, author: { handle: 'h'.repeat(300) } });
+    const ancHandleRes = await runCli(['get-thread', normFocus, '--json', '--agent', 'wren']);
+    expect(ancHandleRes.exitCode).toBe(0);
+    const ancHandleOut = JSON.parse(ancHandleRes.stdout);
+    expect(ancHandleOut.complete).toBe(false);
+    expect(ancHandleOut.ancestors[0].author.handle).toBeNull();
+    fake.posts.set(normAnc, { ...fake.posts.get(normAnc)!, author: { handle: 'alice' } });
+
+    // Reply with hidden: "yes" -> complete=false.
+    fake.posts.set(normReply, { ...fake.posts.get(normReply)!, hidden: 'yes' });
+    const hiddenRes = await runCli(['get-thread', normFocus, '--json', '--agent', 'wren']);
+    expect(hiddenRes.exitCode).toBe(0);
+    const hiddenOut = JSON.parse(hiddenRes.stdout);
+    expect(hiddenOut.complete).toBe(false);
+    expect('hidden' in hiddenOut.posts[1]).toBe(false);
+    fake.posts.set(normReply, { ...fake.posts.get(normReply)!, hidden: false });
+
+    // Reply with too-long created_at -> complete=false.
+    fake.posts.set(normReply, { ...fake.posts.get(normReply)!, created_at: 't'.repeat(65) });
+    const createdRes = await runCli(['get-thread', normFocus, '--json', '--agent', 'wren']);
+    expect(createdRes.exitCode).toBe(0);
+    const createdOut = JSON.parse(createdRes.stdout);
+    expect(createdOut.complete).toBe(false);
+    expect(createdOut.posts[1].created_at).toBeNull();
   });
 });
 

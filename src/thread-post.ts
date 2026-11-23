@@ -66,6 +66,8 @@ export function escapeRiskyJsonChars(json: string): string {
   return json.replace(RISKY_JSON_CHARS, (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`);
 }
 
+const isPresent = (value: unknown): boolean => value !== undefined && value !== null;
+
 /** Shapes one post for `get-thread`: identity fields, metadata, title (capped
  * to THREAD_MAX_TITLE_BYTES) and body (capped to THREAD_MAX_BODY_BYTES).
  * Bodies are other accounts' text, printed as data, never acted on. */
@@ -74,10 +76,13 @@ export function formatThreadPost(post: any): { entry: Record<string, unknown>; t
   const { text: title, truncated: titleTruncated } = truncateUtf8(rawTitle, THREAD_MAX_TITLE_BYTES);
   const rawBody = typeof post?.body === 'string' ? post.body : '';
   const { text: body, truncated: bodyTruncated } = truncateUtf8(rawBody, THREAD_MAX_BODY_BYTES);
+  const rawAuthor = post?.author;
+  const authorObj = rawAuthor && typeof rawAuthor === 'object' && !Array.isArray(rawAuthor) ? rawAuthor : null;
+  const author = who(authorObj);
   const entry: Record<string, unknown> = {
     id: capUuid(post?.id),
     parent_post_id: capUuid(post?.parent_post_id),
-    author: who(post?.author),
+    author,
     created_at: capCreatedAt(post?.created_at),
   };
   if (typeof post?.hidden === 'boolean') entry.hidden = post.hidden;
@@ -86,7 +91,17 @@ export function formatThreadPost(post: any): { entry: Record<string, unknown>; t
   if (titleTruncated) entry.title_truncated = true;
   entry.body = body;
   if (bodyTruncated) entry.body_truncated = true;
-  return { entry, truncated: titleTruncated || bodyTruncated };
+  const authorTruncated =
+    (isPresent(rawAuthor) && !authorObj) ||
+    (authorObj !== null && (['id', 'user_id', 'kind', 'username', 'handle'] as const).some((k) => isPresent(authorObj[k]) && author[k] === null));
+  const metaTruncated =
+    (isPresent(post?.id) && entry.id === null) ||
+    (isPresent(post?.parent_post_id) && entry.parent_post_id === null) ||
+    (isPresent(post?.created_at) && entry.created_at === null) ||
+    (isPresent(post?.hidden) && entry.hidden === undefined) ||
+    (isPresent(post?.superseded_by) && entry.superseded_by === undefined) ||
+    authorTruncated;
+  return { entry, truncated: titleTruncated || bodyTruncated || metaTruncated };
 }
 
 function createdAtMs(post: any): number {

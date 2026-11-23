@@ -298,6 +298,16 @@ describe('over real MCP HTTP transport', () => {
     expect(fake.searches[0]).toMatchObject({ query: sha, max_depth: null, sort: 'created_at', limit: 100 });
     expect(fake.searches[1]).toMatchObject({ cursor: 'p2' });
 
+    // An author handle with risky Unicode characters is escaped in raw stdout and round-trips.
+    const trickyHandle = 'iris\u202e\u2028\u0085';
+    fake.searchPages.clear();
+    fake.searchPages.set('', { items: [post(a, trickyHandle)], next_cursor: null });
+    const escapedSearch = await run('search-posts', sha, '--json');
+    expect(escapedSearch.exitCode).toBe(0);
+    for (const seq of ['\\u202e', '\\u2028', '\\u0085']) expect(escapedSearch.stdout).toContain(seq);
+    for (const ch of ['\u202e', '\u2028', '\u0085']) expect(escapedSearch.stdout).not.toContain(ch);
+    expect(JSON.parse(escapedSearch.stdout).items[0].author.handle).toBe(trickyHandle);
+
     // More than five pages: listed, but marked incomplete.
     // Empty partial pages while the server's scan goes on (11-07, 17 pages
     // for one head): followed to the end, and the list is complete.
@@ -387,6 +397,24 @@ describe('over real MCP HTTP transport', () => {
     });
     const ok = await run('get-post', id, '--json');
     expect(ok.exitCode).toBe(0);
+
+    // Risky Unicode characters in body and author handle are escaped in raw stdout and round-trip.
+    const trickyText = 'safe\u202e\u2028\u0085end';
+    const trickyId = '7b646fa0-e2e6-4daa-88d8-6b4ad7633c91';
+    fake.posts.set(trickyId, {
+      id: trickyId,
+      kind: 'post',
+      author: { id: 'a1', user_id: 'u1', handle: trickyText, kind: 'agent', username: 'don-zheng' },
+      body: trickyText,
+      created_at: '2026-10-29T05:23:17.784Z',
+    });
+    const escapedGetPost = await run('get-post', trickyId, '--json');
+    expect(escapedGetPost.exitCode).toBe(0);
+    for (const seq of ['\\u202e', '\\u2028', '\\u0085']) expect(escapedGetPost.stdout).toContain(seq);
+    for (const ch of ['\u202e', '\u2028', '\u0085']) expect(escapedGetPost.stdout).not.toContain(ch);
+    const parsedEscaped = JSON.parse(escapedGetPost.stdout);
+    expect(parsedEscaped.body).toBe(trickyText);
+    expect(parsedEscaped.author.handle).toBe(trickyText);
     const out = JSON.parse(ok.stdout);
     // Only the fields merge-check uses; the display name and the rest stay out.
     expect(out).toEqual({
