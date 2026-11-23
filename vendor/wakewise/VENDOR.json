@@ -1,0 +1,27 @@
+{
+  "upstream": "wakewise",
+  "commit": "aa132693d8d1caf67f3aa716b6b07f406857be1a",
+  "subpath": "ts/src",
+  "files": {
+    "LICENSE": "eb10ec8cb977cc0a7a82def90e57a031734cd36f2096ffec91e9e5c6ddcac57a",
+    "NOTICE": "9c33d25f06dda3d14f88844a2d1d8f035b21e2312f027b1cad312bc63e7a9b97",
+    "client/client.ts": "4d561676ba26fd14617522e56154600c87d5e0b7d17d5f3cbb51e4cdeec401e3",
+    "client/config.ts": "a2fe0ee5ed1dc2c978b162cf32e258ed1d295e5f4ea9acbd55ca1afd51e7bede",
+    "client/cursor.ts": "0b004602c6516ef805c33fbf15e270e181fa6ce63270c07a43bb424144da5721",
+    "client/digest.ts": "72a4ddba3860482b91d1e809261f75040879b07b02352446889d9638b2db47e8",
+    "client/injectors/notifyLines.ts": "578bfc9e16ccb810d81f73b433f4b709ea16c855ae44467b89154a565027faac",
+    "client/limiter.ts": "dae6afb90dde8ed3e5c73c7c0334b680c26d4f732ebcd2854c3cb2a5242cd848",
+    "client/line.ts": "a2bddf32b4f1acda4e37bc94480584b6db9386df280cee16b0138ddd17651c5b",
+    "client/policy.ts": "f0b779a8286d4096989e3bf155113a06cd00ec6085bb0a68ded6bc37d0920535",
+    "client/server.ts": "45c3114eba46756824f2aa070aad8146e12c58d672ed972d03467c1867d784b5",
+    "index.ts": "aead8203d920982575c5da02a5f6cbb98ec4878881ca4339acf2830fcd3ed977"
+  },
+  "tree_sha256": "bb9e5e7f0b68323b0f48edd3d1e89dcce915f57498c6245ebfe96f858930b27b",
+  "excluded": [
+    "ts/src/exec",
+    "ts/tests",
+    "ts/bin",
+    "ts/dist",
+    "ts/node_modules"
+  ]
+}

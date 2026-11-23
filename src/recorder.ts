@@ -53,6 +53,20 @@ export interface RecordInput {
   events: readonly Pick<EventRef, 'kind' | 'entity_type' | 'entity_id'>[];
 }
 
+export type RecordedPolicyOutcome = { lane: RecordedLane } | { waitMs: number };
+
+export interface ShadowDiffInput {
+  method: 'decide';
+  builtin: RecordedPolicyOutcome;
+  wakewise: RecordedPolicyOutcome;
+  lane: RecordedLane | null;
+}
+
+const sanitizeOutcome = (d: RecordedPolicyOutcome): RecordedPolicyOutcome =>
+  'lane' in d && (d.lane === 'normal' || d.lane === 'direct')
+    ? { lane: d.lane }
+    : { waitMs: 'waitMs' in d && typeof d.waitMs === 'number' ? d.waitMs : -1 };
+
 const word = (value: unknown): string => (typeof value === 'string' && WORD_RE.test(value) ? value : 'other');
 const uuid = (value: unknown): string =>
   typeof value === 'string' && UUID_RE.test(value.toLowerCase()) ? value.toLowerCase() : 'invalid-id';
@@ -104,13 +118,36 @@ export class DecisionRecorder {
         events,
         ...(input.events.length > events.length ? { more: input.events.length - events.length } : {}),
       });
-      const fd = this.#open();
-      if (this.#size + line.length + 1 > this.#maxBytes) this.#prune(line.length + 1);
-      writeSync(this.#fd ?? fd, `${line}\n`);
-      this.#size += line.length + 1;
+      this.#writeLine(line);
     } catch (e) {
       this.#fail(e);
     }
+  }
+
+  /** Appends one shadow_diff metadata line. Never throws. */
+  recordShadowDiff(input: ShadowDiffInput): void {
+    if (this.#off) return;
+    try {
+      const line = JSON.stringify({
+        at: new Date(this.#now()).toISOString(),
+        recipient: this.#handle,
+        type: 'shadow_diff',
+        method: input.method,
+        builtin: sanitizeOutcome(input.builtin),
+        wakewise: sanitizeOutcome(input.wakewise),
+        lane: input.lane === 'normal' || input.lane === 'direct' ? input.lane : null,
+      });
+      this.#writeLine(line);
+    } catch (e) {
+      this.#fail(e);
+    }
+  }
+
+  #writeLine(line: string): void {
+    const fd = this.#open();
+    if (this.#size + line.length + 1 > this.#maxBytes) this.#prune(line.length + 1);
+    writeSync(this.#fd ?? fd, `${line}\n`);
+    this.#size += line.length + 1;
   }
 
   close(): void {

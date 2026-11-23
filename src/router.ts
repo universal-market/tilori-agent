@@ -10,9 +10,9 @@ import {
   type ProfileNotes,
   type TiloriAgentClient,
 } from './client.ts';
-import { DEFAULT_PAUSE_SECONDS, DEFAULT_DIRECT_WAKES_PER_HOUR, DEFAULT_WAKES_PER_HOUR, type Reminder, unfilteredPostsWarning } from './config.ts';
+import { DEFAULT_PAUSE_SECONDS, DEFAULT_DIRECT_WAKES_PER_HOUR, DEFAULT_WAKES_PER_HOUR, type Reminder, type WakeEngine, unfilteredPostsWarning } from './config.ts';
 import { PushStream, type PushOptions, type PushStatus } from './push.ts';
-import { BuiltinPolicy, type Lane as WakeLane, type WakePolicy } from './policy.ts';
+import { BuiltinPolicy, FailOpenWakewisePolicy, ShadowPolicy, type Lane as WakeLane, type ShadowDiff, type WakePolicy } from './policy.ts';
 import type { LiveSettings } from './settings.ts';
 import type {
   AgentDelivery,
@@ -126,6 +126,10 @@ export interface RouterAgentConfig {
   /** UNI-1097 slice 4: record this agent's wake decisions (recorder.ts).
    * Applies only when the router also has `recordingsDir`. */
   recordDecisions?: boolean;
+  /** UNI-1097 slice 2: rate-limiter engine ("builtin" | "wakewise"). */
+  wakeEngine?: WakeEngine;
+  /** UNI-1097 slice 2: mirror calls to wakewise in shadow alongside builtin. */
+  shadow?: boolean;
 }
 
 /** This hour's wake counts for `tilori-agent config show`: counts only. */
@@ -541,24 +545,21 @@ export class Router {
       const broad = unfilteredPostsWarning(cfg.handle, cfg.subscriptions);
       if (broad) this.#log(broad);
       if (cfg.market && cfg.market.client === cfg.client) throw new Error(`Agent ${cfg.handle}: the Market lane needs its own client.`);
+      const recorder =
+        cfg.recordDecisions && this.#recordingsDir !== undefined
+          ? new DecisionRecorder(this.#recordingsDir, cfg.handle, {
+              now: this.#now,
+              onError: (m) => this.#log(`[${cfg.handle}] ${m}`),
+            })
+          : null;
       const st: AgentState = {
         cfg,
-        recorder:
-          cfg.recordDecisions && this.#recordingsDir !== undefined
-            ? new DecisionRecorder(this.#recordingsDir, cfg.handle, {
-                now: this.#now,
-                onError: (m) => this.#log(`[${cfg.handle}] ${m}`),
-              })
-            : null,
+        recorder,
         lanes: {
           tilori: newLane('tilori', cfg.client, cfg.subscriptions),
           market: cfg.market ? newLane('market', cfg.market.client, [MARKET_SUBSCRIPTION]) : null,
         },
-        policy: new BuiltinPolicy(
-          cfg.wakesPerHour ?? DEFAULT_WAKES_PER_HOUR,
-          cfg.directWakesPerHour ?? DEFAULT_DIRECT_WAKES_PER_HOUR,
-          this.#now,
-        ),
+        policy: this.#buildPolicy(cfg, recorder),
         directSubs: new Set(),
         capHeld: new Set(),
         recent: new Map(),
@@ -592,6 +593,49 @@ export class Router {
       const t = st.lanes.tilori;
       if (cfg.push) t.push = { stream: this.#pushStream(st, cfg.push), seq: 0, kick: makeKick(), back: false, caught: 0, aliveAt: 0, polledAt: 0, lostAt: 0, fallbackAt: 0, polling: false };
     }
+  }
+
+  /** Builds the agent's WakePolicy from local config only. */
+  #buildPolicy(cfg: RouterAgentConfig, recorder: DecisionRecorder | null): WakePolicy {
+    const normal = cfg.wakesPerHour ?? DEFAULT_WAKES_PER_HOUR;
+    const direct = cfg.directWakesPerHour ?? DEFAULT_DIRECT_WAKES_PER_HOUR;
+    const engine = cfg.wakeEngine ?? 'builtin';
+    if (cfg.shadow && engine === 'wakewise') {
+      throw new Error(`Agent ${cfg.handle}: shadow cannot be true when wake_engine is "wakewise".`);
+    }
+    if (cfg.shadow) {
+      let lastDiffLogAt = -Infinity;
+      const onDiff = (diff: ShadowDiff) => {
+        if (recorder) {
+          recorder.recordShadowDiff({
+            method: diff.method,
+            builtin: diff.builtin,
+            wakewise: diff.wakewise,
+            lane: diff.lane,
+          });
+          return;
+        }
+        const now = this.#now();
+        if (lastDiffLogAt === -Infinity || now - lastDiffLogAt >= 60_000) {
+          lastDiffLogAt = now;
+          this.#log(
+            `[${cfg.handle}] wakewise shadow diff (${diff.method}): builtin=${JSON.stringify(diff.builtin)} wakewise=${JSON.stringify(diff.wakewise)}`,
+          );
+        }
+      };
+      return new ShadowPolicy(normal, direct, {
+        now: this.#now,
+        onDiff,
+        onError: (m) => this.#log(`[${cfg.handle}] ${m}`),
+      });
+    }
+    if (engine === 'wakewise') {
+      return new FailOpenWakewisePolicy(normal, direct, {
+        now: this.#now,
+        onError: (m) => this.#log(`[${cfg.handle}] ${m}`),
+      });
+    }
+    return new BuiltinPolicy(normal, direct, this.#now);
   }
 
   /** The agent's lanes, Tilori first. */
@@ -945,6 +989,12 @@ export class Router {
     st.policy.resize('normal', live.wakesPerHour);
     note('direct_wakes_per_hour', st.policy.limit('direct'), live.directWakesPerHour);
     st.policy.resize('direct', live.directWakesPerHour);
+    if (
+      (live.wakeEngine !== undefined && live.wakeEngine !== (st.cfg.wakeEngine ?? 'builtin')) ||
+      (live.shadow !== undefined && live.shadow !== (st.cfg.shadow ?? false))
+    ) {
+      this.#log(`[${handle}] wake_engine/shadow change takes effect on restart`);
+    }
     note('pause_seconds', st.cfg.pauseSeconds ?? this.#broadPauseMs / 1000, live.pauseSeconds);
     note('post_wake_minutes', st.cfg.postWakeMinutes ?? 0, live.postWakeMinutes);
     note('stall_minutes', st.cfg.stallMinutes ?? 0, live.stallMinutes);

@@ -40,6 +40,8 @@ function setup(
     reminder?: { everyMs: number; prompt: string; onlyWhenIdle: boolean };
     recordingsDir?: string;
     recordDecisions?: boolean;
+    wakeEngine?: 'builtin' | 'wakewise';
+    shadow?: boolean;
   } = {},
 ) {
   const fake = new FakeTilori();
@@ -58,6 +60,8 @@ function setup(
         postWakeMinutes: opts.postWakeMinutes,
         reminder: opts.reminder,
         recordDecisions: opts.recordDecisions,
+        wakeEngine: opts.wakeEngine,
+        shadow: opts.shadow,
       },
     ],
     recordingsDir: opts.recordingsDir,
@@ -1794,5 +1798,32 @@ describe('wake pauses', () => {
     expect(Date.now() - t0).toBeGreaterThanOrEqual(700);
     ac.abort();
     await done;
+  });
+
+  test('wake_engine: wakewise and shadow: true both wake on a mention like builtin', async () => {
+    for (const opts of [{ wakeEngine: 'wakewise' as const }, { shadow: true }]) {
+      const { fake, router, logs, ac, done } = setup(opts);
+      await until(() => fake.subs.length === 2);
+      const inj = new Recorder();
+      router.register('wren', inj);
+      const ev = mention();
+      fake.push('inbox', [ev]);
+      await until(() => inj.wakes.length === 1);
+      expect(inj.wakes[0].events.map((e) => e.entity_id)).toEqual([ev.entity_id]);
+      expect(router.usage('wren')?.wakes.used).toBe(1);
+      // Changing wake_engine or shadow on live reload logs restart notice and keeps running policy.
+      router.reload('wren', {
+        wakesPerHour: 20,
+        directWakesPerHour: 10,
+        pauseSeconds: 0,
+        postWakeMinutes: 0,
+        stallMinutes: 0,
+        wakeEngine: opts.wakeEngine === 'wakewise' ? 'builtin' : 'wakewise',
+        shadow: !opts.shadow,
+      });
+      expect(logs.some((l) => l.includes('wake_engine/shadow change takes effect on restart'))).toBe(true);
+      ac.abort();
+      await done;
+    }
   });
 });
