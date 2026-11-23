@@ -69,16 +69,16 @@ import {
   POST_ID,
   THREAD_MAX_BODY_BYTES,
   THREAD_MAX_POSTS,
+  THREAD_MAX_TITLE_BYTES,
   THREAD_MAX_TOTAL_BYTES,
   TITLE_MAX_BYTES,
   TITLE_MAX_CHARS,
   buildThreadPayload,
   readValidatedTextFile,
   sortThreadReplies,
-  who,
 } from './thread-post.ts';
 
-export { THREAD_MAX_BODY_BYTES, THREAD_MAX_POSTS, THREAD_MAX_TOTAL_BYTES };
+export { THREAD_MAX_BODY_BYTES, THREAD_MAX_POSTS, THREAD_MAX_TITLE_BYTES, THREAD_MAX_TOTAL_BYTES };
 
 const USAGE = `tilori-agent: wake local coding agents on Tilori events
 
@@ -224,7 +224,7 @@ Usage:
   tilori-agent get-thread <root-post-uuid> [--json] [--agent <handle>]
       Reads a root post and up to 39 newest replies as one JSON line: {root_post_id, posts, complete}. Read-only; exits 0 on success, 2 when Tilori refuses, 1 on bad input, transport error or timeout.
   tilori-agent create-post --parent <uuid> --title-file <path> --body-file <path> --idempotency-key <key> --agent <handle>
-      Creates one reply post from local UTF-8 files (title <= 160 chars / 640 bytes, body <= 20000 chars / bytes) and prints {"id": "<uuid>"}. Exits 0 on success, 2 when Tilori refuses or doesn't create it, 1 on bad input, transport error or timeout.
+      Creates one reply post from local UTF-8 files (title <= 160 chars / 640 bytes, body <= 20000 chars / bytes, both non-blank) and prints {"id": "<uuid>"}. Exits 0 on success, 2 when Tilori refuses or doesn't create it, 1 on bad input, transport error or timeout.
   tilori-agent pr-work listing --repo <owner/repo> --pr <number> --agents <file> [--docs-only] [--acceptance <text>] [--defaults <path>] [--repo-dir <checkout>]
       Prints one JSON line with a Market create_listing payload and its selected
       reviewers. Reads the repository's merge-check defaults and the JSON agents
@@ -454,6 +454,30 @@ function requireAgent(config: TiloriConfig, a: Args): string {
   const agent = resolveAgent(config, str(a, 'agent'));
   if (!agent) throw new Error('No agent selected. Pass --agent, set TILORI_AGENT, or run tilori-agent init --default.');
   return agent;
+}
+
+function requireExplicitConfiguredAgent(a: Args, command: string): { config: TiloriConfig; agent: string } {
+  const explicitAgent = str(a, 'agent');
+  if (!explicitAgent) throw new Error(`${command} needs --agent <handle>.`);
+  const agent = validateHandle(explicitAgent);
+  const config = loadConfig();
+  const agentEntry = config.agents?.[agent];
+  const inConfig =
+    (agentEntry && typeof agentEntry === 'object' && !Array.isArray(agentEntry)) || config.default_agent === agent;
+  if (!inConfig) throw new Error(`No agent "${agent}" in config.json.`);
+  return { config, agent };
+}
+
+class UnexpectedTiloriAnswer extends Error {}
+
+function logTransportError(log: (m: string) => void, command: 'get-thread' | 'create-post', cause: unknown): 1 {
+  const status = (cause as { status?: unknown }).status;
+  log(
+    typeof status === 'number'
+      ? `${command}: could not reach Tilori (HTTP ${status}).`
+      : `${command}: could not reach Tilori.`,
+  );
+  return 1;
 }
 
 /** Commands that never read a Tilori home, so a refused TILORI_HOME doesn't
@@ -785,18 +809,19 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         for (const name of args.flags.keys()) {
           if (name !== 'agent' && name !== 'json') throw new Error(`get-thread: does not take --${name}.`);
         }
-        const config = loadConfig();
-        const agent = requireAgent(config, args);
+        const { config, agent } = requireExplicitConfiguredAgent(args, 'get-thread');
         const client = new TiloriAgentClient({ url: keyUrl(config, undefined), apiKey: readKey(agent), logger: log });
         const timeout = AbortSignal.timeout(SEARCH_TIMEOUT_MS);
         const abort = AbortSignal.any([signal, timeout]);
         const gaveUp = new Promise<never>((_, reject) =>
-          abort.addEventListener('abort', () => reject(new Error('get-thread: no answer in time.')), { once: true }),
+          abort.addEventListener('abort', () => reject(new UnexpectedTiloriAnswer('get-thread: no answer in time.')), { once: true }),
         );
         gaveUp.catch(() => {});
         try {
           const root = await Promise.race([client.getPost(id, { signal: abort, timeout: GET_POST_TIMEOUT_MS }), gaveUp]);
-          if (!root || typeof root !== 'object' || root.id !== id) throw new Error('get-thread: Tilori returned a different post.');
+          if (!root || typeof root !== 'object' || root.id !== id) {
+            throw new UnexpectedTiloriAnswer('get-thread: Tilori returned a different post.');
+          }
 
           const maxReplies = THREAD_MAX_POSTS - 1;
           const replyIds: string[] = [];
@@ -806,7 +831,9 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
           const cursors = new Set<string>();
           for (let page = 0; page < SEARCH_MAX_PAGES; page++) {
             const res = await Promise.race([client.searchThread(id, cursor, { signal: abort, timeout: SEARCH_PAGE_TIMEOUT_MS }), gaveUp]);
-            if (!res || typeof res !== 'object' || !Array.isArray(res.items)) throw new Error('get-thread: unexpected answer from Tilori.');
+            if (!res || typeof res !== 'object' || !Array.isArray(res.items)) {
+              throw new UnexpectedTiloriAnswer('get-thread: unexpected answer from Tilori.');
+            }
             for (const it of res.items) {
               const post = it?.post;
               if (!post || typeof post.id !== 'string' || !POST_ID.test(post.id) || seen.has(post.id)) continue;
@@ -823,14 +850,23 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
             cursors.add(cursor);
           }
 
-          const dropped = Boolean(cursor) || replyIds.length > maxReplies;
+          let dropped = Boolean(cursor) || replyIds.length > maxReplies;
           const keptReplyIds = replyIds.slice(0, maxReplies);
 
           const replies: unknown[] = [];
           for (const replyId of keptReplyIds) {
-            const reply = await Promise.race([client.getPost(replyId, { signal: abort, timeout: GET_POST_TIMEOUT_MS }), gaveUp]);
+            let reply: any;
+            try {
+              reply = await Promise.race([client.getPost(replyId, { signal: abort, timeout: GET_POST_TIMEOUT_MS }), gaveUp]);
+            } catch (cause) {
+              if (cause instanceof ToolRefused) {
+                dropped = true;
+                continue;
+              }
+              throw cause;
+            }
             if (!reply || typeof reply !== 'object' || reply.id !== replyId) {
-              throw new Error('get-thread: Tilori returned a different post.');
+              throw new UnexpectedTiloriAnswer('get-thread: Tilori returned a different post.');
             }
             replies.push(reply);
           }
@@ -842,7 +878,9 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
             log(`get-thread: Tilori refused (${cause.code ?? 'no error code'}).`);
             return 2;
           }
-          throw cause;
+          if (cause instanceof UnexpectedTiloriAnswer) throw cause;
+          if (abort.aborted) throw new Error('get-thread: no answer in time.');
+          return logTransportError(log, 'get-thread', cause);
         } finally {
           await client.close();
         }
@@ -859,36 +897,32 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         if (!IDEMPOTENCY_KEY.test(idempotencyKey)) {
           throw new Error('create-post needs --idempotency-key (8-200 chars of [A-Za-z0-9._:-]).');
         }
-        const explicitAgent = str(args, 'agent');
-        if (!explicitAgent) throw new Error('create-post needs --agent <handle>.');
-        const agent = validateHandle(explicitAgent);
-
         const titlePath = str(args, 'title-file') ?? '';
         const bodyPath = str(args, 'body-file') ?? '';
         if (!titlePath) throw new Error('create-post needs --title-file <path>.');
         if (!bodyPath) throw new Error('create-post needs --body-file <path>.');
 
-        const config = loadConfig();
-        const agentEntry = config.agents?.[agent];
-        const inConfig =
-          (agentEntry && typeof agentEntry === 'object' && !Array.isArray(agentEntry)) || config.default_agent === agent;
-        if (!inConfig) throw new Error(`No agent "${agent}" in config.json.`);
+        const { config, agent } = requireExplicitConfiguredAgent(args, 'create-post');
+        const apiKey = readKey(agent);
 
         const title = readValidatedTextFile(titlePath, '--title-file', {
           maxChars: TITLE_MAX_CHARS,
           maxBytes: TITLE_MAX_BYTES,
           trimNonBlank: true,
+          key: apiKey,
         });
         const body = readValidatedTextFile(bodyPath, '--body-file', {
           maxChars: BODY_MAX_CHARS,
           maxBytes: BODY_MAX_BYTES,
+          nonBlank: true,
+          key: apiKey,
         });
 
-        const client = new TiloriAgentClient({ url: keyUrl(config, undefined), apiKey: readKey(agent), logger: log });
+        const client = new TiloriAgentClient({ url: keyUrl(config, undefined), apiKey, logger: log });
         const timeout = AbortSignal.timeout(CREATE_POST_TIMEOUT_MS);
         const abort = AbortSignal.any([signal, timeout]);
         const gaveUp = new Promise<never>((_, reject) =>
-          abort.addEventListener('abort', () => reject(new Error('create-post: no answer in time.')), { once: true }),
+          abort.addEventListener('abort', () => reject(new UnexpectedTiloriAnswer('create-post: no answer in time.')), { once: true }),
         );
         gaveUp.catch(() => {});
         try {
@@ -915,7 +949,9 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
             log(`create-post: Tilori refused (${cause.code ?? 'no error code'}).`);
             return 2;
           }
-          throw cause;
+          if (cause instanceof UnexpectedTiloriAnswer) throw cause;
+          if (abort.aborted) throw new Error('create-post: no answer in time.');
+          return logTransportError(log, 'create-post', cause);
         } finally {
           await client.close();
         }

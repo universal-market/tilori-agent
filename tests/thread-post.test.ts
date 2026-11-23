@@ -7,7 +7,8 @@ import { join } from 'node:path';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { THREAD_MAX_BODY_BYTES, THREAD_MAX_POSTS, THREAD_MAX_TOTAL_BYTES } from '../src/cli.ts';
+import { THREAD_MAX_BODY_BYTES, THREAD_MAX_POSTS, THREAD_MAX_TITLE_BYTES, THREAD_MAX_TOTAL_BYTES } from '../src/cli.ts';
+import { buildThreadPayload } from '../src/thread-post.ts';
 import { TiloriAgentClient } from '../src/client.ts';
 import { saveConfig } from '../src/config.ts';
 import { writeKey } from '../src/keys.ts';
@@ -127,7 +128,7 @@ describe('get-thread', () => {
       created_at: '2026-11-20T00:02:00.000Z',
       title: 'Reply 2',
       body: 'Full body 2',
-      superseded_by: { id: uuid(99), title: 'newer' },
+      superseded_by: uuid(99),
     });
 
     const pages = new Map<string, { items: unknown[]; next_cursor: string | null }>();
@@ -175,7 +176,7 @@ describe('get-thread', () => {
           parent_post_id: rootId,
           author: { id: null, user_id: null, kind: 'human', username: 'don', handle: 'don' },
           created_at: '2026-11-20T00:02:00.000Z',
-          superseded_by: { id: uuid(99), title: 'newer' },
+          superseded_by: uuid(99),
           title: 'Reply 2',
           body: 'Full body 2',
         },
@@ -370,20 +371,177 @@ describe('get-thread', () => {
     fake.toolErrors.clear();
 
     // Bad input exits 1 and sends nothing.
+    process.env.TILORI_HOME = tiloriDir;
+    writeKey('ghost-thread', KEY);
+    delete process.env.TILORI_HOME;
     fake.calls.length = 0;
-    for (const argv of [
-      ['get-thread'],
-      ['get-thread', 'short'],
-      ['get-thread', rootId.toUpperCase()],
-      ['get-thread', rootId, 'extra'],
-      ['get-thread', rootId, '--url', url],
-      ['get-thread', rootId, '--unknown'],
-    ]) {
-      const bad = await runCli(argv);
-      expect(bad.exitCode).toBe(1);
+    const cases: Array<{ args: string[]; env?: Record<string, string | undefined>; expect: string }> = [
+      { args: ['get-thread'], expect: 'get-thread needs a full post UUID.' },
+      { args: ['get-thread', 'short', '--agent', 'wren'], expect: 'get-thread needs a full post UUID.' },
+      { args: ['get-thread', rootId.toUpperCase(), '--agent', 'wren'], expect: 'get-thread needs a full post UUID.' },
+      { args: ['get-thread', rootId, 'extra', '--agent', 'wren'], expect: 'Unexpected argument: extra' },
+      { args: ['get-thread', rootId, '--url', url, '--agent', 'wren'], expect: 'get-thread: does not take --url.' },
+      { args: ['get-thread', rootId, '--unknown', '--agent', 'wren'], expect: 'get-thread: does not take --unknown.' },
+      // Missing --agent (even with TILORI_AGENT + default_agent set), empty --agent=, unknown / unconfigured --agent
+      { args: ['get-thread', rootId, '--json'], env: { TILORI_AGENT: 'wren' }, expect: 'get-thread needs --agent <handle>.' },
+      { args: ['get-thread', rootId, '--json', '--agent='], expect: 'get-thread needs --agent <handle>.' },
+      { args: ['get-thread', rootId, '--json', '--agent', 'unknown'], expect: 'No agent "unknown" in config.json.' },
+      { args: ['get-thread', rootId, '--json', '--agent', 'ghost-thread'], expect: 'No agent "ghost-thread" in config.json.' },
+    ];
+    for (const c of cases) {
+      const bad = await runCli(c.args, c.env);
+      expect({ args: c.args, code: bad.exitCode }).toEqual({ args: c.args, code: 1 });
       expect(bad.stdout).toBe('');
+      expect(bad.stderr).toContain(c.expect);
+      expect(bad.stderr).not.toContain(KEY);
     }
     expect(fake.calls).toEqual([]);
+  });
+
+  test('one refused reply is skipped and sets complete=false while keeping other replies', async () => {
+    resetFake();
+    const rootId = uuid(405);
+    fake.posts.set(rootId, { id: rootId, title: 'root', body: 'root body', author: {}, created_at: '2026-11-20T00:00:00Z' });
+    const replyIds: string[] = [];
+    for (let i = 1; i <= 5; i++) {
+      const id = uuid(405 + i);
+      replyIds.push(id);
+      if (i !== 3) {
+        fake.posts.set(id, {
+          id,
+          parent_post_id: rootId,
+          title: `r${i}`,
+          body: `body ${i}`,
+          author: {},
+          created_at: `2026-11-20T00:0${i}:00Z`,
+        });
+      }
+    }
+    // Reply 3 is missing from fake.posts so get_post returns NOT_FOUND (ToolRefused).
+    fake.threadPages.set(
+      rootId,
+      new Map([['', { items: [...replyIds].reverse().map((id) => ({ post: { id } })), next_cursor: null }]]),
+    );
+
+    const r = await runCli(['get-thread', rootId, '--json', '--agent', 'wren']);
+    expect(r.exitCode).toBe(0);
+    const out = JSON.parse(r.stdout);
+    expect(out.complete).toBe(false);
+    expect(out.posts.map((p: any) => p.id)).toEqual([rootId, replyIds[0], replyIds[1], replyIds[3], replyIds[4]]);
+    expect(out.posts.slice(1)).toHaveLength(4);
+  });
+
+  test('root caps: huge title, non-UUID superseded_by dropped, and root-only payload shrinks root body to fit', async () => {
+    resetFake();
+    const rootId = uuid(410);
+    const badSupReplyId = uuid(411);
+    const objSupReplyId = uuid(412);
+    // 3-byte CJK chars: 341 * 3 = 1023 bytes <= 1024; 342 * 3 = 1026 > 1024.
+    const hugeTitle = '中'.repeat(400);
+    const hugeBody = 'b'.repeat(20_000);
+    fake.posts.set(rootId, {
+      id: rootId,
+      title: hugeTitle,
+      body: hugeBody,
+      author: {},
+      created_at: '2026-11-20T00:00:00Z',
+      superseded_by: 'not-a-uuid',
+    });
+    fake.posts.set(badSupReplyId, {
+      id: badSupReplyId,
+      parent_post_id: rootId,
+      title: 'r1',
+      body: 'ok',
+      author: {},
+      created_at: '2026-11-20T00:01:00Z',
+      superseded_by: uuid(99).toUpperCase(),
+    });
+    fake.posts.set(objSupReplyId, {
+      id: objSupReplyId,
+      parent_post_id: rootId,
+      title: 'r2',
+      body: 'ok',
+      author: {},
+      created_at: '2026-11-20T00:02:00Z',
+      superseded_by: { id: uuid(99), title: 'newer' },
+    });
+    fake.threadPages.set(
+      rootId,
+      new Map([['', { items: [{ post: { id: badSupReplyId } }, { post: { id: objSupReplyId } }], next_cursor: null }]]),
+    );
+
+    const r = await runCli(['get-thread', rootId, '--json', '--agent', 'wren']);
+    expect(r.exitCode).toBe(0);
+    expect(Buffer.byteLength(r.stdout, 'utf8')).toBeLessThanOrEqual(THREAD_MAX_TOTAL_BYTES);
+    const out = JSON.parse(r.stdout);
+    expect(out.complete).toBe(false);
+    expect(out.posts[0].title_truncated).toBe(true);
+    expect(Buffer.byteLength(out.posts[0].title, 'utf8')).toBe(1023);
+    expect(out.posts[0].title).toBe('中'.repeat(341));
+    expect(out.posts[0].title).not.toContain('\uFFFD');
+    expect(out.posts[0].body_truncated).toBe(true);
+    expect(Buffer.byteLength(out.posts[0].body, 'utf8')).toBe(THREAD_MAX_BODY_BYTES);
+    for (const p of out.posts) expect(p.superseded_by).toBeUndefined();
+
+    // Even when root-only metadata + body exceeds THREAD_MAX_TOTAL_BYTES, root body is truncated further until it fits.
+    resetFake();
+    const oversizedRootId = uuid(415);
+    fake.posts.set(oversizedRootId, {
+      id: oversizedRootId,
+      title: '中'.repeat(400),
+      body: 'z'.repeat(12_000),
+      author: { username: 'u'.repeat(258_000), handle: 'wren' },
+      created_at: '2026-11-20T00:00:00Z',
+    });
+    fake.threadPages.set(oversizedRootId, new Map([['', { items: [], next_cursor: null }]]));
+    const r2 = await runCli(['get-thread', oversizedRootId, '--json', '--agent', 'wren']);
+    expect(r2.exitCode).toBe(0);
+    expect(Buffer.byteLength(r2.stdout, 'utf8')).toBeLessThanOrEqual(THREAD_MAX_TOTAL_BYTES);
+    const out2 = JSON.parse(r2.stdout);
+    expect(out2.complete).toBe(false);
+    expect(out2.posts[0].title_truncated).toBe(true);
+    expect(Buffer.byteLength(out2.posts[0].title, 'utf8')).toBeLessThanOrEqual(THREAD_MAX_TITLE_BYTES);
+    expect(out2.posts[0].body_truncated).toBe(true);
+    expect(out2.posts[0].body.length).toBeLessThan(THREAD_MAX_BODY_BYTES);
+
+    // Direct unit check with a tight maxTotalBytes.
+    const compact = buildThreadPayload(
+      oversizedRootId,
+      { id: oversizedRootId, title: 'a'.repeat(2000), body: '中'.repeat(3000), author: {}, created_at: '2026-11-20T00:00:00Z' },
+      [],
+      { dropped: false, pagingComplete: true, maxTotalBytes: 1600 },
+    );
+    expect(Buffer.byteLength(compact, 'utf8')).toBeLessThanOrEqual(1600);
+    const parsedCompact = JSON.parse(compact);
+    expect(parsedCompact.complete).toBe(false);
+    expect(parsedCompact.posts[0].title_truncated).toBe(true);
+    expect(parsedCompact.posts[0].body_truncated).toBe(true);
+  });
+
+  test('escapes C1 controls, bidi controls, and U+2028/U+2029 in JSON stdout while round-tripping', async () => {
+    resetFake();
+    const rootId = uuid(420);
+    const tricky = 'safe\u0080\u009f\u061c\u200e\u200f\u2028\u2029\u202a\u202e\u2066\u2069end';
+    fake.posts.set(rootId, {
+      id: rootId,
+      title: 'title\u202e',
+      body: tricky,
+      author: {},
+      created_at: '2026-11-20T00:00:00Z',
+    });
+    fake.threadPages.set(rootId, new Map([['', { items: [], next_cursor: null }]]));
+
+    const r = await runCli(['get-thread', rootId, '--json', '--agent', 'wren']);
+    expect(r.exitCode).toBe(0);
+    for (const seq of ['\\u0080', '\\u009f', '\\u061c', '\\u200e', '\\u200f', '\\u2028', '\\u2029', '\\u202a', '\\u202e', '\\u2066', '\\u2069']) {
+      expect(r.stdout).toContain(seq);
+    }
+    for (const ch of ['\u0080', '\u009f', '\u061c', '\u200e', '\u200f', '\u2028', '\u2029', '\u202a', '\u202e', '\u2066', '\u2069']) {
+      expect(r.stdout).not.toContain(ch);
+    }
+    const out = JSON.parse(r.stdout);
+    expect(out.posts[0].title).toBe('title\u202e');
+    expect(out.posts[0].body).toBe(tricky);
   });
 });
 
@@ -401,7 +559,7 @@ describe('create-post', () => {
     const parentId = uuid(500);
     const createdId = uuid(501);
     fake.createPostResult = { id: createdId };
-    const { titlePath, bodyPath } = writeInputFiles('  My Reply Title \n', 'Secret body content\nwith two lines', '-ok');
+    const { titlePath, bodyPath } = writeInputFiles('  My Reply Title \n', '  Secret body content\nwith two lines  \n', '-ok');
 
     const r = await runCli([
       'create-post',
@@ -423,7 +581,7 @@ describe('create-post', () => {
       {
         parent_post_id: parentId,
         title: 'My Reply Title',
-        body: 'Secret body content\nwith two lines',
+        body: '  Secret body content\nwith two lines  \n',
         idempotency_key: 'wake_run-1:post.0',
       },
     ]);
@@ -517,67 +675,233 @@ describe('create-post', () => {
     // Multi-byte body: 7000 CJK chars (< 20000 chars, 21000 UTF-8 bytes > 20000 bytes).
     const multiByteBody = join(filesDir, 'multibyte-body.txt');
     writeFileSync(multiByteBody, '中'.repeat(7000));
+    const emptyBody = join(filesDir, 'empty-body.txt');
+    writeFileSync(emptyBody, '');
+    const blankBody = join(filesDir, 'blank-body.txt');
+    writeFileSync(blankBody, '  \n\t  ');
 
     const validKey = 'idem-key-1234';
-    const cases: Array<{ args: string[]; env?: Record<string, string | undefined> }> = [
+    const cases: Array<{ args: string[]; env?: Record<string, string | undefined>; expect: string }> = [
       // Missing / bad parent UUID
-      { args: ['create-post', '--title-file', okTitle, '--body-file', okBody, '--idempotency-key', validKey, '--agent', 'wren'] },
-      { args: ['create-post', '--parent', 'bad', '--title-file', okTitle, '--body-file', okBody, '--idempotency-key', validKey, '--agent', 'wren'] },
+      {
+        args: ['create-post', '--title-file', okTitle, '--body-file', okBody, '--idempotency-key', validKey, '--agent', 'wren'],
+        expect: 'needs a full --parent UUID',
+      },
+      {
+        args: ['create-post', '--parent', 'bad', '--title-file', okTitle, '--body-file', okBody, '--idempotency-key', validKey, '--agent', 'wren'],
+        expect: 'needs a full --parent UUID',
+      },
       {
         args: ['create-post', '--parent', parentId.toUpperCase(), '--title-file', okTitle, '--body-file', okBody, '--idempotency-key', validKey, '--agent', 'wren'],
+        expect: 'needs a full --parent UUID',
       },
       // Missing / short / long / bad-char idempotency key
-      { args: ['create-post', '--parent', parentId, '--title-file', okTitle, '--body-file', okBody, '--agent', 'wren'] },
-      { args: ['create-post', '--parent', parentId, '--title-file', okTitle, '--body-file', okBody, '--idempotency-key', 'short7', '--agent', 'wren'] },
-      { args: ['create-post', '--parent', parentId, '--title-file', okTitle, '--body-file', okBody, '--idempotency-key', 'x'.repeat(201), '--agent', 'wren'] },
-      { args: ['create-post', '--parent', parentId, '--title-file', okTitle, '--body-file', okBody, '--idempotency-key', 'bad key!', '--agent', 'wren'] },
-      // Missing --agent (even with TILORI_AGENT + default_agent set) and unknown --agent
-      { args: ['create-post', '--parent', parentId, '--title-file', okTitle, '--body-file', okBody, '--idempotency-key', validKey], env: { TILORI_AGENT: 'wren' } },
-      { args: ['create-post', '--parent', parentId, '--title-file', okTitle, '--body-file', okBody, '--idempotency-key', validKey, '--agent', 'unknown'] },
-      { args: ['create-post', '--parent', parentId, '--title-file', okTitle, '--body-file', okBody, '--idempotency-key', validKey, '--agent', 'ghost'] },
+      {
+        args: ['create-post', '--parent', parentId, '--title-file', okTitle, '--body-file', okBody, '--agent', 'wren'],
+        expect: 'needs --idempotency-key',
+      },
+      {
+        args: ['create-post', '--parent', parentId, '--title-file', okTitle, '--body-file', okBody, '--idempotency-key', 'short7', '--agent', 'wren'],
+        expect: 'needs --idempotency-key',
+      },
+      {
+        args: ['create-post', '--parent', parentId, '--title-file', okTitle, '--body-file', okBody, '--idempotency-key', 'x'.repeat(201), '--agent', 'wren'],
+        expect: 'needs --idempotency-key',
+      },
+      {
+        args: ['create-post', '--parent', parentId, '--title-file', okTitle, '--body-file', okBody, '--idempotency-key', 'bad key!', '--agent', 'wren'],
+        expect: 'needs --idempotency-key',
+      },
+      // Missing --agent (even with TILORI_AGENT + default_agent set), empty --agent=, and unknown --agent
+      {
+        args: ['create-post', '--parent', parentId, '--title-file', okTitle, '--body-file', okBody, '--idempotency-key', validKey],
+        env: { TILORI_AGENT: 'wren' },
+        expect: 'create-post needs --agent <handle>.',
+      },
+      {
+        args: ['create-post', '--parent', parentId, '--title-file', okTitle, '--body-file', okBody, '--idempotency-key', validKey, '--agent='],
+        expect: 'create-post needs --agent <handle>.',
+      },
+      {
+        args: ['create-post', '--parent', parentId, '--title-file', okTitle, '--body-file', okBody, '--idempotency-key', validKey, '--agent', 'unknown'],
+        expect: 'No agent "unknown" in config.json.',
+      },
+      {
+        args: ['create-post', '--parent', parentId, '--title-file', okTitle, '--body-file', okBody, '--idempotency-key', validKey, '--agent', 'ghost'],
+        expect: 'No agent "ghost" in config.json.',
+      },
       // Relative path, symlinks, FIFO, directory
-      { args: ['create-post', '--parent', parentId, '--title-file', 'relative.txt', '--body-file', okBody, '--idempotency-key', validKey, '--agent', 'wren'] },
-      { args: ['create-post', '--parent', parentId, '--title-file', titleSymlink, '--body-file', okBody, '--idempotency-key', validKey, '--agent', 'wren'] },
-      { args: ['create-post', '--parent', parentId, '--title-file', okTitle, '--body-file', bodySymlink, '--idempotency-key', validKey, '--agent', 'wren'] },
-      { args: ['create-post', '--parent', parentId, '--title-file', fifoPath, '--body-file', okBody, '--idempotency-key', validKey, '--agent', 'wren'] },
-      { args: ['create-post', '--parent', parentId, '--title-file', okTitle, '--body-file', dirPath, '--idempotency-key', validKey, '--agent', 'wren'] },
-      // Oversize, char limit, multi-byte > 20000 bytes, blank title, invalid UTF-8
-      { args: ['create-post', '--parent', parentId, '--title-file', bigTitle, '--body-file', okBody, '--idempotency-key', validKey, '--agent', 'wren'] },
-      { args: ['create-post', '--parent', parentId, '--title-file', longCharTitle, '--body-file', okBody, '--idempotency-key', validKey, '--agent', 'wren'] },
-      { args: ['create-post', '--parent', parentId, '--title-file', blankTitle, '--body-file', okBody, '--idempotency-key', validKey, '--agent', 'wren'] },
-      { args: ['create-post', '--parent', parentId, '--title-file', badUtf8, '--body-file', okBody, '--idempotency-key', validKey, '--agent', 'wren'] },
-      { args: ['create-post', '--parent', parentId, '--title-file', okTitle, '--body-file', bigBody, '--idempotency-key', validKey, '--agent', 'wren'] },
-      { args: ['create-post', '--parent', parentId, '--title-file', okTitle, '--body-file', multiByteBody, '--idempotency-key', validKey, '--agent', 'wren'] },
-      { args: ['create-post', '--parent', parentId, '--title-file', okTitle, '--body-file', badUtf8, '--idempotency-key', validKey, '--agent', 'wren'] },
+      {
+        args: ['create-post', '--parent', parentId, '--title-file', 'relative.txt', '--body-file', okBody, '--idempotency-key', validKey, '--agent', 'wren'],
+        expect: '--title-file must be an absolute path.',
+      },
+      {
+        args: ['create-post', '--parent', parentId, '--title-file', titleSymlink, '--body-file', okBody, '--idempotency-key', validKey, '--agent', 'wren'],
+        expect: '--title-file must not be a symlink.',
+      },
+      {
+        args: ['create-post', '--parent', parentId, '--title-file', okTitle, '--body-file', bodySymlink, '--idempotency-key', validKey, '--agent', 'wren'],
+        expect: '--body-file must not be a symlink.',
+      },
+      {
+        args: ['create-post', '--parent', parentId, '--title-file', fifoPath, '--body-file', okBody, '--idempotency-key', validKey, '--agent', 'wren'],
+        expect: '--title-file must be a regular file.',
+      },
+      {
+        args: ['create-post', '--parent', parentId, '--title-file', okTitle, '--body-file', dirPath, '--idempotency-key', validKey, '--agent', 'wren'],
+        expect: '--body-file must be a regular file.',
+      },
+      // Oversize, char limit, multi-byte > 20000 bytes, blank title/body, invalid UTF-8
+      {
+        args: ['create-post', '--parent', parentId, '--title-file', bigTitle, '--body-file', okBody, '--idempotency-key', validKey, '--agent', 'wren'],
+        expect: '--title-file exceeds 640 bytes.',
+      },
+      {
+        args: ['create-post', '--parent', parentId, '--title-file', longCharTitle, '--body-file', okBody, '--idempotency-key', validKey, '--agent', 'wren'],
+        expect: '--title-file exceeds 160 characters.',
+      },
+      {
+        args: ['create-post', '--parent', parentId, '--title-file', blankTitle, '--body-file', okBody, '--idempotency-key', validKey, '--agent', 'wren'],
+        expect: '--title-file must not be blank.',
+      },
+      {
+        args: ['create-post', '--parent', parentId, '--title-file', badUtf8, '--body-file', okBody, '--idempotency-key', validKey, '--agent', 'wren'],
+        expect: '--title-file is not valid UTF-8.',
+      },
+      {
+        args: ['create-post', '--parent', parentId, '--title-file', okTitle, '--body-file', bigBody, '--idempotency-key', validKey, '--agent', 'wren'],
+        expect: '--body-file exceeds 20000 bytes.',
+      },
+      {
+        args: ['create-post', '--parent', parentId, '--title-file', okTitle, '--body-file', multiByteBody, '--idempotency-key', validKey, '--agent', 'wren'],
+        expect: '--body-file exceeds 20000 bytes.',
+      },
+      {
+        args: ['create-post', '--parent', parentId, '--title-file', okTitle, '--body-file', emptyBody, '--idempotency-key', validKey, '--agent', 'wren'],
+        expect: '--body-file must not be blank.',
+      },
+      {
+        args: ['create-post', '--parent', parentId, '--title-file', okTitle, '--body-file', blankBody, '--idempotency-key', validKey, '--agent', 'wren'],
+        expect: '--body-file must not be blank.',
+      },
+      {
+        args: ['create-post', '--parent', parentId, '--title-file', okTitle, '--body-file', badUtf8, '--idempotency-key', validKey, '--agent', 'wren'],
+        expect: '--body-file is not valid UTF-8.',
+      },
       // Disallowed flags and positional args
-      { args: ['create-post', '--parent', parentId, '--title-file', okTitle, '--body-file', okBody, '--idempotency-key', validKey, '--agent', 'wren', '--url', url] },
-      { args: ['create-post', '--parent', parentId, '--title-file', okTitle, '--body-file', okBody, '--idempotency-key', validKey, '--agent', 'wren', '--host', 'x'] },
-      { args: ['create-post', '--parent', parentId, '--title-file', okTitle, '--body-file', okBody, '--idempotency-key', validKey, '--agent', 'wren', '--unknown'] },
-      { args: ['create-post', 'extra', '--parent', parentId, '--title-file', okTitle, '--body-file', okBody, '--idempotency-key', validKey, '--agent', 'wren'] },
+      {
+        args: ['create-post', '--parent', parentId, '--title-file', okTitle, '--body-file', okBody, '--idempotency-key', validKey, '--agent', 'wren', '--url', url],
+        expect: 'create-post: does not take --url.',
+      },
+      {
+        args: ['create-post', '--parent', parentId, '--title-file', okTitle, '--body-file', okBody, '--idempotency-key', validKey, '--agent', 'wren', '--host', 'x'],
+        expect: 'Unexpected argument: x',
+      },
+      {
+        args: ['create-post', '--parent', parentId, '--title-file', okTitle, '--body-file', okBody, '--idempotency-key', validKey, '--agent', 'wren', '--host=x'],
+        expect: 'create-post: does not take --host.',
+      },
+      {
+        args: ['create-post', '--parent', parentId, '--title-file', okTitle, '--body-file', okBody, '--idempotency-key', validKey, '--agent', 'wren', '--unknown'],
+        expect: 'create-post: does not take --unknown.',
+      },
+      {
+        args: ['create-post', 'extra', '--parent', parentId, '--title-file', okTitle, '--body-file', okBody, '--idempotency-key', validKey, '--agent', 'wren'],
+        expect: 'Unexpected argument: extra',
+      },
     ];
 
     for (const c of cases) {
       const r = await runCli(c.args, c.env);
       expect({ args: c.args, code: r.exitCode }).toEqual({ args: c.args, code: 1 });
       expect(r.stdout).toBe('');
+      expect(r.stderr).toContain(c.expect);
       expect(r.stderr).not.toContain(KEY);
     }
     expect(fake.createdPosts).toEqual([]);
   }, 60_000);
+
+  test('refuses files under Tilori home and symlink-free files outside home containing the agent key', async () => {
+    resetFake();
+    const parentId = uuid(610);
+    const { titlePath: okTitle, bodyPath: okBody } = writeInputFiles('Safe title', 'Safe body', '-keyguard');
+
+    const homeFile = join(tiloriDir, 'inside.txt');
+    writeFileSync(homeFile, 'harmless text inside tilori home');
+    const configInHome = join(tiloriDir, 'config.json');
+    const keyInHome = join(tiloriDir, 'agents', 'wren.key');
+
+    for (const [flag, badPath] of [
+      ['--title-file', homeFile],
+      ['--body-file', homeFile],
+      ['--title-file', configInHome],
+      ['--body-file', keyInHome],
+    ] as const) {
+      const r = await runCli([
+        'create-post',
+        '--parent',
+        parentId,
+        '--title-file',
+        flag === '--title-file' ? badPath : okTitle,
+        '--body-file',
+        flag === '--body-file' ? badPath : okBody,
+        '--idempotency-key',
+        'idem-home-guard-1',
+        '--agent',
+        'wren',
+      ]);
+      expect(r.exitCode).toBe(1);
+      expect(r.stdout).toBe('');
+      expect(r.stderr).toContain(`${flag}: refusing to read Tilori config or key files.`);
+      expect(r.stderr).not.toContain(KEY);
+    }
+
+    const titleWithKey = join(filesDir, 'title-with-key.txt');
+    const bodyWithKey = join(filesDir, 'body-with-key.txt');
+    writeFileSync(titleWithKey, `hello ${KEY} world`);
+    writeFileSync(bodyWithKey, `body\n${KEY}\nend`);
+
+    for (const [flag, badPath] of [
+      ['--title-file', titleWithKey],
+      ['--body-file', bodyWithKey],
+    ] as const) {
+      const r = await runCli([
+        'create-post',
+        '--parent',
+        parentId,
+        '--title-file',
+        flag === '--title-file' ? badPath : okTitle,
+        '--body-file',
+        flag === '--body-file' ? badPath : okBody,
+        '--idempotency-key',
+        'idem-key-guard-1',
+        '--agent',
+        'wren',
+      ]);
+      expect(r.exitCode).toBe(1);
+      expect(r.stdout).toBe('');
+      expect(r.stderr).toContain(`${flag} contains the agent key; refusing.`);
+      expect(r.stdout + r.stderr).not.toContain(KEY);
+    }
+
+    expect(fake.createdPosts).toEqual([]);
+  });
 });
 
-describe('both commands never print the key or Authorization header on transport errors', () => {
-  test('transport error echoing Authorization header never leaks the key', async () => {
+describe('both commands never print the key, Authorization header, or server body on transport errors', () => {
+  test('transport error prints only status (or generic reachability) and never leaks key or server body', async () => {
     const leakHome = mkdtempSync(join(tmpdir(), 'ta-leak-'));
     chmodSync(leakHome, 0o700);
     const leakTilori = join(leakHome, 'tilori');
     allowHome(leakTilori);
+    const bodyMarker = 'SERVER_BODY_TEXT_MUST_NOT_PRINT_12345';
+    let replyStatus = 401;
     const leakServer = Bun.serve({
       hostname: '127.0.0.1',
       port: 0,
       fetch(req) {
         const auth = req.headers.get('authorization') ?? '';
-        return new Response(JSON.stringify({ error: 'bad', echoed: auth, key: KEY }), { status: 401 });
+        return new Response(JSON.stringify({ error: bodyMarker, echoed: auth, key: KEY }), { status: replyStatus });
       },
     });
     const leakUrl = `http://127.0.0.1:${leakServer.port}/mcp/tilori/v1`;
@@ -590,35 +914,56 @@ describe('both commands never print the key or Authorization header on transport
     const bodyPath = join(leakHome, 'b.txt');
     writeFileSync(titlePath, 'Hello');
     writeFileSync(bodyPath, 'World');
+    const cpArgs = [
+      'create-post',
+      '--parent',
+      uuid(900),
+      '--title-file',
+      titlePath,
+      '--body-file',
+      bodyPath,
+      '--idempotency-key',
+      'idem-key-1234',
+      '--agent',
+      'wren',
+    ];
     try {
-      const gt = await runCli(['get-thread', uuid(900), '--json', '--agent', 'wren'], { TILORI_HOME: leakTilori });
-      expect(gt.exitCode).toBe(1);
-      expect(gt.stdout).toBe('');
-      expect(gt.stdout + gt.stderr).not.toContain(KEY);
-      expect(gt.stdout + gt.stderr).not.toContain('mcp_sk_');
-      expect(gt.stdout + gt.stderr).not.toContain(`Bearer ${KEY}`);
+      for (const status of [401, 502]) {
+        replyStatus = status;
+        const gt = await runCli(['get-thread', uuid(900), '--json', '--agent', 'wren'], { TILORI_HOME: leakTilori });
+        expect(gt.exitCode).toBe(1);
+        expect(gt.stdout).toBe('');
+        expect(gt.stderr).toContain(`get-thread: could not reach Tilori (HTTP ${status}).`);
+        expect(gt.stdout + gt.stderr).not.toContain(bodyMarker);
+        expect(gt.stdout + gt.stderr).not.toContain(KEY);
+        expect(gt.stdout + gt.stderr).not.toContain('mcp_sk_');
+        expect(gt.stdout + gt.stderr).not.toContain('Bearer ');
 
-      const cp = await runCli(
-        [
-          'create-post',
-          '--parent',
-          uuid(900),
-          '--title-file',
-          titlePath,
-          '--body-file',
-          bodyPath,
-          '--idempotency-key',
-          'idem-key-1234',
-          '--agent',
-          'wren',
-        ],
-        { TILORI_HOME: leakTilori },
-      );
-      expect(cp.exitCode).toBe(1);
-      expect(cp.stdout).toBe('');
-      expect(cp.stdout + cp.stderr).not.toContain(KEY);
-      expect(cp.stdout + cp.stderr).not.toContain('mcp_sk_');
-      expect(cp.stdout + cp.stderr).not.toContain(`Bearer ${KEY}`);
+        const cp = await runCli(cpArgs, { TILORI_HOME: leakTilori });
+        expect(cp.exitCode).toBe(1);
+        expect(cp.stdout).toBe('');
+        expect(cp.stderr).toContain(`create-post: could not reach Tilori (HTTP ${status}).`);
+        expect(cp.stdout + cp.stderr).not.toContain(bodyMarker);
+        expect(cp.stdout + cp.stderr).not.toContain(KEY);
+        expect(cp.stdout + cp.stderr).not.toContain('mcp_sk_');
+        expect(cp.stdout + cp.stderr).not.toContain('Bearer ');
+      }
+
+      // Network failure (no HTTP status): prints generic reachability message only.
+      leakServer.stop(true);
+      const gtDown = await runCli(['get-thread', uuid(900), '--json', '--agent', 'wren'], { TILORI_HOME: leakTilori });
+      expect(gtDown.exitCode).toBe(1);
+      expect(gtDown.stdout).toBe('');
+      expect(gtDown.stderr).toContain('get-thread: could not reach Tilori.');
+      expect(gtDown.stderr).not.toContain('HTTP ');
+      expect(gtDown.stdout + gtDown.stderr).not.toContain(KEY);
+
+      const cpDown = await runCli(cpArgs, { TILORI_HOME: leakTilori });
+      expect(cpDown.exitCode).toBe(1);
+      expect(cpDown.stdout).toBe('');
+      expect(cpDown.stderr).toContain('create-post: could not reach Tilori.');
+      expect(cpDown.stderr).not.toContain('HTTP ');
+      expect(cpDown.stdout + cpDown.stderr).not.toContain(KEY);
     } finally {
       leakServer.stop(true);
       rmSync(leakHome, { recursive: true, force: true });
