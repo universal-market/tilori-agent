@@ -75,6 +75,7 @@ import {
   TITLE_MAX_BYTES,
   TITLE_MAX_CHARS,
   buildThreadPayload,
+  escapeRiskyJsonChars,
   readValidatedTextFile,
   sortThreadReplies,
 } from './thread-post.ts';
@@ -471,10 +472,19 @@ function requireExplicitConfiguredAgent(a: Args, command: string): { config: Til
 
 class UnexpectedTiloriAnswer extends Error {}
 
+export function isHttpStatus(status: unknown): status is number {
+  return typeof status === 'number' && Number.isInteger(status) && status >= 100 && status <= 599;
+}
+
+export function marketEvidenceErrorMessage(cause: unknown): string {
+  const status = (cause as { status?: unknown } | null | undefined)?.status;
+  return isHttpStatus(status) ? `market-evidence: Market answered HTTP ${status}.` : 'market-evidence: could not read from Market.';
+}
+
 function logTransportError(log: (m: string) => void, command: 'get-thread' | 'create-post', cause: unknown): 1 {
   const status = (cause as { status?: unknown } | null | undefined)?.status;
   log(
-    typeof status === 'number' && Number.isInteger(status) && status >= 100 && status <= 599
+    isHttpStatus(status)
       ? `${command}: could not reach Tilori (HTTP ${status}).`
       : `${command}: could not reach Tilori.`,
   );
@@ -791,7 +801,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
             out.edited_by = e && typeof e === 'object' ? who(e) : e;
           }
           out.body = typeof post.body === 'string' ? post.body : '';
-          process.stdout.write(JSON.stringify(out) + '\n');
+          process.stdout.write(escapeRiskyJsonChars(JSON.stringify(out)) + '\n');
           return 0;
         } catch (cause) {
           if (cause instanceof ToolRefused) {
@@ -823,12 +833,25 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
           if (!focus || typeof focus !== 'object' || focus.id !== id) {
             throw new UnexpectedTiloriAnswer('get-thread: Tilori returned a different post.');
           }
+          if (focus.kind !== undefined && focus.kind !== null && focus.kind !== 'post') {
+            throw new UnexpectedTiloriAnswer('get-thread: unexpected answer from Tilori.');
+          }
 
           const ancestorsFromChild: any[] = [];
           const ancestorSeen = new Set<string>([id]);
-          let nextParentId = typeof focus.parent_post_id === 'string' && POST_ID.test(focus.parent_post_id) ? focus.parent_post_id : null;
           let ancestorTruncated = false;
-          while (nextParentId && !ancestorSeen.has(nextParentId)) {
+          const parseParentId = (raw: unknown): string | null => {
+            if (raw === undefined || raw === null) return null;
+            if (typeof raw === 'string' && POST_ID.test(raw)) return raw;
+            ancestorTruncated = true;
+            return null;
+          };
+          let nextParentId = parseParentId(focus.parent_post_id);
+          while (nextParentId) {
+            if (ancestorSeen.has(nextParentId)) {
+              ancestorTruncated = true;
+              break;
+            }
             ancestorSeen.add(nextParentId);
             let parent: any;
             try {
@@ -855,7 +878,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
               break;
             }
             ancestorsFromChild.push(parent);
-            nextParentId = typeof parent.parent_post_id === 'string' && POST_ID.test(parent.parent_post_id) ? parent.parent_post_id : null;
+            nextParentId = parseParentId(parent.parent_post_id);
           }
           const ancestors = ancestorsFromChild.reverse();
 
@@ -1101,10 +1124,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
             return 2;
           }
           if (abort.aborted) throw stopped();
-          const status = (cause as { status?: unknown }).status;
-          throw new Error(
-            typeof status === 'number' ? `market-evidence: Market answered HTTP ${status}.` : 'market-evidence: could not read from Market.',
-          );
+          throw new Error(marketEvidenceErrorMessage(cause));
         } finally {
           await client.close();
         }
@@ -1164,7 +1184,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
             if (cursors.has(cursor)) break;
             cursors.add(cursor);
           }
-          process.stdout.write(JSON.stringify({ items, complete }) + '\n');
+          process.stdout.write(escapeRiskyJsonChars(JSON.stringify({ items, complete })) + '\n');
           return 0;
         } catch (cause) {
           if (cause instanceof ToolRefused) {

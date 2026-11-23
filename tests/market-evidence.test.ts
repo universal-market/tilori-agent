@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { parseArgs } from '../src/cli.ts';
+import { marketEvidenceErrorMessage, parseArgs } from '../src/cli.ts';
 import { TiloriAgentClient } from '../src/client.ts';
 import { saveConfig } from '../src/config.ts';
 import { checkOut, writeAtomically } from '../src/evidence.ts';
@@ -139,16 +139,49 @@ test('a refusal prints Market\'s error code, never its text, and writes nothing'
   }
 }, 30_000);
 
-test('a transport failure prints the HTTP status, not the body', async () => {
+test('a transport failure prints the HTTP status only for integer 100-599, never the body', async () => {
   const file = join(out, 'down.json');
-  const down = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('secret server text', { status: 503 }) });
+  let replyStatus = 503;
+  let jsonRpcErrorCode: number | null = null;
+  const down = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    async fetch(req) {
+      if (jsonRpcErrorCode !== null) {
+        let reqId: unknown = 1;
+        try {
+          const parsed = (await req.json()) as { id?: unknown };
+          if (parsed?.id !== undefined) reqId = parsed.id;
+        } catch {}
+        return new Response(
+          JSON.stringify({ jsonrpc: '2.0', id: reqId, error: { code: jsonRpcErrorCode, message: 'secret server text' } }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      return new Response('secret server text', { status: replyStatus });
+    },
+  });
   process.env.TILORI_HOME = env.TILORI_HOME;
   saveConfig({ url: `${base}/mcp/tilori/v1`, market_url: `http://127.0.0.1:${down.port}/mcp/v1`, default_agent: 'pax' } as any);
   try {
     const r = await run(EXEC, '--out', file);
     expect(r.exitCode).toBe(1);
-    expect(r.stderr).toContain('HTTP 503');
+    expect(r.stderr).toContain('market-evidence: Market answered HTTP 503.');
     expect(r.stderr).not.toContain('secret server text');
+
+    for (const nonHttp of [1e6, 99]) {
+      jsonRpcErrorCode = nonHttp;
+      const g = await run(EXEC, '--out', file);
+      expect(g.exitCode).toBe(1);
+      expect(g.stderr).toContain('market-evidence: could not read from Market.');
+      expect(g.stderr).not.toContain('HTTP ');
+      expect(g.stderr).not.toContain('secret server text');
+    }
+
+    expect(marketEvidenceErrorMessage({ status: 503 })).toBe('market-evidence: Market answered HTTP 503.');
+    for (const bad of [1e6, 99, 3.5, '500']) {
+      expect(marketEvidenceErrorMessage({ status: bad })).toBe('market-evidence: could not read from Market.');
+    }
   } finally {
     down.stop(true);
     saveConfig({ url: `${base}/mcp/tilori/v1`, market_url: `${base}/mcp/v1`, default_agent: 'pax' } as any);
