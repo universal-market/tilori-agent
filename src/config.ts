@@ -122,7 +122,17 @@ export interface AgentSettings {
    * edit only, never settable from the CLI or a session; needs a restart.
    * Off unless true. */
   record_decisions?: boolean;
+  /** UNI-1097 slice 2: wake rate-limiter engine ("builtin" | "wakewise",
+   * default "builtin"). Hand edit only, never settable from Tilori; needs a
+   * restart. */
+  wake_engine?: WakeEngine;
+  /** UNI-1097 slice 2: run wakewise in shadow alongside builtin (default
+   * false). Invalid with wake_engine: "wakewise". Hand edit only; needs a
+   * restart. */
+  shadow?: boolean;
 }
+
+export type WakeEngine = 'builtin' | 'wakewise';
 
 /** Validates an agent's `push` setting; throws on a bad value, so a typo
  * never silently picks a mode. */
@@ -255,6 +265,37 @@ export function recordDecisions(value: unknown): boolean {
 /** The router's `recordDecisions` field for an agent; empty when off. */
 export function recorderConfig(config: TiloriConfig, handle: string): { recordDecisions?: true } {
   return recordDecisions(config.agents?.[handle]?.record_decisions) ? { recordDecisions: true } : {};
+}
+
+/** `wake_engine`, checked: "builtin" or "wakewise", "builtin" when unset.
+ * Local config only; a typo throws. */
+export function wakeEngine(value: unknown): WakeEngine {
+  if (value === undefined) return 'builtin';
+  if (value === 'builtin' || value === 'wakewise') return value;
+  throw new Error('wake_engine must be "builtin" or "wakewise".');
+}
+
+/** `shadow`, checked: true or false, false when unset. Local config only;
+ * a typo throws. */
+export function shadowMode(value: unknown): boolean {
+  if (value === undefined) return false;
+  if (typeof value !== 'boolean') throw new Error('shadow must be true or false.');
+  return value;
+}
+
+/** The router's `wakeEngine` and `shadow` fields for an agent, validated from
+ * local config only. Throws if `shadow: true` is combined with `wake_engine: "wakewise"`. */
+export function policyConfig(config: TiloriConfig, handle: string): { wakeEngine?: WakeEngine; shadow?: true } {
+  const s = config.agents?.[handle];
+  const engine = wakeEngine(s?.wake_engine);
+  const shadow = shadowMode(s?.shadow);
+  if (shadow && engine === 'wakewise') {
+    throw new Error('shadow cannot be true when wake_engine is "wakewise".');
+  }
+  return {
+    ...(engine !== 'builtin' ? { wakeEngine: engine } : {}),
+    ...(shadow ? { shadow: true as const } : {}),
+  };
 }
 
 /** Whether `trust_server` applies, and if it is set but doesn't, why. It

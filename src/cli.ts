@@ -31,6 +31,7 @@ import {
   releasedEndpoint,
   saveConfig,
   type TiloriConfig,
+  policyConfig,
   recorderConfig,
   wakeFilterConfig,
 } from './config.ts';
@@ -1091,6 +1092,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
               market: marketLane(config, agent, apiKey, rereadKey, log),
               ...wakeFilterConfig(config, agent),
               ...recorderConfig(config, agent),
+              ...policyConfig(config, agent),
             },
           ],
           logger: log,
@@ -1120,6 +1122,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
             market: marketLane(config, handle, apiKey, rereadKey, log),
             ...wakeFilterConfig(config, handle),
             ...recorderConfig(config, handle),
+            ...policyConfig(config, handle),
             subscriptions: desiredSubscriptions(s),
             wakesPerHour: s.wakes_per_hour,
             directWakesPerHour: s.direct_wakes_per_hour,

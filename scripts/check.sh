@@ -6,6 +6,7 @@ cd "$(dirname "$0")/.."
 BUN="${BUN:-$(command -v bun || echo "$HOME/.bun/bin/bun")}"
 [ -d node_modules ] || "$BUN" install --frozen-lockfile --ignore-scripts
 echo "== typecheck"; ./node_modules/.bin/tsc --noEmit -p .
+echo "== vendored wakewise"; "$BUN" scripts/vendor-check.ts
 echo "== tests"; BUN="$BUN" sh scripts/test.sh
 echo "== every test file imports the guard first"
 # bunfig.toml is read only from the current directory, so each file must run

@@ -336,7 +336,16 @@ describe('live reload', () => {
   });
 
   test('liveSettings validates as the router does at start', () => {
-    expect(liveSettings({})).toEqual({ wakesPerHour: 20, directWakesPerHour: 10, pauseSeconds: 60, postWakeMinutes: 10, reminderEveryMs: undefined, stallMinutes: 10 });
+    expect(liveSettings({})).toEqual({
+      wakesPerHour: 20,
+      directWakesPerHour: 10,
+      pauseSeconds: 60,
+      postWakeMinutes: 10,
+      reminderEveryMs: undefined,
+      stallMinutes: 10,
+      wakeEngine: 'builtin',
+      shadow: false,
+    });
     expect(() => liveSettings({ wakes_per_hour: 0 })).toThrow();
     expect(() => liveSettings({ direct_wakes_per_hour: -1 })).toThrow();
     expect(() => liveSettings({ stall_minutes: 2000 })).toThrow();

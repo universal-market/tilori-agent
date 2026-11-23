@@ -18,9 +18,12 @@ import {
   reminderSettings,
   saveConfig,
   recordDecisions,
+  shadowMode,
   trustServerState,
+  wakeEngine,
   type AgentSettings,
   type TiloriConfig,
+  type WakeEngine,
 } from './config.ts';
 import type { AgentUsage, Router } from './router.ts';
 import { wakeFilterSettings } from './wake-filter.ts';
@@ -244,6 +247,9 @@ export interface LiveSettings {
   /** Undefined without a reminder: reload never adds or removes one. */
   reminderEveryMs?: number;
   stallMinutes: number;
+  /** Validated from local config; changes require restart (logged by router). */
+  wakeEngine?: WakeEngine;
+  shadow?: boolean;
 }
 
 export function liveSettings(s: AgentSettings = {}): LiveSettings {
@@ -251,6 +257,11 @@ export function liveSettings(s: AgentSettings = {}): LiveSettings {
   if (!Number.isInteger(wakes) || wakes < 1) throw new Error('wakes_per_hour must be a positive integer.');
   const direct = s.direct_wakes_per_hour ?? DEFAULT_DIRECT_WAKES_PER_HOUR;
   if (!Number.isInteger(direct) || direct < 0) throw new Error('direct_wakes_per_hour must be a non-negative integer.');
+  const engine = wakeEngine(s.wake_engine);
+  const shadow = shadowMode(s.shadow);
+  if (shadow && engine === 'wakewise') {
+    throw new Error('shadow cannot be true when wake_engine is "wakewise".');
+  }
   return {
     wakesPerHour: wakes,
     directWakesPerHour: direct,
@@ -258,6 +269,8 @@ export function liveSettings(s: AgentSettings = {}): LiveSettings {
     postWakeMinutes: postWakeMinutes(s.post_wake_minutes),
     reminderEveryMs: reminderSettings(s)?.everyMs,
     stallMinutes: stallMinutes(s.stall_minutes),
+    wakeEngine: engine,
+    shadow,
   };
 }
 
