@@ -1,9 +1,10 @@
+import { join } from 'node:path';
 import { activityDir, stallMinutes } from './activity.ts';
 import { TiloriAgentClient } from './client.ts';
-import { pauseSeconds, postWakeMinutes, desiredSubscriptions, keyUrl, marketKeyUrl, pushEnabled, reminderSettings, wakeFilterConfig, type TiloriConfig } from './config.ts';
+import { pauseSeconds, policyConfig, postWakeMinutes, desiredSubscriptions, keyUrl, marketKeyUrl, pushEnabled, recorderConfig, reminderSettings, wakeFilterConfig, type TiloriConfig } from './config.ts';
 import { NotifyLinesInjector } from './injectors/notify-lines.ts';
 import { attachToRouter, probeRouter, socketIdentity, socketPath } from './ipc.ts';
-import { ensurePrivateDir, readKey } from './keys.ts';
+import { ensurePrivateDir, readKey, tiloriHome } from './keys.ts';
 import { Router, type RouterAgentConfig } from './router.ts';
 import { followConfig } from './settings.ts';
 import type { Injector } from './types.ts';
@@ -102,11 +103,16 @@ export function directRouter(opts: NotifyLinesOptions): Router {
         ...(pushEnabled(settings) ? { push: { endpoint: url, apiKey, rereadKey } } : {}),
         market: marketLane(opts.config, opts.agent, apiKey, rereadKey, opts.logger),
         ...wakeFilterConfig(opts.config, opts.agent),
+        // Same as the `router` command (cli.ts): without these, direct mode
+        // silently ran builtin with no recorder (Pax, tilori-agent#162).
+        ...recorderConfig(opts.config, opts.agent),
+        ...policyConfig(opts.config, opts.agent),
       },
     ],
     logger: opts.logger,
     waitMs: opts.waitMs,
     signalDir: signalDir(opts.logger),
+    recordingsDir: join(tiloriHome(), 'recordings'),
   });
 }
 
