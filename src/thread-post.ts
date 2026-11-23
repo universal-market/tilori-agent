@@ -41,9 +41,9 @@ export function truncateUtf8(text: string, maxBytes: number): { text: string; tr
   return { text: text.slice(0, end), truncated: true };
 }
 
-const RISKY_JSON_CHARS = /[\u0080-\u009f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]/g;
+const RISKY_JSON_CHARS = /[\u007f-\u009f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]/g;
 
-/** Escapes C1 controls, bidi controls, and U+2028/U+2029 in serialized JSON
+/** Escapes DEL, C1 controls, bidi controls, and U+2028/U+2029 in serialized JSON
  * so raw stdout stays safe while parsing back to the same strings. */
 export function escapeRiskyJsonChars(json: string): string {
   return json.replace(RISKY_JSON_CHARS, (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`);
@@ -90,9 +90,37 @@ export function sortThreadReplies<T>(replies: T[]): T[] {
   });
 }
 
+function shrinkFieldToFit(
+  entry: Record<string, unknown>,
+  field: 'body' | 'title',
+  truncatedFlag: 'body_truncated' | 'title_truncated',
+  serialize: (complete: boolean) => string,
+  maxTotalBytes: number,
+): boolean {
+  const raw = typeof entry[field] === 'string' ? (entry[field] as string) : '';
+  if (!raw) return Buffer.byteLength(serialize(false), 'utf8') <= maxTotalBytes;
+  entry[truncatedFlag] = true;
+  let lo = 0;
+  let hi = Buffer.byteLength(raw, 'utf8');
+  let best = '';
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    entry[field] = truncateUtf8(raw, mid).text;
+    const candidate = serialize(false);
+    if (Buffer.byteLength(candidate, 'utf8') <= maxTotalBytes) {
+      best = entry[field] as string;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  entry[field] = best;
+  return Buffer.byteLength(serialize(false), 'utf8') <= maxTotalBytes;
+}
+
 /** Builds the single JSON line for `get-thread`, dropping oldest replies
  * (never the root) until the output fits within THREAD_MAX_TOTAL_BYTES, and
- * shrinking the root body further if even the root-only payload exceeds it. */
+ * shrinking the root body, title, and author strings if the root-only payload exceeds it. */
 export function buildThreadPayload(
   rootPostId: string,
   rootRaw: any,
@@ -118,31 +146,24 @@ export function buildThreadPayload(
     dropped = true;
   }
 
-  let line = serialize(opts.pagingComplete && !dropped && !anyTruncated);
-  if (Buffer.byteLength(line, 'utf8') > maxTotalBytes) {
-    const rootEntry = posts[0];
-    const rootBody = typeof rootEntry.body === 'string' ? rootEntry.body : '';
-    if (rootBody) {
-      rootEntry.body_truncated = true;
-      let lo = 0;
-      let hi = Buffer.byteLength(rootBody, 'utf8');
-      let best = '';
-      while (lo <= hi) {
-        const mid = (lo + hi) >> 1;
-        rootEntry.body = truncateUtf8(rootBody, mid).text;
-        const candidate = serialize(false);
-        if (Buffer.byteLength(candidate, 'utf8') <= maxTotalBytes) {
-          best = rootEntry.body as string;
-          lo = mid + 1;
-        } else {
-          hi = mid - 1;
+  const line = serialize(opts.pagingComplete && !dropped && !anyTruncated);
+  if (Buffer.byteLength(line, 'utf8') <= maxTotalBytes) return line;
+
+  const rootEntry = posts[0];
+  if (!shrinkFieldToFit(rootEntry, 'body', 'body_truncated', serialize, maxTotalBytes)) {
+    if (!shrinkFieldToFit(rootEntry, 'title', 'title_truncated', serialize, maxTotalBytes)) {
+      const author = rootEntry.author as Record<string, unknown> | undefined;
+      if (author && typeof author === 'object') {
+        for (const key of Object.keys(author)) {
+          if (typeof author[key] === 'string') {
+            author[key] = null;
+            if (Buffer.byteLength(serialize(false), 'utf8') <= maxTotalBytes) break;
+          }
         }
       }
-      rootEntry.body = best;
-      line = serialize(false);
     }
   }
-  return line;
+  return serialize(false);
 }
 
 /** Reads a local UTF-8 file for `create-post`: refuses relative paths,

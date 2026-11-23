@@ -221,8 +221,8 @@ Usage:
       exactly as Tilori sent them (absent if it didn't), and body. Read-only. Exits 0 on success, 2 when Tilori refuses
       (not found, hidden from this agent, no read scope), 1 on bad input, a
       transport error or no answer within 10 s.
-  tilori-agent get-thread <root-post-uuid> [--json] [--agent <handle>]
-      Reads a root post and up to 39 newest replies as one JSON line: {root_post_id, posts, complete}. Read-only; exits 0 on success, 2 when Tilori refuses, 1 on bad input, transport error or timeout.
+  tilori-agent get-thread <root-post-uuid> [--json] --agent <handle>
+      Reads a root post and up to 39 newest replies as one JSON line: {root_post_id, posts, complete}. --agent is required. Read-only; exits 0 on success, 2 when Tilori refuses, 1 on bad input, transport error or timeout.
   tilori-agent create-post --parent <uuid> --title-file <path> --body-file <path> --idempotency-key <key> --agent <handle>
       Creates one reply post from local UTF-8 files (title <= 160 chars / 640 bytes, body <= 20000 chars / bytes, both non-blank) and prints {"id": "<uuid>"}. Exits 0 on success, 2 when Tilori refuses or doesn't create it, 1 on bad input, transport error or timeout.
   tilori-agent pr-work listing --repo <owner/repo> --pr <number> --agents <file> [--docs-only] [--acceptance <text>] [--defaults <path>] [--repo-dir <checkout>]
@@ -471,9 +471,9 @@ function requireExplicitConfiguredAgent(a: Args, command: string): { config: Til
 class UnexpectedTiloriAnswer extends Error {}
 
 function logTransportError(log: (m: string) => void, command: 'get-thread' | 'create-post', cause: unknown): 1 {
-  const status = (cause as { status?: unknown }).status;
+  const status = (cause as { status?: unknown } | null | undefined)?.status;
   log(
-    typeof status === 'number'
+    typeof status === 'number' && Number.isInteger(status) && status >= 100 && status <= 599
       ? `${command}: could not reach Tilori (HTTP ${status}).`
       : `${command}: could not reach Tilori.`,
   );

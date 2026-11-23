@@ -514,14 +514,48 @@ describe('get-thread', () => {
     expect(Buffer.byteLength(compact, 'utf8')).toBeLessThanOrEqual(1600);
     const parsedCompact = JSON.parse(compact);
     expect(parsedCompact.complete).toBe(false);
+    expect(parsedCompact.title_truncated).toBeUndefined();
     expect(parsedCompact.posts[0].title_truncated).toBe(true);
     expect(parsedCompact.posts[0].body_truncated).toBe(true);
+
+    // Small maxTotalBytes with huge author username: cuts body, title, and author strings to fit, with complete: false.
+    const hugeAuthor = buildThreadPayload(
+      oversizedRootId,
+      {
+        id: oversizedRootId,
+        title: 'short title',
+        body: 'short body',
+        author: { id: 'a1', user_id: 'u1', kind: 'agent', username: 'u'.repeat(2000), handle: 'wren' },
+        created_at: '2026-11-20T00:00:00Z',
+      },
+      [],
+      { dropped: false, pagingComplete: true, maxTotalBytes: 600 },
+    );
+    expect(Buffer.byteLength(hugeAuthor, 'utf8')).toBeLessThanOrEqual(600);
+    const parsedHugeAuthor = JSON.parse(hugeAuthor);
+    expect(parsedHugeAuthor.complete).toBe(false);
+    expect(parsedHugeAuthor.posts[0].body_truncated).toBe(true);
+    expect(parsedHugeAuthor.posts[0].title_truncated).toBe(true);
+    expect(parsedHugeAuthor.posts[0].author.username).toBeNull();
+
+    // Empty body already, but root-only payload still exceeds maxTotalBytes: complete must be false.
+    const emptyBodyOverCap = buildThreadPayload(
+      oversizedRootId,
+      { id: oversizedRootId, title: 'a'.repeat(500), body: '', author: {}, created_at: '2026-11-20T00:00:00Z' },
+      [],
+      { dropped: false, pagingComplete: true, maxTotalBytes: 400 },
+    );
+    expect(Buffer.byteLength(emptyBodyOverCap, 'utf8')).toBeLessThanOrEqual(400);
+    const parsedEmptyBody = JSON.parse(emptyBodyOverCap);
+    expect(parsedEmptyBody.complete).toBe(false);
+    expect(parsedEmptyBody.posts[0].title_truncated).toBe(true);
+    expect(parsedEmptyBody.posts[0].body_truncated).toBeUndefined();
   });
 
-  test('escapes C1 controls, bidi controls, and U+2028/U+2029 in JSON stdout while round-tripping', async () => {
+  test('escapes DEL, C1 controls, bidi controls, and U+2028/U+2029 in JSON stdout while round-tripping', async () => {
     resetFake();
     const rootId = uuid(420);
-    const tricky = 'safe\u0080\u009f\u061c\u200e\u200f\u2028\u2029\u202a\u202e\u2066\u2069end';
+    const tricky = 'safe\u007f\u0080\u009f\u061c\u200e\u200f\u2028\u2029\u202a\u202e\u2066\u2069end';
     fake.posts.set(rootId, {
       id: rootId,
       title: 'title\u202e',
@@ -533,10 +567,10 @@ describe('get-thread', () => {
 
     const r = await runCli(['get-thread', rootId, '--json', '--agent', 'wren']);
     expect(r.exitCode).toBe(0);
-    for (const seq of ['\\u0080', '\\u009f', '\\u061c', '\\u200e', '\\u200f', '\\u2028', '\\u2029', '\\u202a', '\\u202e', '\\u2066', '\\u2069']) {
+    for (const seq of ['\\u007f', '\\u0080', '\\u009f', '\\u061c', '\\u200e', '\\u200f', '\\u2028', '\\u2029', '\\u202a', '\\u202e', '\\u2066', '\\u2069']) {
       expect(r.stdout).toContain(seq);
     }
-    for (const ch of ['\u0080', '\u009f', '\u061c', '\u200e', '\u200f', '\u2028', '\u2029', '\u202a', '\u202e', '\u2066', '\u2069']) {
+    for (const ch of ['\u007f', '\u0080', '\u009f', '\u061c', '\u200e', '\u200f', '\u2028', '\u2029', '\u202a', '\u202e', '\u2066', '\u2069']) {
       expect(r.stdout).not.toContain(ch);
     }
     const out = JSON.parse(r.stdout);
@@ -896,11 +930,23 @@ describe('both commands never print the key, Authorization header, or server bod
     allowHome(leakTilori);
     const bodyMarker = 'SERVER_BODY_TEXT_MUST_NOT_PRINT_12345';
     let replyStatus = 401;
+    let jsonRpcErrorCode: number | null = null;
     const leakServer = Bun.serve({
       hostname: '127.0.0.1',
       port: 0,
-      fetch(req) {
+      async fetch(req) {
         const auth = req.headers.get('authorization') ?? '';
+        if (jsonRpcErrorCode !== null) {
+          let reqId: unknown = 1;
+          try {
+            const parsed = (await req.json()) as { id?: unknown };
+            if (parsed?.id !== undefined) reqId = parsed.id;
+          } catch {}
+          return new Response(
+            JSON.stringify({ jsonrpc: '2.0', id: reqId, error: { code: jsonRpcErrorCode, message: bodyMarker } }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          );
+        }
         return new Response(JSON.stringify({ error: bodyMarker, echoed: auth, key: KEY }), { status: replyStatus });
       },
     });
@@ -948,6 +994,16 @@ describe('both commands never print the key, Authorization header, or server bod
         expect(cp.stdout + cp.stderr).not.toContain('mcp_sk_');
         expect(cp.stdout + cp.stderr).not.toContain('Bearer ');
       }
+
+      // Non-HTTP status (e.g. JSON-RPC -32001): prints plain reachability message with no number.
+      jsonRpcErrorCode = -32001;
+      const gtRpc = await runCli(['get-thread', uuid(900), '--json', '--agent', 'wren'], { TILORI_HOME: leakTilori });
+      expect(gtRpc.exitCode).toBe(1);
+      expect(gtRpc.stdout).toBe('');
+      expect(gtRpc.stderr).toContain('get-thread: could not reach Tilori.');
+      expect(gtRpc.stderr).not.toContain('HTTP ');
+      expect(gtRpc.stderr).not.toContain('-32001');
+      jsonRpcErrorCode = null;
 
       // Network failure (no HTTP status): prints generic reachability message only.
       leakServer.stop(true);
