@@ -442,17 +442,23 @@ describe('the homes allow-list (Don, 11-07)', () => {
       ['watch', '--notify-lines', '--help'],
       ['config', 'set', '-h'],
       ['get-post', '--help'],
+      ['get-thread', '--help'],
+      ['get-thread', '-h'],
+      ['create-post', '--help'],
+      ['create-post', '-h'],
       ['--help'],
       ['-h'],
     ]) {
       const p = Bun.spawnSync(['bun', cli, ...argv], { env: envWith({ TILORI_HOME: h }), stdin: 'ignore' });
       expect({ argv, code: p.exitCode }).toEqual({ argv, code: 0 });
       expect(p.stdout.toString()).toContain('tilori-agent init --agent <handle>');
+      expect(p.stdout.toString()).toContain('tilori-agent get-thread <root-post-uuid>');
+      expect(p.stdout.toString()).toContain('tilori-agent create-post --parent <uuid>');
       expect(p.stderr.toString()).toBe('');
       expect(p.stdout.toString() + p.stderr.toString()).not.toContain(KEY);
     }
-    // Ten CLI processes in a row: the 5 s default timed out on a loaded box.
-  }, 20000);
+    // Fourteen CLI processes in a row: the 5 s default timed out on a loaded box.
+  }, 30000);
 
   describe('tilori-agent claude --home', () => {
     let bin: string;

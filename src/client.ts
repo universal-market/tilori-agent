@@ -92,6 +92,10 @@ export const SEARCH_TOOL = 'search_posts';
  * `watch` cannot reach it. A Market read: the client must be on market_url. */
 export const EXECUTION_TOOL = 'get_execution';
 
+/** Called only through `createPost` (the `create-post` subcommand), never
+ * through `call`, so the router and `watch` cannot reach it. */
+export const CREATE_POST_TOOL = 'create_post';
+
 /** The server answered the tool call with an error (not found, a missing
  * scope, a refusal), as opposed to a transport failure. */
 export class ToolRefused extends Error {
@@ -371,7 +375,7 @@ export class TiloriAgentClient {
   }
 
   async #invoke<T>(
-    name: ReadTool | typeof PRUNE_TOOL | typeof POST_TOOL | typeof SEARCH_TOOL | typeof EXECUTION_TOOL,
+    name: ReadTool | typeof PRUNE_TOOL | typeof POST_TOOL | typeof SEARCH_TOOL | typeof EXECUTION_TOOL | typeof CREATE_POST_TOOL,
     args: Record<string, unknown>,
     options?: { signal?: AbortSignal; timeout?: number },
   ): Promise<T> {
@@ -398,10 +402,8 @@ export class TiloriAgentClient {
         // 598313e4): a poll is redelivered until acknowledged, acknowledging
         // or unsubscribing again changes nothing, subscribing again renews
         // the same subscription (ensureSubscriptions renews that way), and
-        // the rest are reads. This retry follows any error
-        // after a key change, so a write tool added here needs an
-        // idempotency key, or a retry on a 401 only.
-        if (!retried && !options?.signal?.aborted) {
+        // the rest are reads. create_post is never retried.
+        if (name !== CREATE_POST_TOOL && !retried && !options?.signal?.aborted) {
           // Another call took a new key while this one was in flight (the
           // router polls in parallel), and closing the old session ended
           // this request: retry once on the new session, without closing it
@@ -460,7 +462,7 @@ export class TiloriAgentClient {
     return this.#invoke(EXECUTION_TOOL, { execution_id: executionId, include: ['contract', 'task_outputs'] }, options);
   }
 
-  /** One page of `search_posts` over every depth, oldest first. Read-only. */
+  /** One page of `search_posts` over every depth, newest first. Read-only. */
   async searchPosts(
     query: string,
     cursor: string | undefined,
@@ -469,6 +471,34 @@ export class TiloriAgentClient {
     const args: Record<string, unknown> = { query, max_depth: null, sort: 'created_at', limit: 100 };
     if (cursor) args.cursor = cursor;
     return this.#invoke(SEARCH_TOOL, args, options);
+  }
+
+  /** One page of `search_posts` for a thread root over every depth, newest first. Read-only. */
+  async searchThread(
+    rootId: string,
+    cursor: string | undefined,
+    options?: { signal?: AbortSignal; timeout?: number },
+  ): Promise<any> {
+    const args: Record<string, unknown> = { root_post_id: rootId, max_depth: null, sort: 'created_at', limit: 100 };
+    if (cursor) args.cursor = cursor;
+    return this.#invoke(SEARCH_TOOL, args, options);
+  }
+
+  /** Creates one reply post via `create_post`. Reachable only from `create-post`. */
+  async createPost(
+    args: { parent_post_id: string; title: string; body: string; idempotency_key: string },
+    options?: { signal?: AbortSignal; timeout?: number },
+  ): Promise<any> {
+    return this.#invoke(
+      CREATE_POST_TOOL,
+      {
+        parent_post_id: args.parent_post_id,
+        title: args.title,
+        body: args.body,
+        idempotency_key: args.idempotency_key,
+      },
+      options,
+    );
   }
 
   async unsubscribe(subscriptionId: string, signal?: AbortSignal): Promise<void> {

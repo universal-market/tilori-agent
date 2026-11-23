@@ -32,7 +32,7 @@ export interface OpenedFile {
 
 /** The real path of an open fd: /proc on Linux, else realpath of what was
  * opened (macOS has no /proc; the key-bytes scan still backs this up). */
-function fdPath(fd: number, path: string): string {
+export function fdPath(fd: number, path: string): string {
   try {
     return readlinkSync(`/proc/self/fd/${fd}`);
   } catch {
@@ -40,7 +40,7 @@ function fdPath(fd: number, path: string): string {
   }
 }
 
-function realHome(): string {
+export function realHome(): string {
   const home = tiloriHome();
   try {
     return realpathSync(home);
@@ -117,7 +117,7 @@ export function uploadTarget(origin: string, id: string): URL {
   return new URL(`/api/v1/attachments/uploads/${id}`, origin);
 }
 
-function contains(hay: Uint8Array, needle: Uint8Array): boolean {
+export function contains(hay: Uint8Array, needle: Uint8Array): boolean {
   if (!needle.length) return false;
   return Buffer.from(hay.buffer, hay.byteOffset, hay.byteLength).includes(Buffer.from(needle));
 }
