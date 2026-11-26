@@ -191,7 +191,7 @@ export interface Wake {
  * `other`), the entity type and a checked id. */
 export interface MarketRef {
   kind: string;
-  entity_type: 'transaction' | 'execution';
+  entity_type: 'transaction' | 'execution' | 'pr_work_offer';
   entity_id: string;
 }
 
