@@ -1158,7 +1158,7 @@ export class Router {
   }
 
   /** Takes a delivered batch into `pending`, stamped with its lane. The
-   * Market lane passes on only transaction and execution events (Bastion
+   * Market lane passes on only MARKET_ENTITY_TYPES events (Bastion
    * b9dd0cb9 3): a batch with nothing else is acknowledged here, before
    * `pending`, so it takes no cap slot and touches no wake memory (Pax
    * 61007a93 4). True when the batch is held for a wake. */
