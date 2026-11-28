@@ -3,7 +3,7 @@
 // single accessor below. Core code never spells a restart line, a slash
 // command (/mcp, /tilori:..., /universal-market:...) or a tool name prefix
 // itself. tests/host-text-grep.test.ts enforces that.
-import { claudeText } from './hosts/claude/text.ts';
+import { host } from './host.ts';
 
 /**
  * The host's words. Every key is required in every table, so a missing key
@@ -88,7 +88,15 @@ export interface HostText {
   usageOwnerConfig: string;
 }
 
-/** The active table. Always Claude's until a second host exists. */
+let reads = 0;
+/** How many times the table was read, for the test that importing core reads
+ * none of it (the host's words are read when used, not at import). */
+export function hostTextReads(): number {
+  return reads;
+}
+
+/** The active host's table. Read it at call time, never at module load. */
 export function hostText(): HostText {
-  return claudeText;
+  reads++;
+  return host().text;
 }

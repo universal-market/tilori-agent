@@ -481,11 +481,15 @@ export const LINES = {
   connected: (handle: string) => hostText().setupConnected(handle),
   /** Appended to the live line: the end-of-turn check is off by default
    * (Don via Keel 25916579; Juniper 10c3a143's wording). */
-  decisionCheck: hostText().setupDecisionCheck,
+  get decisionCheck() {
+    return hostText().setupDecisionCheck;
+  },
   /** Appended when config.json already named another Tilori server. */
   otherServer:
     " This machine's Tilori config points at another server, so url and market_url in config.json were left as they were; edit them by hand to use this agent.",
-  timeout: hostText().setupTimeout,
+  get timeout() {
+    return hostText().setupTimeout;
+  },
   expired: (handle: string) => hostText().setupExpired(handle),
   /** The claimed handle already has a key here: it is never replaced (Bastion, tilori-agent#92). */
   keyExists: (handle: string) => hostText().setupKeyExists(handle),

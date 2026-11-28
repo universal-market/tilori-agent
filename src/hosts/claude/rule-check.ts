@@ -1,6 +1,7 @@
 import { closeSync, constants, fstatSync, openSync, readSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { hostText } from './host-text.ts';
+import type { RuleCheck } from '../../host.ts';
+import { claudeText } from './text.ts';
 
 /**
  * UNI-865 phase 0 (Bastion 56d30062, 47ba6d6e). The plugin marks its Market
@@ -31,7 +32,7 @@ export const PAIRED_HIDDEN_TOOLS = [
   'revoke_key',
 ] as const;
 
-const PREFIX = hostText().toolPrefix;
+const PREFIX = claudeText.toolPrefix;
 const MAX_SETTINGS_BYTES = 1_000_000;
 
 export interface PermissionRules {
@@ -136,9 +137,11 @@ export function uncoveredTools(rules: PermissionRules): string[] {
 /** One fixed line, or null. Only tool names from the fixed list appear. */
 export function ruleWarning(tools: readonly string[]): string | null {
   if (!tools.length) return null;
-  return hostText().ruleWarning(tools.join(', '), PREFIX);
+  return claudeText.ruleWarning(tools.join(', '), PREFIX);
 }
 
 export function checkRules(env: NodeJS.ProcessEnv): string | null {
   return ruleWarning(uncoveredTools(readRules(settingsFiles(env))));
 }
+
+export const claudeRuleCheck: RuleCheck = { check: checkRules };
