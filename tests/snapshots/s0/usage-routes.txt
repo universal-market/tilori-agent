@@ -1,0 +1,9 @@
+### no arguments
+exit 0
+stdout: same as help: true
+stderr: 
+
+### unknown command
+exit 2
+stdout: same as help: true
+stderr: 

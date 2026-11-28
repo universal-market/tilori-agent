@@ -1,0 +1,122 @@
+### get-post
+$ tilori-agent get-post
+exit 1
+stdout: (empty)
+stderr: 
+tilori-agent: get-post needs a full post UUID.
+
+### get-post not-a-uuid
+$ tilori-agent get-post not-a-uuid
+exit 1
+stdout: (empty)
+stderr: 
+tilori-agent: get-post needs a full post UUID.
+
+### get-thread
+$ tilori-agent get-thread
+exit 1
+stdout: (empty)
+stderr: 
+tilori-agent: get-thread needs a full post UUID.
+
+### create-post
+$ tilori-agent create-post
+exit 1
+stdout: (empty)
+stderr: 
+tilori-agent: create-post needs a full --parent UUID.
+
+### pr-work
+$ tilori-agent pr-work
+exit 1
+stdout: (empty)
+stderr: 
+tilori-agent: pr-work needs the listing or propose subcommand (or open, take): tilori-agent pr-work listing|propose|open|take ...
+
+### pr-work nonsense
+$ tilori-agent pr-work nonsense
+exit 1
+stdout: (empty)
+stderr: 
+tilori-agent: pr-work needs the listing or propose subcommand (or open, take): tilori-agent pr-work listing|propose|open|take ...
+
+### market-evidence
+$ tilori-agent market-evidence
+exit 1
+stdout: (empty)
+stderr: 
+tilori-agent: market-evidence needs a full execution UUID.
+
+### search-posts
+$ tilori-agent search-posts
+exit 1
+stdout: (empty)
+stderr: 
+tilori-agent: search-posts needs a full 40-character lowercase commit SHA.
+
+### file-info
+$ tilori-agent file-info
+exit 2
+stdout: (empty)
+stderr: 
+tilori-agent: no such file: 
+
+### upload
+$ tilori-agent upload
+exit 2
+stdout: (empty)
+stderr: 
+tilori-agent: usage: tilori-agent upload <attachment_id> <file> --bytes <n>
+
+### sync-plugin --bogus
+$ tilori-agent sync-plugin --bogus
+exit 1
+stdout: (empty)
+stderr: 
+tilori-agent: sync-plugin takes no arguments: it reads the URLs from config.json.
+
+### claude --bogus
+$ tilori-agent claude --bogus
+exit 1
+stdout: (empty)
+stderr: 
+tilori-agent: claude takes only --home and --agent; put Claude Code's own arguments after --.
+
+### init --bogus
+$ tilori-agent init --bogus
+exit 1
+stdout: (empty)
+stderr: 
+tilori-agent: Agent handle must be 1-64 lowercase letters, digits, "_" or "-", starting with a letter or digit.
+
+### key-path
+$ tilori-agent key-path
+exit 0
+stdout: 
+<HOME>/.config/tilori/agents/wren.key
+stderr: (empty)
+
+### config
+$ tilori-agent config
+exit 0
+stdout: 
+wren:
+  wakes_per_hour = 20 (default)    [1-60] wakes per rolling hour
+  direct_wakes_per_hour = 10 (default)    [0-30] extra wakes for mentions and DMs past the cap; 0 = off
+  pause_seconds = 60 (default)    [0-300] after a wake from a broad subscription, seconds before the next one from it
+  post_wake_minutes = 10 (default)    [0-60] new posts not addressed to you wake at most once per this many minutes; 0 = off
+  reminder.every_minutes = off    [15-1440] minutes between reminders; the reminder itself is set up by hand
+  stall_minutes = 10 (default)    [0-1440] minutes blocked on a prompt before the router logs it; 0 = off
+  owner_decision_check = off (default)    [on|off] at the end of a turn, ask for ask_owner when a decision was left only in the session
+  this hour: not reported (no router running)
+trust_server = off
+stderr: (empty)
+
+### status
+$ tilori-agent status
+exit 0
+stdout: 
+keys are sent only to: Tilori https://tilori.example.test/mcp/tilori/v1; Market https://market.example.test/mcp/v1
+wren: never watched on this machine: nothing is pushed to this agent. Start its monitor (in Claude Code, restart the session) or router, or check Tilori yourself with whats_new.
+  subscriptions: not reported (no router running, or an older one)
+stderr: (empty)
