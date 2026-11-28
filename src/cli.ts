@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { checkRules } from './rule-check.ts';
+import { host } from './host.ts';
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
@@ -57,10 +57,8 @@ import { UpdateNotice } from './update-notice.ts';
 import { LocalRefusal, UPLOAD_TIMEOUT_MS, fileInfo, parseBytes, upload } from './upload.ts';
 import { SetupInputError, awaitAgentKey, listPending, runSetup } from './setup.ts';
 import { finishRefresh, runRefresh } from './refresh.ts';
-import { configurePluginWithClaude, readPluginConfigFromClaude, runConnect } from './connect.ts';
-import { claudeBinary, syncPlugin, syncPluginAfterSave } from './plugin-sync.ts';
-
-export { claudeBinary } from './plugin-sync.ts';
+import { runConnect } from './connect.ts';
+import { syncPlugin, syncPluginAfterSave } from './plugin-sync.ts';
 import { hostText } from './host-text.ts';
 import { exitWhenOrphaned, marketLane, runNotifyLines, signalDir } from './watch.ts';
 import {
@@ -83,9 +81,11 @@ import {
 
 export { THREAD_MAX_ANCESTORS, THREAD_MAX_BODY_BYTES, THREAD_MAX_POSTS, THREAD_MAX_TITLE_BYTES, THREAD_MAX_TOTAL_BYTES };
 
-const t = hostText();
+// A function: the host's words are read when the usage is printed, not at import.
 
-const USAGE = `tilori-agent: wake local coding agents on Tilori events
+const usage = (): string => {
+  const t = hostText();
+  return `tilori-agent: wake local coding agents on Tilori events
 
 Usage:
   tilori-agent setup [<handle>] [--name <display name>] [--url-origin <https-origin>] [--claim-origin <https-origin>] [--no-browser]
@@ -279,6 +279,7 @@ Keys are only sent to "url" in config.json, which init sets, and through
 "headers" to "market_url" when set. Elsewhere --url
 or $TILORI_URL must match it, or the command refuses.
 Logs go to stderr and never include keys or event content.`;
+};
 
 interface Args {
   cmd: string;
@@ -541,7 +542,7 @@ async function launchClaude(args: Args): Promise<number> {
   // otherwise reach this one. Only this home and --agent set them.
   const inherited = { ...process.env };
   for (const k of LAUNCH_VARS) delete inherited[k];
-  const child = spawn(claudeBinary(), ['--settings', JSON.stringify({ env }), ...args.rest], {
+  const child = spawn(host().binary(), ['--settings', JSON.stringify({ env }), ...args.rest], {
     cwd: launchCwd(),
     stdio: 'inherit',
     env: { ...inherited, ...env },
@@ -610,7 +611,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   const signal = controller.signal;
 
   if (args.flags.has('help')) {
-    console.log(USAGE);
+    console.log(usage());
     return 0;
   }
   try {
@@ -693,8 +694,8 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
           replace: args.flags.has('replace'),
           key,
           signal,
-          readPluginConfig: readPluginConfigFromClaude,
-          configurePlugin: configurePluginWithClaude,
+          readPluginConfig: host().pluginIO.read,
+          configurePlugin: host().pluginIO.configure,
           out: (line) => process.stdout.write(line + '\n'),
         });
       }
@@ -1435,7 +1436,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         // paired Market server no longer lists. Read only; never fails.
         let rules: string | null = null;
         try {
-          rules = checkRules(process.env);
+          rules = host().ruleCheck.check(process.env);
         } catch {
           rules = null;
         }
@@ -1526,7 +1527,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         return 0;
       }
       default:
-        console.log(USAGE);
+        console.log(usage());
         return args.cmd === 'help' || args.cmd === '--help' || args.cmd === '-h' ? 0 : 2;
     }
   } catch (cause) {

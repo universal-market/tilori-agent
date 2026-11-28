@@ -6,8 +6,8 @@ import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { saveConfig, type TiloriConfig } from '../src/config.ts';
 import { main } from '../src/cli.ts';
+import { claudeBinary } from '../src/hosts/claude/plugin-io.ts';
 import {
-  claudeBinary,
   setPluginIO,
   SYNC_LINES,
   syncPlugin,

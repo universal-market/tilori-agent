@@ -3,10 +3,10 @@ import { join } from 'node:path';
 import { isUnauthorized, KeyRejected, TiloriAgentClient } from './client.ts';
 import { buildMarketUrl, buildMcpUrl, configPath, coordinationPolicy, loadConfig, sameEndpoint, saveConfig } from './config.ts';
 import { tiloriHome, validateHandle, writeKey } from './keys.ts';
-import { LAUNCHER, PLUGIN_ID, type PluginConfig } from './plugin-sync.ts';
+import { host, type PluginConfig } from './host.ts';
 import { hostText } from './host-text.ts';
 
-export { configurePluginWithClaude, LAUNCHER, PLUGIN_ID, readPluginConfigFromClaude, type PluginConfig } from './plugin-sync.ts';
+export type { PluginConfig };
 
 /**
  * `connect` (UNI-818): sets this machine up for one agent on a given
@@ -56,18 +56,25 @@ export function shellWord(v: string): string {
 }
 
 export const CONNECT_LINES = {
-  noKey: hostText().connectNoKey,
-  noMarket: hostText().connectNoMarket,
+  // Getters: the host's words are read when a line is used, not at import.
+  get noKey() {
+    return hostText().connectNoKey;
+  },
+  get noMarket() {
+    return hostText().connectNoMarket;
+  },
   refuseOther: (current: string, wanted: string, url: string, market: string, old: string | undefined) =>
     `This computer is set up for ${current}. To switch it to ${wanted}, run this in a terminal: ` +
-    `${LAUNCHER} connect --url ${shellWord(url)} --market-url ${shellWord(market)} --replace` +
+    `${host().pluginIO.launcher} connect --url ${shellWord(url)} --market-url ${shellWord(market)} --replace` +
     (old ? `. @${old} will stop getting events here.` : '.'),
   connected: (tag: string, where: string) => `✓ Connected ${tag} to ${where}.`,
   trustedCarried: (names: string[], host: string, path: string) =>
     `Trusted owners carried over: ${names.join(', ')}. They may be different people on ${host}; edit trusted_owners in ${path} if not.`,
-  restart: hostText().connectRestart,
+  get restart() {
+    return hostText().connectRestart;
+  },
   configureByHand: (values: { tilori_url: string; market_url: string }) =>
-    hostText().connectByHand(shellWord(JSON.stringify(values)), PLUGIN_ID),
+    hostText().connectByHand(shellWord(JSON.stringify(values)), host().pluginIO.pluginId),
 };
 
 /** Why a key check failed, naming only the host and the kind of failure. */

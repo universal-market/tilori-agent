@@ -13,7 +13,7 @@ import {
   ruleWarning,
   settingsFiles,
   uncoveredTools,
-} from '../src/rule-check.ts';
+} from '../src/hosts/claude/rule-check.ts';
 import { allowHome } from './allow-home.ts';
 
 // UNI-865 phase 0 (Bastion 56d30062, 47ba6d6e): a deny/ask rule left on a

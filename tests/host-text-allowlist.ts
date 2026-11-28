@@ -11,11 +11,7 @@ export interface AllowEntry {
 }
 
 export const ALLOW: AllowEntry[] = [
-  { file: 'rule-check.ts', literal: '.claude', reason: "S1b: moves behind ruleCheck (settings directory names for Claude's permission rules)" },
   { file: 'config.ts', literal: 'CLAUDE_PLUGIN_OPTION_TILORI_URL', reason: 'S1c: hook env var name, read as behaviour; moves with hook I/O' },
   { file: 'config.ts', literal: 'CLAUDE_PLUGIN_OPTION_MARKET_URL', reason: 'S1c: hook env var name, read as behaviour; moves with hook I/O' },
-  { file: 'plugin-sync.ts', literal: 'universal-market@tilori-claude', reason: 'S1b: moves behind pluginIO (plugin id passed to `claude plugin configure`)' },
-  { file: 'plugin-sync.ts', literal: '~/.claude/plugins/data/universal-market-tilori-claude/tilori-agent', reason: 'S1b: moves behind pluginIO (launcher path; the prose that prints it is in HostText)' },
-  { file: 'plugin-sync.ts', literal: 'claude', reason: 'S1b: moves behind pluginIO (name of the binary spawned; plugin I/O, not prose)' },
   { file: 'cli.ts', literal: 'claude', reason: 'S1c: the `claude` launcher command name in argv parsing and dispatch (behaviour, not prose)' },
 ];

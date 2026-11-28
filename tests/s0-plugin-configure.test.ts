@@ -2,7 +2,8 @@ import './setup.ts';
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { chmodSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { configurePluginWithClaude, readPluginConfigFromClaude, setPluginIO, syncPlugin, SYNC_LINES } from '../src/plugin-sync.ts';
+import { configurePluginWithClaude, readPluginConfigFromClaude } from '../src/hosts/claude/plugin-io.ts';
+import { setPluginIO, syncPlugin, SYNC_LINES } from '../src/plugin-sync.ts';
 import { expectSnapshot, normalise, renderCases, tempDir } from './s0-util.ts';
 
 // UNI-1178 S0: characterization, at v0.3.18, of exactly what tilori-agent asks

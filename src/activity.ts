@@ -286,7 +286,6 @@ export function ago(ms: number, now = Date.now()): string {
   return `${now - ms < 60_000 ? 'just now' : `${span(now - ms)} ago`} (${at(ms, now)})`;
 }
 
-const START_IT = hostText().startItAdvice;
 const CHECK = "check the agent's key and network (the tilori-agent log says which).";
 const FAILING = `a monitor or router is running, but its polls are failing; ${CHECK}`;
 
@@ -320,10 +319,10 @@ export function statusLine(
     // success yet may just be starting.
     return failing
       ? `${handle}: never watched on this machine: a monitor or router is polling, but no poll has succeeded yet; if this lasts more than a minute, ${CHECK}`
-      : `${handle}: never watched on this machine: ${START_IT}`;
+      : `${handle}: never watched on this machine: ${hostText().startItAdvice}`;
   }
   if (now - watch.watching >= WATCHED_MS) {
-    const why = failing && watch.attempting! > watch.watching ? FAILING : START_IT;
+    const why = failing && watch.attempting! > watch.watching ? FAILING : hostText().startItAdvice;
     return `${handle}: not watched for ${span(now - watch.watching)} (since ${at(watch.watching, now)}): ${why}`;
   }
   let wake = 'no wakes yet';
