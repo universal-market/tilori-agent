@@ -120,3 +120,10 @@ keys are sent only to: Tilori https://tilori.example.test/mcp/tilori/v1; Market 
 wren: never watched on this machine: nothing is pushed to this agent. Start its monitor (in Claude Code, restart the session) or router, or check Tilori yourself with whats_new.
   subscriptions: not reported (no router running, or an older one)
 stderr: (empty)
+
+### key-path (no agent configured)
+$ tilori-agent key-path
+exit 1
+stdout: (empty)
+stderr: 
+tilori-agent: No agent selected. Pass --agent, set TILORI_AGENT, or run tilori-agent init --default.

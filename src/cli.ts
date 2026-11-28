@@ -61,6 +61,7 @@ import { configurePluginWithClaude, readPluginConfigFromClaude, runConnect } fro
 import { claudeBinary, syncPlugin, syncPluginAfterSave } from './plugin-sync.ts';
 
 export { claudeBinary } from './plugin-sync.ts';
+import { hostText } from './host-text.ts';
 import { exitWhenOrphaned, marketLane, runNotifyLines, signalDir } from './watch.ts';
 import {
   BODY_MAX_BYTES,
@@ -81,6 +82,8 @@ import {
 } from './thread-post.ts';
 
 export { THREAD_MAX_ANCESTORS, THREAD_MAX_BODY_BYTES, THREAD_MAX_POSTS, THREAD_MAX_TITLE_BYTES, THREAD_MAX_TOTAL_BYTES };
+
+const t = hostText();
 
 const USAGE = `tilori-agent: wake local coding agents on Tilori events
 
@@ -120,7 +123,7 @@ Usage:
       old deployment's Market URL.
   tilori-agent connect --url <tilori-mcp-url> [--market-url <market-mcp-url>] [--replace]
       Sets this machine up for the agent whose key is on stdin, on that
-      deployment (such as a workspace), for plain \`claude\` with the Universal Market
+      deployment (such as a workspace), for ${t.usagePlainHost} with the Universal Market
       plugin. The Market address comes from --market-url, else from the
       plugin's market_url option when it isn't the production default. Both
       are checked with the key before anything is written; then the key is
@@ -131,22 +134,14 @@ Usage:
       stdin, never from argv or an existing key file.
   tilori-agent sync-plugin
       Sets the Universal Market plugin's tilori_url and market_url options to "url" and
-      "market_url" in config.json, so plain \`claude\` reaches this agent's
+      "market_url" in config.json, so ${t.usagePlainHost} reaches this agent's
       deployment, and prints what changed. It takes no arguments: config.json
       is the only source. init and setup do the same when the plugin is
       installed; this repairs options changed since. Default home only.
-      Restart Claude Code afterwards.
-  tilori-agent claude [--home <dir>] [--agent <handle>] [-- <claude args>]
-      Starts Claude Code for that Tilori home (default: this one), with its
-      "url" and "market_url" passed as launch flags, so the plugin's Tilori
-      and Market servers point at the deployment the agent was set up on,
-      whatever the plugin's own URL options say. Claude Code starts in the
-      directory this was run from ($TILORI_LAUNCH_CWD when the plugin's
-      run-agent.sh passes it). The home must be the
-      default one or listed in "homes" in ~/.config/tilori/config.json,
-      edited by hand: every command refuses a TILORI_HOME that isn't.
+      ${t.usageRestartAfter}
+${t.usageLaunchEntry}
   tilori-agent watch --notify-lines [--agent <handle>]
-      Claude Code monitor mode: one fixed wake line per wake on stdout.
+      ${t.usageWatchNotify}
       Uses the local router if it serves the agent, else polls directly.
       With a pending "setup" registration it first polls Tilori for the
       claim (every poll_after_seconds, for up to 15 minutes or until the
@@ -183,10 +178,9 @@ Usage:
       restart the router first, so it isn't polling what --prune removes.
   tilori-agent policy [--agent <handle>] [--hook]
       Prints the session's Tilori settings (agent, trusted_owners, and the optional
-      fallback coordination_community) for a session; --hook emits Claude Code
-      SessionStart hook JSON.
+      fallback coordination_community) for a session; --hook ${t.usagePolicyHook}
   tilori-agent stop-check --hook [--agent <handle>]
-      For a Claude Code Stop hook: reads the hook's JSON on stdin and, when
+      For ${t.usageStopHook}: reads the hook's JSON on stdin and, when
       owner_decision_check is on and the last message leaves an owner decision
       only in the session (no ask_owner this turn), prints one
       {"decision":"block",…} asking the agent to file it. At most one block per
@@ -197,7 +191,7 @@ Usage:
       so stop-check doesn't ask. Prints nothing and always exits 0.
   tilori-agent headers [--agent <handle>] [--server-url <url>]
       Prints {"Authorization": "Bearer …"} for an MCP headersHelper, only if the
-      requesting server URL ($CLAUDE_CODE_MCP_SERVER_URL or --server-url)
+      requesting server URL (${t.usageServerUrlEnv} or --server-url)
       matches "url" in config.json.
   tilori-agent config [show] [--agent <handle>]
   tilori-agent config set [--agent <handle>] <key>=<n> [<key>=<n> …]
@@ -208,7 +202,7 @@ Usage:
         post_wake_minutes (0-60), reminder.every_minutes (15-1440, for a reminder set up by hand),
         stall_minutes (0-1440), owner_decision_check (on|off, default off)
   tilori-agent config set trust_server=on|off
-      Owner only, through /universal-market:config: on lets the agents of every account
+      ${t.usageOwnerConfig}
       on the server in "url" give this machine's agents real work, pinned to
       that server's origin (it stops applying if "url" changes); off removes it.
       The new session note applies from the next session start.
@@ -532,10 +526,10 @@ async function launchClaude(args: Args): Promise<number> {
   const dir = str(args, 'home') || tiloriHome();
   for (const name of args.flags.keys())
     if (name !== 'home' && name !== 'agent')
-      throw new Error(`claude takes only --home and --agent; put Claude Code's own arguments after --.`);
+      throw new Error(hostText().launchFlagsError);
   for (const a of args.rest)
     if (a === '--settings' || a.startsWith('--settings='))
-      throw new Error("claude sets Claude Code's --settings itself; pass other settings in a settings file instead.");
+      throw new Error(hostText().launchSettingsError);
   const home = allowedHome(dir);
   const config = loadConfig(join(home, 'config.json'));
   const env: Record<string, string> = { TILORI_HOME: home, TILORI_MCP_URL: buildMcpUrl(config.url).toString() };
@@ -553,7 +547,7 @@ async function launchClaude(args: Args): Promise<number> {
     env: { ...inherited, ...env },
   });
   return await new Promise<number>((done, fail) => {
-    child.once('error', (cause) => fail(new Error(`Could not start claude: ${cause.message}`)));
+    child.once('error', (cause) => fail(new Error(hostText().launchStartFailed(cause.message))));
     child.once('exit', (code, sig) => done(code ?? (sig ? 1 : 0)));
   });
 }
@@ -747,7 +741,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         const config = loadConfig();
         const agent = requireAgent(config, args);
         const asked = str(args, 'server-url') ?? process.env.CLAUDE_CODE_MCP_SERVER_URL;
-        if (!asked) throw new Error('headers needs the requesting server URL (CLAUDE_CODE_MCP_SERVER_URL or --server-url).');
+        if (!asked) throw new Error(hostText().headersNeedsUrl);
         if (!config.url) throw new Error('No "url" in config.json; run tilori-agent init.');
         // Exactly "url" or "market_url" (UNI-748); a missing server URL was
         // refused above, never assumed to be either.

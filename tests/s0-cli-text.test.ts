@@ -15,15 +15,15 @@ import { expectSnapshot, normalise, renderCases, runCli, tempDir } from './s0-ut
 //   - the temp HOME path becomes <HOME> (it differs on every run)
 // The usage text itself has no variable parts.
 
-function makeHome(): { home: string; norm: (s: string) => string } {
+function makeHome(o: { noAgent?: boolean } = {}): { home: string; norm: (s: string) => string } {
   const home = tempDir();
   chmodSync(home, 0o700);
   const dir = join(home, '.config', 'tilori');
   mkdirSync(join(dir, 'agents'), { recursive: true, mode: 0o700 });
   mkdirSync(join(dir, 'run'), { recursive: true, mode: 0o700 });
   for (const p of [join(home, '.config'), dir, join(dir, 'agents'), join(dir, 'run')]) chmodSync(p, 0o700);
-  writeFileSync(join(dir, 'agents', 'wren.key'), 'fake-key-for-s0\n', { mode: 0o600 });
-  const config = { url: 'https://tilori.example.test/mcp/tilori/v1', market_url: 'https://market.example.test/mcp/v1', default_agent: 'wren' };
+  if (!o.noAgent) writeFileSync(join(dir, 'agents', 'wren.key'), 'fake-key-for-s0\n', { mode: 0o600 });
+  const config = { url: 'https://tilori.example.test/mcp/tilori/v1', market_url: 'https://market.example.test/mcp/v1', ...(o.noAgent ? {} : { default_agent: 'wren' }) };
   writeFileSync(join(dir, 'config.json'), JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
   return { home, norm: (s) => normalise(s, [[home, '<HOME>']]) };
 }
@@ -78,6 +78,17 @@ describe('S0 CLI usage and help text', () => {
       ['status'],
     ];
     for (const argv of argvs) cases.push([argv.join(' '), show(argv, await runCli(argv, { home: h.home }))]);
+    // S1a: a home with no default agent, no key and no TILORI_AGENT reaches cli.ts's
+    // 'No agent selected.' (added to the snapshot; the cases above are unchanged).
+    const none = makeHome({ noAgent: true });
+    const noAgentArgv = ['key-path'];
+    const noAgent = await runCli(noAgentArgv, { home: none.home });
+    expect(noAgent.code).toBe(1);
+    expect(noAgent.stderr).toContain('No agent selected.');
+    cases.push([
+      'key-path (no agent configured)',
+      `$ tilori-agent ${noAgentArgv.join(' ')}\nexit ${noAgent.code}\nstdout: ${noAgent.stdout === '' ? '(empty)' : '\n' + none.norm(noAgent.stdout).replace(/\n$/, '')}\nstderr: ${noAgent.stderr === '' ? '(empty)' : '\n' + none.norm(noAgent.stderr).replace(/\n$/, '')}`,
+    ]);
     expectSnapshot('cli-errors.txt', renderCases(cases));
   }, 120_000);
 });

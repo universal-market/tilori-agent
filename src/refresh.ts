@@ -28,6 +28,7 @@ import {
   type HttpOptions,
   type PendingRegistration,
 } from './setup.ts';
+import { hostText } from './host-text.ts';
 
 /**
  * `tilori-agent setup <handle> --refresh` (UNI-938; server UNI-937, design
@@ -80,7 +81,7 @@ export function refreshPath(handle: string): string {
 }
 
 export const REFRESH_LINES = {
-  noKey: (handle: string) => `@${handle} has no key here to refresh. Run /universal-market:setup ${handle} to connect it first.`,
+  noKey: (handle: string) => hostText().refreshNoKey(handle),
   unfinished: (handle: string) =>
     `An earlier key refresh for @${handle} hasn't finished. It finishes when the next session with the Tilori plugin starts; start one, then try again.`,
   /** Names the link's host: it may be the web site, not the API (Bastion aaa9f925). */
@@ -94,19 +95,16 @@ export const REFRESH_LINES = {
   oldMayLive: (handle: string) =>
     `@${handle} now uses its new key, but the old key may still be active. Revoke it under Account → Agents.`,
   /** The new key failed its check: the old key was put back. */
-  kept: (handle: string) =>
-    `The new key for @${handle} didn't work, so I kept the old one. Run /universal-market:setup --refresh ${handle} again to retry.`,
-  timeout: (handle: string) =>
-    `Didn't see an approval in 15 minutes. The link stays valid for a day: run /universal-market:setup --refresh ${handle} again to keep waiting.`,
-  expired: (handle: string) =>
-    `The approval link for @${handle} expired or was already used. Run /universal-market:setup --refresh ${handle} again.`,
+  kept: (handle: string) => hostText().refreshKept(handle),
+  timeout: (handle: string) => hostText().refreshTimeout(handle),
+  expired: (handle: string) => hostText().refreshExpired(handle),
   pending: (handle: string) =>
     `A key refresh for @${handle} is already waiting for approval, and its link isn't on this machine. It expires within a day.`,
 } as const;
 
 /** Fixed words for a refused refresh: the body is never echoed. */
 export function refreshRefusal(handle: string, status: number, code = ''): string {
-  if (status === 401) return `Tilori didn't accept @${handle}'s current key (HTTP 401${code}), so it can't be refreshed. Connect a new agent with /universal-market:setup <new-handle>.`;
+  if (status === 401) return hostText().refreshRefused401(handle, code);
   if (status === 403 && code.trim() === 'OPERATION_NOT_ALLOWED') return REFRESH_LINES.pending(handle);
   if (status === 429) return 'Tilori is rate-limiting key refreshes (3 an hour per agent); try again later.';
   if (status >= 500) return `Tilori had a server error (HTTP ${status}); try again in a minute.`;
@@ -174,7 +172,7 @@ export function readRefresh(handle: string): PendingRefresh | null {
  * key is sent, as `headers` releases it only to that server. */
 export function refreshOrigin(): URL {
   const config = loadConfig();
-  if (!config.url) throw new SetupInputError('No Tilori server in config.json; run /universal-market:setup first.');
+  if (!config.url) throw new SetupInputError(hostText().refreshNoServer);
   const origin = new URL(buildMcpUrl(config.url).origin);
   if (!allowedUrl(origin, origin)) throw new SetupInputError('The configured Tilori server is not https.');
   return origin;

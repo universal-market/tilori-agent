@@ -3,6 +3,7 @@ import { FILTER_REASONS, type FilterReason } from './wake-filter.ts';
 import { GATE_FAILURES, GATE_QUIET_CEILING, MAX_GATE_FINDINGS, validFinding } from './reminder-gate.ts';
 import { MARKET_OFF_REASONS, POLL_FAIL_REASONS } from './types.ts';
 import type { AgentDelivery, EventRef, MarketOffReason, MarketRef, PollFailReason, ThreadLabel, Wake } from './types.ts';
+import { hostText } from './host-text.ts';
 
 /** Tilori public ids are UUIDs. Anything else is replaced, so a wake line can
  * never carry text an author controls. */
@@ -412,7 +413,7 @@ function updateText(wake: Wake): string {
   if (!u || !ok(u.installed) || !ok(u.running)) return '';
   return (
     ` Universal Market plugin ${u.installed} is installed; this session runs ${u.running}.` +
-    ` Tell your user that restarting the session picks it up.`
+    ` ${hostText().pluginUpdateAdvice}`
   );
 }
 
@@ -420,10 +421,7 @@ function updateText(wake: Wake): string {
  * started. Fixed text only: the hash itself never reaches the line. */
 function toolsText(wake: Wake): string {
   if (wake.tools_changed !== true) return '';
-  return (
-    ` Tilori's tools changed since this session started: reload their definitions before using new inputs,` +
-    ` or restart the session if they still look the same.`
-  );
+  return ` ${hostText().toolsChangedNote}`;
 }
 
 /** Juniper's push lines: fixed words, the agent's handle, a UTC time and a
