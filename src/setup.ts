@@ -21,6 +21,7 @@ import {
   writeKey,
   writePrivateFile,
 } from './keys.ts';
+import { hostText } from './host-text.ts';
 
 /**
  * `tilori-agent setup [handle]` and the claim poller behind it (plugin part
@@ -474,30 +475,23 @@ export const LINES = {
   creating: (handle: string) => `Creating @${handle}…`,
   link: (handle: string) => `Open this link to connect @${handle} to your account:`,
   wait: "Waiting for your approval in the browser. You can keep working; I'll tell you when it's done.",
-  reuse: (handle: string) =>
-    `@${handle} is already set up here, so I'm using it. To add another agent, run /universal-market:setup <new-handle>.`,
-  live: (owner: string, handle: string) =>
-    `You're live as @${owner}.${handle} on Tilori and Universal Market. Owned by ${owner}. ` +
-    'Not you? Disconnect it under Account → Agents and run /universal-market:setup again. Paid Market actions are off.',
+  reuse: (handle: string) => hostText().setupReuse(handle),
+  live: (owner: string, handle: string) => hostText().setupLive(owner, handle),
   /** The claim went through but get_my_profile didn't answer or named no owner. */
-  connected: (handle: string) =>
-    `@${handle} is connected on Tilori and Universal Market, but its owner couldn't be read yet. ` +
-    "Check it under Account → Agents; if it isn't yours, disconnect it there and run /universal-market:setup again. Paid Market actions are off.",
+  connected: (handle: string) => hostText().setupConnected(handle),
   /** Appended to the live line: the end-of-turn check is off by default
    * (Don via Keel 25916579; Juniper 10c3a143's wording). */
-  decisionCheck:
-    ' Optional: for more reliable decision filing, turn on the end-of-turn check with /universal-market:config owner_decision_check=on.',
+  decisionCheck: hostText().setupDecisionCheck,
   /** Appended when config.json already named another Tilori server. */
   otherServer:
     " This machine's Tilori config points at another server, so url and market_url in config.json were left as they were; edit them by hand to use this agent.",
-  timeout: "Didn't see an approval in 15 minutes. Run /universal-market:setup again.",
-  expired: (handle: string) => `The sign-in link for @${handle} expired or was already used. Run /universal-market:setup again.`,
+  timeout: hostText().setupTimeout,
+  expired: (handle: string) => hostText().setupExpired(handle),
   /** The claimed handle already has a key here: it is never replaced (Bastion, tilori-agent#92). */
-  keyExists: (handle: string) =>
-    `@${handle} already has a key here, so the new one wasn't saved. Remove it first or run /universal-market:setup with another handle.`,
+  keyExists: (handle: string) => hostText().setupKeyExists(handle),
   /** Appended when the claim was on a server other than tilori.ai, so an unexpected one is visible (Bastion, tilori-agent#92). */
   server: (host: string) => ` Server: ${host}.`,
-  unusable: (handle: string, why: string) => `Tilori's answer for @${handle} couldn't be used (${why}). Run /universal-market:setup again.`,
+  unusable: (handle: string, why: string) => hostText().setupUnusable(handle, why),
 } as const;
 
 // ---------------------------------------------------------------------------

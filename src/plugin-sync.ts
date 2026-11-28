@@ -3,6 +3,7 @@ import { accessSync, constants, statSync } from 'node:fs';
 import { delimiter, isAbsolute, join } from 'node:path';
 import { buildMarketUrl, buildMcpUrl, sameEndpoint, type TiloriConfig } from './config.ts';
 import { isOtherHome, tiloriHome } from './keys.ts';
+import { hostText } from './host-text.ts';
 
 /**
  * The Universal Market plugin's two address options, `tilori_url` and `market_url`
@@ -66,7 +67,7 @@ export function claudeBinary(path = process.env.PATH ?? ''): string {
       // Not here.
     }
   }
-  throw new Error('Could not start claude: no claude executable in an absolute PATH directory.');
+  throw new Error(hostText().noLauncherBinary);
 }
 
 /** Runs `claude plugin configure <plugin> …` from `/` with `input` on
@@ -172,17 +173,14 @@ function matches(current: string | undefined, wanted: string): boolean {
 }
 
 export const SYNC_LINES = {
-  otherHome: (home: string) =>
-    `The Universal Market plugin's options serve the default Tilori home, and this is ${home}. Start this home's sessions with \`sh ${LAUNCHER} claude --home ${home}\` instead; it passes this home's URLs to Claude Code.`,
-  unread:
-    "Couldn't read the Universal Market plugin's options. Is Claude Code installed, with the Universal Market plugin? Install it, then run this again.",
-  byHand: (values: PluginValues) =>
-    `Couldn't set the Universal Market plugin's options. Run this in a terminal, then restart Claude Code:\n  echo '${JSON.stringify(values).replaceAll("'", `'\\''`)}' | claude plugin configure ${PLUGIN_ID} --values-stdin`,
+  otherHome: (home: string) => hostText().syncOtherHome(home, LAUNCHER),
+  unread: hostText().syncUnread,
+  byHand: (values: PluginValues) => hostText().syncByHand(JSON.stringify(values).replaceAll("'", `'\\''`), PLUGIN_ID),
   same: 'The Universal Market plugin already uses the URLs in config.json; nothing to change.',
   changed: (name: OptionName, from: string, to: string) => `${name}: ${from} → ${to}`,
   unchanged: (name: OptionName) => `${name} unchanged`,
   noMarket: 'market_url: config.json has none, so the option was left as it is.',
-  restart: 'Restart Claude Code (quit, then run claude again) to use them.',
+  restart: hostText().syncRestart,
 };
 
 /**

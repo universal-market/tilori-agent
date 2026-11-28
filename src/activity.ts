@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path';
 import { socketPath } from './ipc.ts';
 import { HANDLE_RE, validateHandle } from './keys.ts';
 import type { PushState, PushStatus } from './push.ts';
+import { hostText } from './host-text.ts';
 
 /**
  * Whether a session is stuck on a prompt (S1). The host plugin's hooks touch
@@ -285,8 +286,7 @@ export function ago(ms: number, now = Date.now()): string {
   return `${now - ms < 60_000 ? 'just now' : `${span(now - ms)} ago`} (${at(ms, now)})`;
 }
 
-const START_IT =
-  'nothing is pushed to this agent. Start its monitor (in Claude Code, restart the session) or router, or check Tilori yourself with whats_new.';
+const START_IT = hostText().startItAdvice;
 const CHECK = "check the agent's key and network (the tilori-agent log says which).";
 const FAILING = `a monitor or router is running, but its polls are failing; ${CHECK}`;
 

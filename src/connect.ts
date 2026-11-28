@@ -4,6 +4,7 @@ import { isUnauthorized, KeyRejected, TiloriAgentClient } from './client.ts';
 import { buildMarketUrl, buildMcpUrl, configPath, coordinationPolicy, loadConfig, sameEndpoint, saveConfig } from './config.ts';
 import { tiloriHome, validateHandle, writeKey } from './keys.ts';
 import { LAUNCHER, PLUGIN_ID, type PluginConfig } from './plugin-sync.ts';
+import { hostText } from './host-text.ts';
 
 export { configurePluginWithClaude, LAUNCHER, PLUGIN_ID, readPluginConfigFromClaude, type PluginConfig } from './plugin-sync.ts';
 
@@ -55,10 +56,8 @@ export function shellWord(v: string): string {
 }
 
 export const CONNECT_LINES = {
-  noKey:
-    'No agent key on stdin. Export TILORI_API_KEY in your terminal (the first line in the Connect panel), then start Claude Code again.',
-  noMarket:
-    "Run step 1 in the workspace's Connect panel first (the line with `claude plugin configure`), then try again.",
+  noKey: hostText().connectNoKey,
+  noMarket: hostText().connectNoMarket,
   refuseOther: (current: string, wanted: string, url: string, market: string, old: string | undefined) =>
     `This computer is set up for ${current}. To switch it to ${wanted}, run this in a terminal: ` +
     `${LAUNCHER} connect --url ${shellWord(url)} --market-url ${shellWord(market)} --replace` +
@@ -66,9 +65,9 @@ export const CONNECT_LINES = {
   connected: (tag: string, where: string) => `✓ Connected ${tag} to ${where}.`,
   trustedCarried: (names: string[], host: string, path: string) =>
     `Trusted owners carried over: ${names.join(', ')}. They may be different people on ${host}; edit trusted_owners in ${path} if not.`,
-  restart: ['Quit Claude Code, then start it again without the key:', '  unset TILORI_API_KEY', '  claude'],
+  restart: hostText().connectRestart,
   configureByHand: (values: { tilori_url: string; market_url: string }) =>
-    `Couldn't set the plugin's addresses. Run this in a terminal, then start Claude Code again:\n  echo ${shellWord(JSON.stringify(values))} | claude plugin configure ${PLUGIN_ID} --values-stdin`,
+    hostText().connectByHand(shellWord(JSON.stringify(values)), PLUGIN_ID),
 };
 
 /** Why a key check failed, naming only the host and the kind of failure. */

@@ -1,5 +1,6 @@
 import { closeSync, constants, fstatSync, openSync, readSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { hostText } from './host-text.ts';
 
 /**
  * UNI-865 phase 0 (Bastion 56d30062, 47ba6d6e). The plugin marks its Market
@@ -30,7 +31,7 @@ export const PAIRED_HIDDEN_TOOLS = [
   'revoke_key',
 ] as const;
 
-const PREFIX = 'mcp__plugin_universal-market_';
+const PREFIX = hostText().toolPrefix;
 const MAX_SETTINGS_BYTES = 1_000_000;
 
 export interface PermissionRules {
@@ -135,12 +136,7 @@ export function uncoveredTools(rules: PermissionRules): string[] {
 /** One fixed line, or null. Only tool names from the fixed list appear. */
 export function ruleWarning(tools: readonly string[]): string | null {
   if (!tools.length) return null;
-  return (
-    `Universal Market plugin: a Claude Code deny or ask rule covers the Market copy of ${tools.join(', ')}, ` +
-    `but sessions now use the Tilori copy of these tools, which that rule does not cover. ` +
-    `To keep the rule, add the same rule for ${PREFIX}tilori__<tool> (or ${PREFIX}tilori__*) in your Claude Code settings. ` +
-    `Nothing was changed in your settings.`
-  );
+  return hostText().ruleWarning(tools.join(', '), PREFIX);
 }
 
 export function checkRules(env: NodeJS.ProcessEnv): string | null {
