@@ -1,0 +1,29 @@
+### Tilori server
+exit 0
+stdout: 
+{"Authorization":"Bearer fake-key-for-s0"}
+stderr: (empty)
+
+### Market server
+exit 0
+stdout: 
+{"Authorization":"Bearer fake-key-for-s0"}
+stderr: (empty)
+
+### server from CLAUDE_CODE_MCP_SERVER_URL
+exit 0
+stdout: 
+{"Authorization":"Bearer fake-key-for-s0"}
+stderr: (empty)
+
+### a server config.json does not name: refused
+exit 1
+stdout: (empty)
+stderr: 
+tilori-agent: Refusing: the MCP server URL matches neither "url" nor "market_url" in config.json.
+
+### no server url: refused
+exit 1
+stdout: (empty)
+stderr: 
+tilori-agent: headers needs the requesting server URL (CLAUDE_CODE_MCP_SERVER_URL or --server-url).

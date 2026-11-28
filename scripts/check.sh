@@ -26,6 +26,7 @@ refused() {
 refused . ./tests
 refused tests ./core.test.ts
 refused / "$PWD/tests/core.test.ts"
+echo "== bundle (builds src/cli.ts, runs the S0 CLI snapshots against it)"; BUN="$BUN" sh scripts/bundle-check.sh
 echo "== hostile cwd"; PATH="$(dirname "$BUN"):$PATH" sh tests/hostile-cwd.sh
 echo "== old plugin names"
 # UNI-874 step 5 (Don): the plugin is universal-market now, with no

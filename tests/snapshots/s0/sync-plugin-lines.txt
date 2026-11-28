@@ -1,0 +1,28 @@
+### otherHome
+The Universal Market plugin's options serve the default Tilori home, and this is /home/example/.config/tilori-other. Start this home's sessions with `sh ~/.claude/plugins/data/universal-market-tilori-claude/tilori-agent claude --home /home/example/.config/tilori-other` instead; it passes this home's URLs to Claude Code.
+
+### unread
+Couldn't read the Universal Market plugin's options. Is Claude Code installed, with the Universal Market plugin? Install it, then run this again.
+
+### byHand
+Couldn't set the Universal Market plugin's options. Run this in a terminal, then restart Claude Code:
+  echo '{"tilori_url":"https://tilori.example.test/mcp/tilori/v1","market_url":"https://market.example.test/mcp/v1"}' | claude plugin configure universal-market@tilori-claude --values-stdin
+
+### byHand with a quote
+Couldn't set the Universal Market plugin's options. Run this in a terminal, then restart Claude Code:
+  echo '{"tilori_url":"https://x.example.test/it'\''s"}' | claude plugin configure universal-market@tilori-claude --values-stdin
+
+### same
+The Universal Market plugin already uses the URLs in config.json; nothing to change.
+
+### changed
+tilori_url: https://old.example.test/mcp/tilori/v1 → https://tilori.example.test/mcp/tilori/v1
+
+### unchanged
+market_url unchanged
+
+### noMarket
+market_url: config.json has none, so the option was left as it is.
+
+### restart
+Restart Claude Code (quit, then run claude again) to use them.

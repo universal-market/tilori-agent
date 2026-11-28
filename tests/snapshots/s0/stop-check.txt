@@ -1,0 +1,69 @@
+### Stop hook, last_assistant_message asks: block
+exit 0
+stderr: (empty)
+keys: ["decision","reason"]; one compact line: true
+parsed:
+{
+  "decision": "block",
+  "reason": "Your last message asks your owner for a decision, but no owner request was filed this turn. If only your owner can decide it, check list_owner_requests and file it with ask_owner; put several related decisions in one request with questions. Cite the request id in your message. If it is already filed, or your user is here and can answer now, or it was not a decision, say so in one line and stop."
+}
+
+### Stop hook, message read from the transcript: block
+exit 0
+stderr: (empty)
+keys: ["decision","reason"]; one compact line: true
+parsed:
+{
+  "decision": "block",
+  "reason": "Your last message asks your owner for a decision, but no owner request was filed this turn. If only your owner can decide it, check list_owner_requests and file it with ask_owner; put several related decisions in one request with questions. Cite the request id in your message. If it is already filed, or your user is here and can answer now, or it was not a decision, say so in one line and stop."
+}
+
+### Stop hook, message does not ask: nothing
+exit 0
+stdout: (empty)
+stderr: (empty)
+
+### Stop hook, stop_hook_active: nothing
+exit 0
+stdout: (empty)
+stderr: (empty)
+
+### Stop hook, owner_decision_check off: nothing
+exit 0
+stdout: (empty)
+stderr: (empty)
+
+### Stop hook, agent cannot ask_owner: nothing
+exit 0
+stdout: (empty)
+stderr: (empty)
+
+### Stop hook, no caps file: nothing
+exit 0
+stdout: (empty)
+stderr: (empty)
+
+### Stop hook, stdin is not JSON: nothing, exit 0
+exit 0
+stdout: (empty)
+stderr: (empty)
+
+### Stop hook, no flag: nothing, exit 0
+exit 0
+stdout: (empty)
+stderr: (empty)
+
+### Stop hook, bad flag: nothing, exit 0
+exit 0
+stdout: (empty)
+stderr: (empty)
+
+### second block inside the cooldown: nothing
+exit 0
+stdout: (empty)
+stderr: (empty)
+
+### PostToolUse ask_owner, then Stop: --asked prints nothing and the turn is not blocked
+exit 0
+stdout: (empty)
+stderr: (empty)

@@ -1,0 +1,170 @@
+### read: argv, stdin empty, cwd /
+result: {"market_url":"https://market.example.test/mcp/v1","market_default":"https://prod.example.test/mcp/v1","tilori_url":"https://tilori.example.test/mcp/tilori/v1","tilori_default":"https://prod.example.test/mcp/tilori/v1"}
+argv:
+  [plugin]
+  [configure]
+  [universal-market@tilori-claude]
+  [--json]
+cwd: /
+stdin: 
+--
+
+### read: nothing set, defaults from the schema
+result: {"market_default":"https://prod.example.test/mcp/v1","tilori_default":"https://prod.example.test/mcp/tilori/v1"}
+argv:
+  [plugin]
+  [configure]
+  [universal-market@tilori-claude]
+  [--json]
+cwd: /
+stdin: 
+--
+
+### read: not JSON gives null
+result: null
+argv:
+  [plugin]
+  [configure]
+  [universal-market@tilori-claude]
+  [--json]
+cwd: /
+stdin: 
+--
+
+### read: claude exits 3 gives null
+result: null
+argv:
+  [plugin]
+  [configure]
+  [universal-market@tilori-claude]
+  [--json]
+cwd: /
+stdin: 
+--
+
+### configure both: stdin is the JSON of the values
+result: null
+argv:
+  [plugin]
+  [configure]
+  [universal-market@tilori-claude]
+  [--values-stdin]
+cwd: /
+stdin: {"tilori_url":"https://tilori.example.test/mcp/tilori/v1","market_url":"https://market.example.test/mcp/v1"}
+--
+
+### configure one option
+result: null
+argv:
+  [plugin]
+  [configure]
+  [universal-market@tilori-claude]
+  [--values-stdin]
+cwd: /
+stdin: {"market_url":"https://market.example.test/mcp/v1"}
+--
+
+### configure: claude exits 3 gives "failed"
+result: "failed"
+argv:
+  [plugin]
+  [configure]
+  [universal-market@tilori-claude]
+  [--values-stdin]
+cwd: /
+stdin: {"tilori_url":"https://tilori.example.test/mcp/tilori/v1"}
+--
+
+### sync: both drifted, one read then one configure with both
+result: {"code":0,"lines":["tilori_url: https://old.example.test/mcp/tilori/v1 → https://tilori.example.test/mcp/tilori/v1","market_url: https://old.example.test/mcp/v1 → https://market.example.test/mcp/v1","Restart Claude Code (quit, then run claude again) to use them."],"changed":true}
+argv:
+  [plugin]
+  [configure]
+  [universal-market@tilori-claude]
+  [--json]
+cwd: /
+stdin: 
+--
+argv:
+  [plugin]
+  [configure]
+  [universal-market@tilori-claude]
+  [--values-stdin]
+cwd: /
+stdin: {"tilori_url":"https://tilori.example.test/mcp/tilori/v1","market_url":"https://market.example.test/mcp/v1"}
+--
+
+### sync: already in step, read only, no configure
+result: {"code":0,"lines":["The Universal Market plugin already uses the URLs in config.json; nothing to change."],"changed":false}
+argv:
+  [plugin]
+  [configure]
+  [universal-market@tilori-claude]
+  [--json]
+cwd: /
+stdin: 
+--
+
+### sync: only market_url drifted, configure sends only that option
+result: {"code":0,"lines":["tilori_url unchanged","market_url: https://prod.example.test/mcp/v1 → https://market.example.test/mcp/v1","Restart Claude Code (quit, then run claude again) to use them."],"changed":true}
+argv:
+  [plugin]
+  [configure]
+  [universal-market@tilori-claude]
+  [--json]
+cwd: /
+stdin: 
+--
+argv:
+  [plugin]
+  [configure]
+  [universal-market@tilori-claude]
+  [--values-stdin]
+cwd: /
+stdin: {"market_url":"https://market.example.test/mcp/v1"}
+--
+
+### sync: config has no market_url, option left alone
+result: {"code":0,"lines":["The Universal Market plugin already uses the URLs in config.json; nothing to change."],"changed":false}
+argv:
+  [plugin]
+  [configure]
+  [universal-market@tilori-claude]
+  [--json]
+cwd: /
+stdin: 
+--
+
+### sync: config has no url, claude never run
+result: {"code":2,"lines":["No \"url\" in config.json; run tilori-agent init --url <tilori-mcp-url> first."],"changed":false}
+
+
+### sync: claude cannot be read
+result: {"code":1,"lines":["Couldn't read the Universal Market plugin's options. Is Claude Code installed, with the Universal Market plugin? Install it, then run this again."],"changed":false}
+argv:
+  [plugin]
+  [configure]
+  [universal-market@tilori-claude]
+  [--json]
+cwd: /
+stdin: 
+--
+
+### sync: configure refused, by-hand line
+result: {"code":1,"lines":["Couldn't set the Universal Market plugin's options. Run this in a terminal, then restart Claude Code:\n  echo '{\"tilori_url\":\"https://tilori.example.test/mcp/tilori/v1\",\"market_url\":\"https://market.example.test/mcp/v1\"}' | claude plugin configure universal-market@tilori-claude --values-stdin"],"changed":false}
+argv:
+  [plugin]
+  [configure]
+  [universal-market@tilori-claude]
+  [--json]
+cwd: /
+stdin: 
+--
+argv:
+  [plugin]
+  [configure]
+  [universal-market@tilori-claude]
+  [--values-stdin]
+cwd: /
+stdin: {"tilori_url":"https://tilori.example.test/mcp/tilori/v1","market_url":"https://market.example.test/mcp/v1"}
+--

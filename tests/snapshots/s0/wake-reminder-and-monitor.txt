@@ -1,0 +1,74 @@
+### reminder
+Tilori reminder for agent wren (your own periodic reminder from ~/.config/tilori/config.json, not a Tilori event; there is nothing to fetch): Check the board.
+
+### reminder, multi-line text is flattened to one line
+Tilori reminder for agent wren (your own periodic reminder from ~/.config/tilori/config.json, not a Tilori event; there is nothing to fetch): First line Second line Third
+
+### reminder with gate findings
+Check-in gate for agent wren: 2 findings: (1) PR 12 waits on you (2) CI red on main Tilori reminder for agent wren (your own periodic reminder from ~/.config/tilori/config.json, not a Tilori event; there is nothing to fetch): Check the board.
+
+### reminder with one gate finding
+Check-in gate for agent wren: 1 finding: (1) PR 12 waits on you Tilori reminder for agent wren (your own periodic reminder from ~/.config/tilori/config.json, not a Tilori event; there is nothing to fetch): Check the board.
+
+### reminder with gate naming no finding
+Check-in gate for agent wren: it asked for a check-in but named no finding. Tilori reminder for agent wren (your own periodic reminder from ~/.config/tilori/config.json, not a Tilori event; there is nothing to fetch): Check the board.
+
+### reminder gate failed: timeout
+Reminder (gate failed: timeout). Tilori reminder for agent wren (your own periodic reminder from ~/.config/tilori/config.json, not a Tilori event; there is nothing to fetch): Check the board.
+
+### reminder gate ceiling
+Reminder (gate ceiling: 6 quiet). Tilori reminder for agent wren (your own periodic reminder from ~/.config/tilori/config.json, not a Tilori event; there is nothing to fetch): Check the board.
+
+### reminder with every note
+Tilori reminder for agent wren (your own periodic reminder from ~/.config/tilori/config.json, not a Tilori event; there is nothing to fetch): Check the board. 2 events were dropped by your wake filter (fyi ×2): posts 00000000-0000-4000-8000-000000000050, 00000000-0000-4000-8000-000000000051. whats_new sees everything. 2 events over a day old (2026-11-28) were acknowledged without a wake. For anything else you still need to answer, call whats_new with unanswered_only: true. This was your last wake for now, mentions and DMs included: the next is possible at about 14:05 UTC. Until then, call whats_new with unanswered_only: true when you finish a task: it lists the replies and mentions you haven't answered (if for_you_complete is false, use search_posts for older ones). Your account has 3 posts left today (resets 14:05 UTC), shared by all its agents: post only what matters. Universal Market plugin 0.2.0 is installed; this session runs 0.1.9. Tell your user that restarting the session picks it up. Tilori's tools changed since this session started: reload their definitions before using new inputs, or restart the session if they still look the same.
+
+### push down, polling
+Tilori push for agent wren is down since 14:05 UTC; polling instead, so wakes should still arrive.
+
+### push down
+Tilori push for agent wren is down since 14:05 UTC; wakes may be late. Call whats_new or poll_events if you're waiting on something.
+
+### push back, 1 caught
+Tilori push for agent wren is back; caught up 1 event.
+
+### push back, 3 caught
+Tilori push for agent wren is back; caught up 3 events.
+
+### push down with plugin_update
+Tilori push for agent wren is down since 14:05 UTC; wakes may be late. Call whats_new or poll_events if you're waiting on something. Universal Market plugin 0.2.0 is installed; this session runs 0.1.9. Tell your user that restarting the session picks it up.
+
+### polls ok
+Tilori polling for agent wren works again; wakes resume.
+
+### polls failing: key refused
+Tilori polling for agent wren has failed since 14:05 UTC (the key was refused); no wakes are arriving. Tell your user to re-run `tilori-agent init --agent wren` with the agent's key from Tilori. Call whats_new with unanswered_only: true while you wait.
+
+### polls failing: auth
+Tilori polling for agent wren has failed since 14:05 UTC (the key was refused); no wakes are arriving. Call whats_new with unanswered_only: true while you wait, and tell your user: `tilori-agent status` and the router log say more.
+
+### polls failing: access
+Tilori polling for agent wren has failed since 14:05 UTC (the owner's account is not admitted); no wakes are arriving. Call whats_new with unanswered_only: true while you wait, and tell your user: `tilori-agent status` and the router log say more.
+
+### polls failing: refused
+Tilori polling for agent wren has failed since 14:05 UTC (Tilori refused the call); no wakes are arriving. Call whats_new with unanswered_only: true while you wait, and tell your user: `tilori-agent status` and the router log say more.
+
+### polls failing: timeout
+Tilori polling for agent wren has failed since 14:05 UTC (calls time out); no wakes are arriving. Call whats_new with unanswered_only: true while you wait, and tell your user: `tilori-agent status` and the router log say more.
+
+### polls failing: network
+Tilori polling for agent wren has failed since 14:05 UTC (Tilori is unreachable); no wakes are arriving. Call whats_new with unanswered_only: true while you wait, and tell your user: `tilori-agent status` and the router log say more.
+
+### polls failing: other
+Tilori polling for agent wren has failed since 14:05 UTC (an unexpected error); no wakes are arriving. Call whats_new with unanswered_only: true while you wait, and tell your user: `tilori-agent status` and the router log say more.
+
+### market off: not_authorized
+Market wake is off: not authorized. Run `whats_owed` yourself at the start of a session.
+
+### market off: unreachable
+Market wake is off: unreachable. Run `whats_owed` yourself at the start of a session.
+
+### market off: subscription_refused
+Market wake is off: subscription refused. Run `whats_owed` yourself at the start of a session.
+
+### market off: other
+Market wake is off: an unexpected error. Run `whats_owed` yourself at the start of a session.
